@@ -129,7 +129,10 @@ pub fn recv_with_fds(
         return Err(io::Error::last_os_error());
     }
     let n = n as usize;
-    if n == 0 && msg.msg_controllen == 0 {
+    // On a stream socket a zero-length read is EOF: the kernel does NOT reset
+    // msg_controllen when there is no data (it leaves our pre-set buffer size),
+    // so a control-length check would misclassify EOF as an empty frame.
+    if n == 0 {
         return Ok(None); // peer closed
     }
 

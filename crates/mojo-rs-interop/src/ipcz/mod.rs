@@ -7,4 +7,5 @@
 
 #![deny(missing_docs)]
 
+pub mod messages;
 pub mod wire;

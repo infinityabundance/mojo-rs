@@ -27,10 +27,10 @@ index 0000000000..91f5227bfe
 +}
 diff --git a/oracle_driver/oracle_driver.cc b/oracle_driver/oracle_driver.cc
 new file mode 100644
-index 0000000000..a013b92bc3
+index 0000000000..b5373dd1f4
 --- /dev/null
 +++ b/oracle_driver/oracle_driver.cc
-@@ -0,0 +1,870 @@
+@@ -0,0 +1,1167 @@
 +// mojo_rs_oracle_driver — the oracle-side harness.
 +//
 +// Executes casefiles against the OFFICIAL pinned Mojo C API and emits events
@@ -53,6 +53,9 @@ index 0000000000..a013b92bc3
 +#include <sys/stat.h>
 +#include <unistd.h>
 +
++#include <cerrno>
++#include <cstring>
++
 +#include <cstdint>
 +#include <fstream>
 +#include <map>
@@ -60,13 +63,20 @@ index 0000000000..a013b92bc3
 +#include <string>
 +#include <vector>
 +
++#include "base/at_exit.h"
++#include "base/command_line.h"
 +#include "base/json/json_reader.h"
 +#include "base/json/json_writer.h"
 +#include "base/logging.h"
++#include "base/task/single_thread_task_executor.h"
++#include "base/threading/thread.h"
 +#include "base/time/time.h"
 +#include "base/values.h"
++#include "mojo/core/embedder/configuration.h"
 +#include "mojo/core/embedder/embedder.h"
++#include "mojo/core/embedder/scoped_ipc_support.h"
 +#include "mojo/public/c/system/functions.h"
++#include "mojo/public/c/system/invitation.h"
 +#include "mojo/public/c/system/message_pipe.h"
 +#include "mojo/public/c/system/platform_handle.h"
 +#include "mojo/public/c/system/trap.h"
@@ -787,9 +797,297 @@ index 0000000000..a013b92bc3
 +  return MOJO_RESULT_OK;
 +}
 +
++// ---------------------------------------------------------------------------
++// Cross-process invitation modes (Phase 3 bootstrap).
++//
++//   invite-broker  <socket-fd> <events.jsonl>
++//   invite-acceptor <socket-fd> <events.jsonl>
++//
++// The broker and acceptor run the OFFICIAL invitation flow over a Unix
++// socketpair: the broker (initialized as the ipcz broker) creates an
++// invitation, attaches a message pipe named "bootstrap", and sends it over
++// the socket; the acceptor accepts and extracts the pipe. They then exchange
++// one message plus one wrapped platform descriptor in each direction over the
++// bootstrap pipe.
++// ---------------------------------------------------------------------------
++
++namespace invite {
++
++// Build the invitation transport endpoint for a socket fd. The platform
++// handle must outlive the endpoint; a static is safe because the driver runs
++// one invitation flow per process.
++MojoInvitationTransportEndpoint SocketEndpoint(int fd) {
++  static MojoPlatformHandle platform_handle = {
++      sizeof(MojoPlatformHandle), MOJO_PLATFORM_HANDLE_TYPE_FILE_DESCRIPTOR, 0};
++  platform_handle.value = static_cast<uint64_t>(fd);
++  MojoInvitationTransportEndpoint endpoint = {
++      sizeof(MojoInvitationTransportEndpoint), MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL,
++      1, &platform_handle};
++  return endpoint;
++}
++
++// Send a payload plus a wrapped memfd on a message pipe.
++MojoResult SendPayloadWithFd(MojoHandle pipe,
++                             const std::string& payload,
++                             const std::string& fd_content) {
++  int fd = memfd_create("oracle-invite", 0);
++  if (fd < 0) {
++    return MOJO_RESULT_RESOURCE_EXHAUSTED;
++  }
++  if (!fd_content.empty()) {
++    (void)!write(fd, fd_content.data(), fd_content.size());
++  }
++  MojoPlatformHandle platform = {sizeof(MojoPlatformHandle),
++                                 MOJO_PLATFORM_HANDLE_TYPE_FILE_DESCRIPTOR,
++                                 static_cast<uint64_t>(fd)};
++  MojoHandle wrapped;
++  MojoResult r = MojoWrapPlatformHandle(&platform, nullptr, &wrapped);
++  if (r != MOJO_RESULT_OK) {
++    close(fd);
++    return r;
++  }
++
++  MojoMessageHandle message;
++  r = MojoCreateMessage(nullptr, &message);
++  if (r != MOJO_RESULT_OK) {
++    return r;
++  }
++  void* buffer = nullptr;
++  uint32_t buffer_size = 0;
++  r = MojoAppendMessageData(message, static_cast<uint32_t>(payload.size()), &wrapped, 1,
++                            nullptr, &buffer, &buffer_size);
++  if (r == MOJO_RESULT_OK && !payload.empty()) {
++    memcpy(buffer, payload.data(), payload.size());
++  }
++  if (r == MOJO_RESULT_OK) {
++    r = MojoWriteMessage(pipe, message, nullptr);
++  } else {
++    MojoDestroyMessage(message);
++  }
++  return r;
++}
++
++// Receive a payload plus an attached fd on a message pipe; fills `payload`
++// and reads the descriptor's content into `fd_content`. Polls on
++// MOJO_RESULT_SHOULD_WAIT (ipcz reads are non-blocking) up to a 10s deadline.
++MojoResult RecvPayloadWithFd(MojoHandle pipe,
++                             std::string* payload,
++                             std::string* fd_content) {
++  MojoMessageHandle message;
++  MojoResult r = MOJO_RESULT_SHOULD_WAIT;
++  const base::TimeTicks deadline = base::TimeTicks::Now() + base::Seconds(10);
++  while (r == MOJO_RESULT_SHOULD_WAIT && base::TimeTicks::Now() < deadline) {
++    r = MojoReadMessage(pipe, nullptr, &message);
++    if (r == MOJO_RESULT_SHOULD_WAIT) {
++      usleep(1000);
++    }
++  }
++  if (r != MOJO_RESULT_OK) {
++    return r;
++  }
++  uint32_t num_bytes = 0;
++  uint32_t num_handles = 0;
++  void* buffer = nullptr;
++  r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes, nullptr, &num_handles);
++  std::vector<MojoHandle> handles;
++  if (r == MOJO_RESULT_RESOURCE_EXHAUSTED && num_handles > 0) {
++    handles.resize(num_handles);
++    r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes, handles.data(),
++                           &num_handles);
++  }
++  if (r == MOJO_RESULT_OK) {
++    payload->assign(static_cast<const char*>(buffer), num_bytes);
++    if (!handles.empty()) {
++      MojoPlatformHandle platform = {sizeof(MojoPlatformHandle),
++                                     MOJO_PLATFORM_HANDLE_TYPE_INVALID, 0};
++      MojoResult u = MojoUnwrapPlatformHandle(handles[0], nullptr, &platform);
++      if (u == MOJO_RESULT_OK &&
++          platform.type == MOJO_PLATFORM_HANDLE_TYPE_FILE_DESCRIPTOR) {
++        int fd = static_cast<int>(platform.value);
++        lseek(fd, 0, SEEK_SET);
++        char buf[4096];
++        ssize_t n;
++        while ((n = read(fd, buf, sizeof(buf))) > 0) {
++          fd_content->append(buf, n);
++        }
++        close(fd);
++      }
++    }
++  }
++  MojoDestroyMessage(message);
++  return r;
++}
++
++int RunBroker(int socket_fd, const char* events_path) {
++  struct stat st;
++  if (fstat(socket_fd, &st) != 0) {
++    fprintf(stderr, "broker: fstat(%d) failed: %s\n", socket_fd,
++            strerror(errno));
++    return 1;
++  }
++  fprintf(stderr, "broker: fd %d is_socket=%d\n", socket_fd, S_ISSOCK(st.st_mode));
++  mojo::core::Configuration config;
++  config.is_broker_process = true;
++  config.force_direct_shared_memory_allocation = true;
++  mojo::core::Init(config);
++
++  EventWriter writer(events_path);
++  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++
++  MojoHandle invitation;
++  MojoResult r = MojoCreateInvitation(nullptr, &invitation);
++  base::DictValue extra;
++  writer.Emit(1, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "MojoCreateInvitation: %s\n", ResultName(r).c_str());
++    writer.WriteOut();
++    return 1;
++  }
++
++  MojoHandle pipe;
++  r = MojoAttachMessagePipeToInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
++  writer.Emit(2, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "MojoAttachMessagePipeToInvitation: %s\n", ResultName(r).c_str());
++    writer.WriteOut();
++    return 1;
++  }
++
++  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
++  r = MojoSendInvitation(invitation, nullptr, &endpoint, nullptr, 0, nullptr);
++  writer.Emit(3, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "MojoSendInvitation: %s\n", ResultName(r).c_str());
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Exchange: broker sends a message + fd, then receives the reply + fd.
++  r = SendPayloadWithFd(pipe, "hello-from-broker", "fd-from-broker");
++  writer.Emit(4, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "broker SendPayloadWithFd: %s\n", ResultName(r).c_str());
++    writer.WriteOut();
++    return 1;
++  }
++
++  std::string payload, fd_content;
++  r = RecvPayloadWithFd(pipe, &payload, &fd_content);
++  base::DictValue recv_extra;
++  recv_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  recv_extra.Set("fd_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(fd_content.data()), fd_content.size()));
++  writer.Emit(5, "message", ResultName(r), recv_extra);
++
++  // MojoSendInvitation consumes the invitation handle on success; only the
++  // pipe end (and, on failure, nothing) remains to close.
++  MojoClose(pipe);
++  writer.Emit(6, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return (r == MOJO_RESULT_OK && payload == "hello-from-acceptor" &&
++          fd_content == "fd-from-acceptor")
++             ? 0
++             : 1;
++}
++
++int RunAcceptor(int socket_fd, const char* events_path) {
++  mojo::core::Init();
++
++  EventWriter writer(events_path);
++  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++
++  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
++  MojoHandle invitation;
++  MojoResult r = MojoAcceptInvitation(&endpoint, nullptr, &invitation);
++  base::DictValue extra;
++  writer.Emit(1, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "MojoAcceptInvitation: %s\n", ResultName(r).c_str());
++    writer.WriteOut();
++    return 1;
++  }
++
++  MojoHandle pipe;
++  r = MojoExtractMessagePipeFromInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
++  writer.Emit(2, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "MojoExtractMessagePipeFromInvitation: %s\n", ResultName(r).c_str());
++    writer.WriteOut();
++    return 1;
++  }
++
++  std::string payload, fd_content;
++  r = RecvPayloadWithFd(pipe, &payload, &fd_content);
++  base::DictValue recv_extra;
++  recv_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  recv_extra.Set("fd_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(fd_content.data()), fd_content.size()));
++  writer.Emit(3, "message", ResultName(r), recv_extra);
++  if (r != MOJO_RESULT_OK || payload != "hello-from-broker" ||
++      fd_content != "fd-from-broker") {
++    writer.WriteOut();
++    return 1;
++  }
++
++  r = SendPayloadWithFd(pipe, "hello-from-acceptor", "fd-from-acceptor");
++  writer.Emit(4, "result", ResultName(r), extra);
++
++  MojoClose(pipe);
++  MojoClose(invitation);
++  writer.Emit(5, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return (r == MOJO_RESULT_OK) ? 0 : 1;
++}
++
++}  // namespace invite
++
 +}  // namespace
 +
 +int main(int argc, char** argv) {
++  if (argc < 2) {
++    fprintf(stderr,
++            "usage: mojo_rs_oracle_driver <baseline|invite-broker|invite-acceptor> ...\n");
++    return 2;
++  }
++  std::string command = argv[1];
++
++  // Base-process plumbing required by Chromium's base library (shared memory
++  // temp dirs, at-exit callbacks, message loop) before any Mojo IPC runs.
++  base::CommandLine::Init(argc, argv);
++  base::AtExitManager exit_manager;
++
++  if (command == "invite-broker" || command == "invite-acceptor") {
++    // The transport channel runs on a dedicated IO thread with an IO message
++    // pump (the pump registers the IOWatcher the channel requires).
++    base::Thread io_thread("mojo-rs-oracle-io");
++    base::Thread::Options io_options(base::MessagePumpType::IO, 0);
++    if (!io_thread.StartWithOptions(std::move(io_options))) {
++      fprintf(stderr, "failed to start IO thread\n");
++      return 1;
++    }
++    mojo::core::ScopedIPCSupport ipc_support(
++        io_thread.task_runner(),
++        mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
++    if (command == "invite-broker") {
++      if (argc != 4) {
++        fprintf(stderr,
++                "usage: mojo_rs_oracle_driver invite-broker <socket-fd> <events.jsonl>\n");
++        return 2;
++      }
++      int socket_fd = atoi(argv[2]);
++      return invite::RunBroker(socket_fd, argv[3]);
++    }
++    if (argc != 4) {
++      fprintf(stderr,
++              "usage: mojo_rs_oracle_driver invite-acceptor <socket-fd> <events.jsonl>\n");
++      return 2;
++    }
++    int socket_fd = atoi(argv[2]);
++    return invite::RunAcceptor(socket_fd, argv[3]);
++  }
++
 +  // Register the C API thunks via the embedder. Embedders must NOT call
 +  // MojoInitialize() (it returns MOJO_RESULT_UNIMPLEMENTED for embedders);
 +  // mojo::core::Init() initializes the ipcz node and installs the system
@@ -811,7 +1109,6 @@ index 0000000000..a013b92bc3
 +            "usage: mojo_rs_oracle_driver baseline <casefile> <events.jsonl>\n");
 +    return 2;
 +  }
-+  std::string command = argv[1];
 +  if (command == "--self-check") {
 +    printf("oracle driver self-check ok (init=%s)\n",
 +           ResultName(init_result).c_str());

@@ -136,8 +136,14 @@ pub fn parse_message_header(payload: &[u8]) -> Result<MessageHeader, WireError> 
         return Err(WireError::UnknownMessageHeaderSize(size));
     }
     // version = payload[1]; message_id = payload[2]; reserved0 = payload[3..8].
-    let node_sequence_number = u64::from_le_bytes(payload[8..16].try_into().expect("8 bytes"));
-    let driver_object_data_array = u32::from_le_bytes(payload[16..20].try_into().expect("4 bytes"));
+    // The length check above guarantees these slices are in bounds, so the
+    // copies below cannot fail.
+    let mut seq_bytes = [0u8; 8];
+    seq_bytes.copy_from_slice(&payload[8..16]);
+    let mut dobj_bytes = [0u8; 4];
+    dobj_bytes.copy_from_slice(&payload[16..20]);
+    let node_sequence_number = u64::from_le_bytes(seq_bytes);
+    let driver_object_data_array = u32::from_le_bytes(dobj_bytes);
     Ok(MessageHeader {
         size,
         version: payload[1],

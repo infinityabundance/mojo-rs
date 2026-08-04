@@ -1,0 +1,903 @@
+diff --git a/oracle_driver/BUILD.gn b/oracle_driver/BUILD.gn
+new file mode 100644
+index 0000000000..91f5227bfe
+--- /dev/null
++++ b/oracle_driver/BUILD.gn
+@@ -0,0 +1,21 @@
++# mojo-rs oracle driver target.
++#
++# Compiled inside the pinned Chromium tree (applied via a deterministic patch
++# generated from oracle/driver/ and oracle/gn/BUILD.gn). Links the OFFICIAL
++# mojo core embedder — this is the behavioral oracle. The driver itself uses
++# only the public Mojo C System API plus base::JSON for the casefile protocol.
++
++executable("mojo_rs_oracle_driver") {
++  sources = [
++    "oracle_driver.cc",
++  ]
++
++  configs += [ "//build/config/compiler:wexit_time_destructors" ]
++
++  deps = [
++    "//base",
++    "//mojo/core/embedder:embedder",
++    "//mojo/public/c/system:headers",
++    "//mojo/public/c/system:system",
++  ]
++}
+diff --git a/oracle_driver/oracle_driver.cc b/oracle_driver/oracle_driver.cc
+new file mode 100644
+index 0000000000..a013b92bc3
+--- /dev/null
++++ b/oracle_driver/oracle_driver.cc
+@@ -0,0 +1,870 @@
++// mojo_rs_oracle_driver — the oracle-side harness.
++//
++// Executes casefiles against the OFFICIAL pinned Mojo C API and emits events
++// JSONL for differential comparison with the mojo-rs candidate harness.
++//
++//   mojo_rs_oracle_driver baseline <casefile.json> <events.jsonl>
++//
++// This driver uses ONLY the public Mojo C System API
++// (mojo/public/c/system/*.h) plus base::JSON for the protocol. It is compiled
++// inside the pinned Chromium tree (see oracle/patches/) so it links the
++// official mojo_core_embedder — the behavioral oracle.
++//
++// The event vocabulary mirrors the candidate harness exactly:
++//   {"seq","op_id","event","result","handle","payload_hex","handles",
++//    "signals":{"satisfied","satisfiable"},
++//    "trigger_context","signals_state"}
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <cstdint>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/time/time.h"
++#include "base/values.h"
++#include "mojo/core/embedder/embedder.h"
++#include "mojo/public/c/system/functions.h"
++#include "mojo/public/c/system/message_pipe.h"
++#include "mojo/public/c/system/platform_handle.h"
++#include "mojo/public/c/system/trap.h"
++#include "mojo/public/c/system/types.h"
++
++namespace {
++
++// ---------------------------------------------------------------------------
++// Helpers
++// ---------------------------------------------------------------------------
++
++std::string ResultName(MojoResult r) {
++  switch (r) {
++    case MOJO_RESULT_OK:
++      return "MOJO_RESULT_OK";
++    case MOJO_RESULT_CANCELLED:
++      return "MOJO_RESULT_CANCELLED";
++    case MOJO_RESULT_UNKNOWN:
++      return "MOJO_RESULT_UNKNOWN";
++    case MOJO_RESULT_INVALID_ARGUMENT:
++      return "MOJO_RESULT_INVALID_ARGUMENT";
++    case MOJO_RESULT_DEADLINE_EXCEEDED:
++      return "MOJO_RESULT_DEADLINE_EXCEEDED";
++    case MOJO_RESULT_NOT_FOUND:
++      return "MOJO_RESULT_NOT_FOUND";
++    case MOJO_RESULT_ALREADY_EXISTS:
++      return "MOJO_RESULT_ALREADY_EXISTS";
++    case MOJO_RESULT_PERMISSION_DENIED:
++      return "MOJO_RESULT_PERMISSION_DENIED";
++    case MOJO_RESULT_RESOURCE_EXHAUSTED:
++      return "MOJO_RESULT_RESOURCE_EXHAUSTED";
++    case MOJO_RESULT_FAILED_PRECONDITION:
++      return "MOJO_RESULT_FAILED_PRECONDITION";
++    case MOJO_RESULT_ABORTED:
++      return "MOJO_RESULT_ABORTED";
++    case MOJO_RESULT_OUT_OF_RANGE:
++      return "MOJO_RESULT_OUT_OF_RANGE";
++    case MOJO_RESULT_UNIMPLEMENTED:
++      return "MOJO_RESULT_UNIMPLEMENTED";
++    case MOJO_RESULT_INTERNAL:
++      return "MOJO_RESULT_INTERNAL";
++    case MOJO_RESULT_UNAVAILABLE:
++      return "MOJO_RESULT_UNAVAILABLE";
++    case MOJO_RESULT_DATA_LOSS:
++      return "MOJO_RESULT_DATA_LOSS";
++    case MOJO_RESULT_BUSY:
++      return "MOJO_RESULT_BUSY";
++    case MOJO_RESULT_SHOULD_WAIT:
++      return "MOJO_RESULT_SHOULD_WAIT";
++    default:
++      return "MOJO_RESULT_UNKNOWN";
++  }
++}
++
++std::vector<uint8_t> HexDecode(const std::string& hex) {
++  std::vector<uint8_t> out;
++  auto nib = [](char c) -> int {
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    return -1;
++  };
++  for (size_t i = 0; i + 1 < hex.size(); i += 2) {
++    int hi = nib(hex[i]);
++    int lo = nib(hex[i + 1]);
++    if (hi < 0 || lo < 0) return out;
++    out.push_back(static_cast<uint8_t>((hi << 4) | lo));
++  }
++  return out;
++}
++
++std::string HexEncode(const uint8_t* data, size_t len) {
++  static const char* kHex = "0123456789abcdef";
++  std::string out;
++  out.reserve(len * 2);
++  for (size_t i = 0; i < len; ++i) {
++    out.push_back(kHex[(data[i] >> 4) & 0xf]);
++    out.push_back(kHex[data[i] & 0xf]);
++  }
++  return out;
++}
++
++// ---------------------------------------------------------------------------
++// Event emission
++// ---------------------------------------------------------------------------
++
++class EventWriter {
++ public:
++  explicit EventWriter(const std::string& path) : path_(path) {}
++
++  void Emit(uint64_t op_id,
++            const std::string& event,
++            const std::string& result,
++            const base::DictValue& extra) {
++    base::DictValue d;
++    d.Set("seq", static_cast<int>(++seq_));
++    d.Set("op_id", static_cast<int>(op_id));
++    d.Set("event", event);
++    d.Set("result", result);
++    for (const auto& [k, v] : extra) {
++      d.Set(k, v.Clone());
++    }
++    std::string line;
++    base::JSONWriter::WriteWithOptions(
++        d, base::JSONWriter::OPTIONS_OMIT_BINARY_VALUES, &line);
++    lines_.push_back(line);
++  }
++
++  void WriteOut() const {
++    std::ofstream f(path_);
++    for (const auto& l : lines_) {
++      f << l << "\n";
++    }
++  }
++
++ private:
++  std::string path_;
++  std::vector<std::string> lines_;
++  uint64_t seq_ = 0;
++};
++
++// ---------------------------------------------------------------------------
++// Signal helpers
++// ---------------------------------------------------------------------------
++
++MojoHandleSignals SignalFromName(const std::string& name) {
++  if (name == "READABLE") return MOJO_HANDLE_SIGNAL_READABLE;
++  if (name == "WRITABLE") return MOJO_HANDLE_SIGNAL_WRITABLE;
++  if (name == "PEER_CLOSED") return MOJO_HANDLE_SIGNAL_PEER_CLOSED;
++  if (name == "NEW_DATA_READABLE") return MOJO_HANDLE_SIGNAL_NEW_DATA_READABLE;
++  if (name == "PEER_REMOTE") return MOJO_HANDLE_SIGNAL_PEER_REMOTE;
++  if (name == "QUOTA_EXCEEDED") return MOJO_HANDLE_SIGNAL_QUOTA_EXCEEDED;
++  return MOJO_HANDLE_SIGNAL_NONE;
++}
++
++base::ListValue SignalNames(MojoHandleSignals s) {
++  base::ListValue out;
++  if (s & MOJO_HANDLE_SIGNAL_READABLE) out.Append("READABLE");
++  if (s & MOJO_HANDLE_SIGNAL_WRITABLE) out.Append("WRITABLE");
++  if (s & MOJO_HANDLE_SIGNAL_PEER_CLOSED) out.Append("PEER_CLOSED");
++  if (s & MOJO_HANDLE_SIGNAL_NEW_DATA_READABLE) out.Append("NEW_DATA_READABLE");
++  if (s & MOJO_HANDLE_SIGNAL_PEER_REMOTE) out.Append("PEER_REMOTE");
++  if (s & MOJO_HANDLE_SIGNAL_QUOTA_EXCEEDED) out.Append("QUOTA_EXCEEDED");
++  return out;
++}
++
++base::DictValue SignalsStateJson(MojoHandleSignalsState state) {
++  base::DictValue d;
++  d.Set("satisfied", SignalNames(state.satisfied_signals));
++  d.Set("satisfiable", SignalNames(state.satisfiable_signals));
++  return d;
++}
++
++// ---------------------------------------------------------------------------
++// Harness state
++// ---------------------------------------------------------------------------
++
++struct Harness {
++  std::map<std::string, MojoHandle> tokens;
++  std::map<std::string, MojoHandle> traps;
++
++  // Per-trap event queues, filled by the trap callback.
++  std::map<std::string, std::vector<MojoTrapEvent>> trap_events;
++  std::mutex trap_mutex;
++
++  MojoResult GetHandle(const std::string& token, MojoHandle* out) const {
++    auto it = tokens.find(token);
++    if (it == tokens.end()) return MOJO_RESULT_INVALID_ARGUMENT;
++    *out = it->second;
++    return MOJO_RESULT_OK;
++  }
++};
++
++// Side map: trigger context -> trap token (the event carries only the trigger
++// context; the epoch removed MojoTrapGetHandleFromEvent).
++std::map<uintptr_t, std::string> g_context_tokens;
++std::mutex g_context_tokens_mutex;
++
++// The process runs exactly one casefile, so a single harness pointer suffices.
++Harness* g_harness = nullptr;
++
++// The trap callback (matches MojoTrapEventHandler signature). The trigger
++// context identifies the trap's token via the side map.
++void TrapHandler(const MojoTrapEvent* event) {
++  Harness* harness = g_harness;
++  if (!harness) {
++    return;
++  }
++  std::string token;
++  {
++    std::lock_guard<std::mutex> lock(g_context_tokens_mutex);
++    auto it = g_context_tokens.find(event->trigger_context);
++    if (it != g_context_tokens.end()) {
++      token = it->second;
++    }
++  }
++  if (token.empty()) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(harness->trap_mutex);
++  harness->trap_events[token].push_back(*event);
++}
++
++// ---------------------------------------------------------------------------
++// Operations
++// ---------------------------------------------------------------------------
++
++MojoResult OpMessagePipeCreate(Harness* h,
++                               EventWriter* w,
++                               uint64_t op_id,
++                               const base::DictValue& expect) {
++  MojoHandle a, b;
++  MojoResult r = MojoCreateMessagePipe(nullptr, &a, &b);
++  const base::ListValue* produce = expect.FindList("produce");
++  if (r == MOJO_RESULT_OK && produce && produce->size() == 2) {
++    h->tokens[(*produce)[0].GetString()] = a;
++    h->tokens[(*produce)[1].GetString()] = b;
++  }
++  base::DictValue extra;
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpWriteMessage(Harness* h,
++                          EventWriter* w,
++                          uint64_t op_id,
++                          const base::DictValue& args) {
++  const std::string* token = args.FindString("handle");
++  MojoHandle handle;
++  base::DictValue extra;
++  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
++    extra.Set("handle", token ? *token : "");
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  const std::string* payload_hex = args.FindString("payload_hex");
++  std::vector<uint8_t> payload = HexDecode(payload_hex ? payload_hex->c_str() : "");
++
++  // Attached handles (transferred).
++  std::vector<MojoHandle> handles;
++  if (const base::ListValue* hl = args.FindList("handles")) {
++    for (const auto& t : *hl) {
++      const std::string& tk = t.GetString();
++      auto it = h->tokens.find(tk);
++      if (it == h->tokens.end()) {
++        extra.Set("handle", *token);
++        w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++        return MOJO_RESULT_INVALID_ARGUMENT;
++      }
++      handles.push_back(it->second);
++    }
++  }
++
++  MojoMessageHandle message;
++  MojoResult r = MojoCreateMessage(nullptr, &message);
++  if (r != MOJO_RESULT_OK) {
++    extra.Set("handle", *token);
++    w->Emit(op_id, "result", ResultName(r), extra);
++    return r;
++  }
++  void* buffer = nullptr;
++  uint32_t buffer_size = 0;
++  uint32_t num_handles = static_cast<uint32_t>(handles.size());
++  r = MojoAppendMessageData(message,
++                            static_cast<uint32_t>(payload.size()),
++                            handles.data(),
++                            num_handles,
++                            nullptr,
++                            &buffer,
++                            &buffer_size);
++  if (r == MOJO_RESULT_OK && !payload.empty()) {
++    memcpy(buffer, payload.data(), payload.size());
++  }
++  if (r == MOJO_RESULT_OK) {
++    r = MojoWriteMessage(handle, message, nullptr);
++  } else {
++    // The append failed; the message was never handed to MojoWriteMessage and
++    // is still owned by us.
++    MojoDestroyMessage(message);
++  }
++  // MojoWriteMessage always consumes the message object in this epoch — on
++  // success the handles were relinquished; on failure the ipcz implementation
++  // destroys the message as its `unique_ptr` local unwinds. The caller must
++  // NOT call MojoDestroyMessage afterwards (it would double-free).
++  if (r == MOJO_RESULT_OK) {
++    // Handles were transferred: remove them from the token map.
++    if (const base::ListValue* hl = args.FindList("handles")) {
++      for (const auto& t : *hl) {
++        h->tokens.erase(t.GetString());
++      }
++    }
++  }
++  extra.Set("handle", *token);
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpReadMessage(Harness* h,
++                         EventWriter* w,
++                         uint64_t op_id,
++                         const base::DictValue& args) {
++  const std::string* token = args.FindString("handle");
++  MojoHandle handle;
++  base::DictValue extra;
++  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
++    extra.Set("handle", token ? *token : "");
++    w->Emit(op_id, "message", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoMessageHandle message;
++  MojoResult r = MojoReadMessage(handle, nullptr, &message);
++  if (r != MOJO_RESULT_OK) {
++    extra.Set("handle", *token);
++    w->Emit(op_id, "message", ResultName(r), extra);
++    return r;
++  }
++  uint32_t num_bytes = 0;
++  uint32_t num_handles = 0;
++  void* buffer = nullptr;
++  // Two-phase extraction: the first call reports the required handle capacity
++  // (returning RESOURCE_EXHAUSTED when handles are attached); the second
++  // consumes them into the caller-provided array.
++  r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes, nullptr,
++                         &num_handles);
++  std::vector<MojoHandle> handle_buf;
++  if (r == MOJO_RESULT_RESOURCE_EXHAUSTED && num_handles > 0) {
++    handle_buf.resize(num_handles);
++    r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes,
++                           handle_buf.data(), &num_handles);
++  }
++
++  extra.Set("handle", *token);
++  if (r == MOJO_RESULT_OK) {
++    extra.Set("payload_hex",
++              HexEncode(static_cast<const uint8_t*>(buffer), num_bytes));
++    base::ListValue extracted;
++    for (uint32_t i = 0; i < handle_buf.size(); ++i) {
++      std::string tk = *token + "_handle_" + std::to_string(i);
++      h->tokens[tk] = handle_buf[i];
++      extracted.Append(tk);
++    }
++    extra.Set("handles", std::move(extracted));
++    MojoDestroyMessage(message);
++    w->Emit(op_id, "message", "MOJO_RESULT_OK", extra);
++    return MOJO_RESULT_OK;
++  }
++  w->Emit(op_id, "message", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpQuerySignals(Harness* h,
++                          EventWriter* w,
++                          uint64_t op_id,
++                          const base::DictValue& args) {
++  const std::string* token = args.FindString("handle");
++  MojoHandle handle;
++  base::DictValue extra;
++  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
++    extra.Set("handle", token ? *token : "");
++    w->Emit(op_id, "signals", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoHandleSignalsState state = {MOJO_HANDLE_SIGNAL_NONE, MOJO_HANDLE_SIGNAL_NONE};
++  MojoResult r = MojoQueryHandleSignalsState(handle, &state);
++  extra.Set("handle", *token);
++  if (r == MOJO_RESULT_OK) {
++    extra.Set("signals", SignalsStateJson(state));
++  }
++  w->Emit(op_id, "signals", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpClose(Harness* h,
++                   EventWriter* w,
++                   uint64_t op_id,
++                   const base::DictValue& args) {
++  const std::string* token = args.FindString("handle");
++  base::DictValue extra;
++  if (!token) {
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  auto it = h->tokens.find(*token);
++  if (it == h->tokens.end()) {
++    extra.Set("handle", *token);
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoResult r = MojoClose(it->second);
++  h->tokens.erase(it);
++  extra.Set("handle", *token);
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpWait(Harness* h,
++                  EventWriter* w,
++                  uint64_t op_id,
++                  const base::DictValue& args) {
++  const std::string* token = args.FindString("handle");
++  MojoHandle handle;
++  base::DictValue extra;
++  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
++    extra.Set("handle", token ? *token : "");
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoHandleSignals signals = MOJO_HANDLE_SIGNAL_NONE;
++  if (const base::ListValue* sl = args.FindList("signals")) {
++    for (const auto& s : *sl) {
++      signals |= SignalFromName(s.GetString());
++    }
++  }
++  // This epoch's C API removed the blocking wait entry points
++  // (MojoWait/MojoWaitMany) and the MojoDeadline type. The harness implements
++  // the same OBSERVABLE contract — block until satisfied, unsatisfiable, or
++  // deadline — by polling MojoQueryHandleSignalsState. The deadline is the
++  // casefile's `deadline_ms`; an absent key means indefinite (the historical
++  // MOJO_DEADLINE_INDEFINITE). Only the result code and final signal state are
++  // compared, so the polling granularity is not observable.
++  const bool indefinite = !args.contains("deadline_ms");
++  const int64_t deadline_ms = args.FindInt("deadline_ms").value_or(0);
++  MojoHandleSignalsState state = {MOJO_HANDLE_SIGNAL_NONE, MOJO_HANDLE_SIGNAL_NONE};
++  const base::TimeTicks start = base::TimeTicks::Now();
++  MojoResult r = MOJO_RESULT_UNKNOWN;
++  for (;;) {
++    r = MojoQueryHandleSignalsState(handle, &state);
++    if (r != MOJO_RESULT_OK) {
++      break;
++    }
++    if (state.satisfied_signals & signals) {
++      r = MOJO_RESULT_OK;
++      break;
++    }
++    if (!(state.satisfiable_signals & signals)) {
++      r = MOJO_RESULT_FAILED_PRECONDITION;
++      break;
++    }
++    if (!indefinite &&
++        (base::TimeTicks::Now() - start) >= base::Milliseconds(deadline_ms)) {
++      r = MOJO_RESULT_DEADLINE_EXCEEDED;
++      break;
++    }
++    usleep(1000);
++  }
++  extra.Set("handle", *token);
++  extra.Set("signals", SignalsStateJson(state));
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpPlatformHandleWrap(Harness* h,
++                                EventWriter* w,
++                                uint64_t op_id,
++                                const base::DictValue& args,
++                                const base::DictValue& expect) {
++  const std::string* source = args.FindString("source");
++  const std::string* content_hex = args.FindString("content_hex");
++  std::vector<uint8_t> content = HexDecode(content_hex ? content_hex->c_str() : "");
++  int fd = -1;
++  if (source && *source == "memfd") {
++    fd = memfd_create("oracle-harness", 0);
++    if (fd >= 0) {
++      ftruncate(fd, 4096);
++      if (!content.empty()) {
++        write(fd, content.data(), content.size());
++      }
++    }
++  } else if (source && *source == "pipe") {
++    int fds[2] = {-1, -1};
++    if (pipe(fds) == 0) {
++      // Keep the write end open so reads do not EOF.
++      static std::vector<int> keep_alive;
++      keep_alive.push_back(fds[1]);
++      fd = fds[0];
++      int flags = fcntl(fd, F_GETFL);
++      fcntl(fd, F_SETFL, flags | O_NONBLOCK);
++    }
++  }
++  base::DictValue extra;
++  if (fd < 0) {
++    w->Emit(op_id, "handle", "MOJO_RESULT_RESOURCE_EXHAUSTED", extra);
++    return MOJO_RESULT_RESOURCE_EXHAUSTED;
++  }
++
++  MojoPlatformHandle platform_handle = {sizeof(MojoPlatformHandle),
++                                        MOJO_PLATFORM_HANDLE_TYPE_FILE_DESCRIPTOR,
++                                        static_cast<uint64_t>(fd)};
++  MojoHandle wrapped;
++  MojoResult r = MojoWrapPlatformHandle(&platform_handle, nullptr, &wrapped);
++  if (r == MOJO_RESULT_OK) {
++    const base::ListValue* produce = expect.FindList("produce");
++    std::string token = (produce && !produce->empty()) ? (*produce)[0].GetString() : "p0";
++    h->tokens[token] = wrapped;
++    extra.Set("handle", token);
++  }
++  w->Emit(op_id, "handle", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpPlatformHandleUnwrap(Harness* h,
++                                  EventWriter* w,
++                                  uint64_t op_id,
++                                  const base::DictValue& args) {
++  const std::string* token = args.FindString("handle");
++  base::DictValue extra;
++  if (!token) {
++    w->Emit(op_id, "handle", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  auto it = h->tokens.find(*token);
++  if (it == h->tokens.end()) {
++    extra.Set("handle", *token);
++    w->Emit(op_id, "handle", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoPlatformHandle platform_handle = {sizeof(MojoPlatformHandle),
++                                        MOJO_PLATFORM_HANDLE_TYPE_INVALID, 0};
++  MojoResult r = MojoUnwrapPlatformHandle(it->second, nullptr, &platform_handle);
++  h->tokens.erase(it);
++  extra.Set("handle", *token);
++  if (r == MOJO_RESULT_OK &&
++      platform_handle.type == MOJO_PLATFORM_HANDLE_TYPE_FILE_DESCRIPTOR) {
++    int fd = static_cast<int>(platform_handle.value);
++    std::vector<uint8_t> content;
++    lseek(fd, 0, SEEK_SET);
++    uint8_t buf[4096];
++    ssize_t n;
++    while ((n = read(fd, buf, sizeof(buf))) > 0) {
++      content.insert(content.end(), buf, buf + n);
++    }
++    extra.Set("payload_hex", HexEncode(content.data(), content.size()));
++    close(fd);
++  }
++  w->Emit(op_id, "handle", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpTrapCreate(Harness* h,
++                        EventWriter* w,
++                        uint64_t op_id,
++                        const base::DictValue& args,
++                        const base::DictValue& expect) {
++  const base::ListValue* produce = expect.FindList("produce");
++  std::string token = (produce && !produce->empty()) ? (*produce)[0].GetString() : "t0";
++  MojoHandle trap;
++  // The epoch removed the `context` parameter: the process runs one casefile,
++  // so the harness is reachable via the process-global `g_harness`.
++  MojoResult r = MojoCreateTrap(&TrapHandler, nullptr, &trap);
++  if (r == MOJO_RESULT_OK) {
++    h->traps[token] = trap;
++  }
++  base::DictValue extra;
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpTrapAddTrigger(Harness* h,
++                            EventWriter* w,
++                            uint64_t op_id,
++                            const base::DictValue& args) {
++  const std::string* trap_token = args.FindString("trap");
++  const std::string* handle_token = args.FindString("handle");
++  base::DictValue extra;
++  auto tit = h->traps.find(*trap_token);
++  if (tit == h->traps.end()) {
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoHandle handle;
++  if (!handle_token || h->GetHandle(*handle_token, &handle) != MOJO_RESULT_OK) {
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoHandleSignals signals = MOJO_HANDLE_SIGNAL_NONE;
++  if (const base::ListValue* sl = args.FindList("signals")) {
++    for (const auto& s : *sl) {
++      signals |= SignalFromName(s.GetString());
++    }
++  }
++  uint64_t context = 0;
++  if (args.contains("context")) {
++    context = static_cast<uint64_t>(args.FindInt("context").value_or(0));
++  }
++  MojoResult r =
++      MojoAddTrigger(tit->second, handle, signals,
++                     MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                     static_cast<uintptr_t>(context), nullptr);
++  if (r == MOJO_RESULT_OK) {
++    std::lock_guard<std::mutex> lock(g_context_tokens_mutex);
++    g_context_tokens[static_cast<uintptr_t>(context)] = *trap_token;
++  }
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpTrapArm(Harness* h,
++                     EventWriter* w,
++                     uint64_t op_id,
++                     const base::DictValue& args) {
++  const std::string* trap_token = args.FindString("trap");
++  base::DictValue extra;
++  auto tit = h->traps.find(*trap_token);
++  if (tit == h->traps.end()) {
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  uint32_t num_events = 0;
++  MojoTrapEvent events[4];
++  MojoResult r = MojoArmTrap(tit->second, nullptr, &num_events, events);
++  if (r == MOJO_RESULT_FAILED_PRECONDITION) {
++    // Immediate events were written into `events`; emit them, then drain any
++    // additional queued events.
++    for (uint32_t i = 0; i < num_events; ++i) {
++      base::DictValue ev;
++      ev.Set("trigger_context", static_cast<int>(events[i].trigger_context));
++      ev.Set("signals_state", SignalsStateJson(events[i].signals_state));
++      ev.Set("result", ResultName(events[i].result));
++      w->Emit(op_id, "trap", "MOJO_RESULT_OK", ev);
++    }
++    {
++      std::lock_guard<std::mutex> lock(h->trap_mutex);
++      auto it = h->trap_events.find(*trap_token);
++      if (it != h->trap_events.end()) {
++        for (const auto& e : it->second) {
++          base::DictValue ev;
++          ev.Set("trigger_context", static_cast<int>(e.trigger_context));
++          ev.Set("signals_state", SignalsStateJson(e.signals_state));
++          ev.Set("result", ResultName(e.result));
++          w->Emit(op_id, "trap", "MOJO_RESULT_OK", ev);
++        }
++        it->second.clear();
++      }
++    }
++  }
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpTrapRemoveTrigger(Harness* h,
++                               EventWriter* w,
++                               uint64_t op_id,
++                               const base::DictValue& args) {
++  const std::string* trap_token = args.FindString("trap");
++  uint64_t context = 0;
++  if (args.contains("context")) {
++    context = static_cast<uint64_t>(args.FindInt("context").value_or(0));
++  }
++  base::DictValue extra;
++  auto tit = h->traps.find(*trap_token);
++  if (tit == h->traps.end()) {
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  // The epoch's MojoRemoveTrigger identifies the trigger by context alone.
++  MojoResult r =
++      MojoRemoveTrigger(tit->second, static_cast<uintptr_t>(context), nullptr);
++  if (r == MOJO_RESULT_OK) {
++    std::lock_guard<std::mutex> lock(g_context_tokens_mutex);
++    g_context_tokens.erase(static_cast<uintptr_t>(context));
++  }
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpTrapClose(Harness* h,
++                       EventWriter* w,
++                       uint64_t op_id,
++                       const base::DictValue& args) {
++  const std::string* trap_token = args.FindString("trap");
++  base::DictValue extra;
++  auto it = h->traps.find(*trap_token);
++  if (it == h->traps.end()) {
++    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
++    return MOJO_RESULT_INVALID_ARGUMENT;
++  }
++  MojoResult r = MojoClose(it->second);
++  h->traps.erase(it);
++  w->Emit(op_id, "result", ResultName(r), extra);
++  return r;
++}
++
++MojoResult OpDrainTrapEvents(Harness* h,
++                             EventWriter* w,
++                             uint64_t op_id,
++                             const base::DictValue& args) {
++  const std::string* trap_token = args.FindString("trap");
++  int count = args.FindInt("count").value_or(1);
++  std::vector<MojoTrapEvent> drained;
++  auto poll = [&]() {
++    std::lock_guard<std::mutex> lock(h->trap_mutex);
++    auto it = h->trap_events.find(*trap_token);
++    if (it != h->trap_events.end()) {
++      for (auto& e : it->second) {
++        drained.push_back(e);
++      }
++      it->second.clear();
++    }
++  };
++  poll();
++  int64_t deadline_us = (base::TimeTicks::Now() + base::Seconds(5))
++                            .since_origin()
++                            .InMicroseconds();
++  while (static_cast<int>(drained.size()) < count &&
++         base::TimeTicks::Now().since_origin().InMicroseconds() < deadline_us) {
++    usleep(2000);
++    poll();
++  }
++  for (const auto& e : drained) {
++    base::DictValue ev;
++    ev.Set("trigger_context", static_cast<int>(e.trigger_context));
++    ev.Set("signals_state", SignalsStateJson(e.signals_state));
++    ev.Set("result", ResultName(e.result));
++    w->Emit(op_id, "trap", "MOJO_RESULT_OK", ev);
++  }
++  base::DictValue extra;
++  w->Emit(op_id, "result", "MOJO_RESULT_OK", extra);
++  return MOJO_RESULT_OK;
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  // Register the C API thunks via the embedder. Embedders must NOT call
++  // MojoInitialize() (it returns MOJO_RESULT_UNIMPLEMENTED for embedders);
++  // mojo::core::Init() initializes the ipcz node and installs the system
++  // thunks.
++  mojo::core::Init();
++  MojoResult init_result = MOJO_RESULT_OK;
++  {
++    MojoHandle a, b;
++    if (MojoCreateMessagePipe(nullptr, &a, &b) == MOJO_RESULT_OK) {
++      MojoClose(a);
++      MojoClose(b);
++    } else {
++      init_result = MOJO_RESULT_INTERNAL;
++    }
++  }
++
++  if (argc < 2) {
++    fprintf(stderr,
++            "usage: mojo_rs_oracle_driver baseline <casefile> <events.jsonl>\n");
++    return 2;
++  }
++  std::string command = argv[1];
++  if (command == "--self-check") {
++    printf("oracle driver self-check ok (init=%s)\n",
++           ResultName(init_result).c_str());
++    return 0;
++  }
++  if (command != "baseline" || argc != 4) {
++    fprintf(stderr,
++            "usage: mojo_rs_oracle_driver baseline <casefile> <events.jsonl>\n");
++    return 2;
++  }
++
++  std::ifstream f(argv[2]);
++  std::string text((std::istreambuf_iterator<char>(f)),
++                   std::istreambuf_iterator<char>());
++  auto parsed = base::JSONReader::ReadAndReturnValueWithError(text, 0);
++  if (!parsed.has_value() || !parsed->is_dict()) {
++    fprintf(stderr, "casefile parse error: %s\n",
++            parsed.error().message.c_str());
++    return 1;
++  }
++  const base::DictValue& casefile = parsed->GetDict();
++
++  Harness harness;
++  g_harness = &harness;
++  EventWriter writer(argv[3]);
++
++  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  const base::ListValue* operations = casefile.FindList("operations");
++  if (!operations) {
++    fprintf(stderr, "casefile has no operations list\n");
++    return 1;
++  }
++  for (const auto& opv : *operations) {
++    const base::DictValue& op = opv.GetDict();
++    uint64_t op_id = op.FindInt("id").value_or(0);
++    const std::string* op_name = op.FindString("op");
++    const base::DictValue* args = op.FindDict("args");
++    const base::DictValue* expect = op.FindDict("expect");
++    base::DictValue empty_args;
++    base::DictValue empty_expect;
++    if (!args) {
++      args = &empty_args;
++    }
++    if (!expect) {
++      expect = &empty_expect;
++    }
++    if (!op_name) {
++      fprintf(stderr, "operation missing 'op'\n");
++      writer.WriteOut();
++      return 1;
++    }
++    if (*op_name == "message_pipe_create") {
++      OpMessagePipeCreate(&harness, &writer, op_id, *expect);
++    } else if (*op_name == "write_message") {
++      OpWriteMessage(&harness, &writer, op_id, *args);
++    } else if (*op_name == "read_message") {
++      OpReadMessage(&harness, &writer, op_id, *args);
++    } else if (*op_name == "query_signals_state") {
++      OpQuerySignals(&harness, &writer, op_id, *args);
++    } else if (*op_name == "close") {
++      OpClose(&harness, &writer, op_id, *args);
++    } else if (*op_name == "wait") {
++      OpWait(&harness, &writer, op_id, *args);
++    } else if (*op_name == "platform_handle_wrap") {
++      OpPlatformHandleWrap(&harness, &writer, op_id, *args, *expect);
++    } else if (*op_name == "platform_handle_unwrap") {
++      OpPlatformHandleUnwrap(&harness, &writer, op_id, *args);
++    } else if (*op_name == "trap_create") {
++      OpTrapCreate(&harness, &writer, op_id, *args, *expect);
++    } else if (*op_name == "trap_add_trigger") {
++      OpTrapAddTrigger(&harness, &writer, op_id, *args);
++    } else if (*op_name == "trap_arm") {
++      OpTrapArm(&harness, &writer, op_id, *args);
++    } else if (*op_name == "trap_remove_trigger") {
++      OpTrapRemoveTrigger(&harness, &writer, op_id, *args);
++    } else if (*op_name == "trap_close") {
++      OpTrapClose(&harness, &writer, op_id, *args);
++    } else if (*op_name == "drain_trap_events") {
++      OpDrainTrapEvents(&harness, &writer, op_id, *args);
++    } else {
++      fprintf(stderr, "unsupported operation: %s\n", op_name->c_str());
++      writer.WriteOut();
++      return 1;
++    }
++  }
++  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return 0;
++}

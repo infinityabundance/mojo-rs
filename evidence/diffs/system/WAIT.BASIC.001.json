@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "WAIT.BASIC.001",
+  "status": "pass",
+  "oracle_events": 11,
+  "candidate_events": 11,
+  "normalizers_applied": [
+    "normalize.timestamp"
+  ],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "ed3a1867e2c8ca6b7d5cf9d74a92bc352e9537041d4528a7f42f00afe83087e4",
+    "candidate_events_sha256": "ed3a1867e2c8ca6b7d5cf9d74a92bc352e9537041d4528a7f42f00afe83087e4"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "MESSAGE_PIPE.PAYLOAD.002",
+  "status": "pass",
+  "oracle_events": 10,
+  "candidate_events": 10,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "b6f649e9eb98f476aea8540750e53e615a23edf2e155fd9bb432b0c749d82706",
+    "candidate_events_sha256": "b6f649e9eb98f476aea8540750e53e615a23edf2e155fd9bb432b0c749d82706"
+  }
+}

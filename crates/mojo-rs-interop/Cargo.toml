@@ -11,8 +11,17 @@ homepage.workspace = true
 
 [dependencies]
 mojo-rs-casefile = { path = "../mojo-rs-casefile" }
+mojo-rs-core = { path = "../mojo-rs-core" }
+mojo-rs-platform = { path = "../mojo-rs-platform" }
 mojo-rs-system = { path = "../mojo-rs-system" }
 mojo-rs-bindings = { path = "../mojo-rs-bindings" }
+serde_json = { workspace = true }
+hex = "0.4"
+libc = { workspace = true }
+
+[[bin]]
+name = "candidate-harness"
+path = "src/bin/candidate-harness.rs"
 
 [lints]
 workspace = true

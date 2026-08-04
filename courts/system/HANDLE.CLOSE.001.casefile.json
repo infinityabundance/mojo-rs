@@ -5,22 +5,151 @@
   "reference_revision": "151.0.7922.105",
   "seed": 0,
   "preconditions": {
-    "required_capabilities": ["message_pipe"],
-    "init": {"mode": "default"}
+    "required_capabilities": [
+      "message_pipe"
+    ],
+    "init": {
+      "mode": "default"
+    }
   },
   "operations": [
-    {"id": 1, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h0", "h1"]}},
-    {"id": 2, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
-    {"id": 3, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
-    {"id": 4, "op": "write_message", "args": {"handle": "h0", "payload_hex": "", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
-    {"id": 5, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
-    {"id": 6, "op": "write_message", "args": {"handle": "h1", "payload_hex": "01", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
-    {"id": 7, "op": "read_message", "args": {"handle": "h1", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
-    {"id": 8, "op": "query_signals_state", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
-    {"id": 9, "op": "close", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
-    {"id": 10, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h2", "h3"]}},
-    {"id": 11, "op": "close", "args": {"handle": "h2"}, "expect": {"result": "MOJO_RESULT_OK"}},
-    {"id": 12, "op": "close", "args": {"handle": "h3"}, "expect": {"result": "MOJO_RESULT_OK"}}
+    {
+      "id": 1,
+      "op": "message_pipe_create",
+      "args": {
+        "flags": 0
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK",
+        "produce": [
+          "h0",
+          "h1"
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "op": "close",
+      "args": {
+        "handle": "h0"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK"
+      }
+    },
+    {
+      "id": 3,
+      "op": "close",
+      "args": {
+        "handle": "h0"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_INVALID_ARGUMENT"
+      }
+    },
+    {
+      "id": 4,
+      "op": "write_message",
+      "args": {
+        "handle": "h0",
+        "payload_hex": "",
+        "handles": [],
+        "flags": 0
+      },
+      "expect": {
+        "result": "MOJO_RESULT_INVALID_ARGUMENT"
+      }
+    },
+    {
+      "id": 5,
+      "op": "query_signals_state",
+      "args": {
+        "handle": "h0"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_INVALID_ARGUMENT"
+      }
+    },
+    {
+      "id": 6,
+      "op": "write_message",
+      "args": {
+        "handle": "h1",
+        "payload_hex": "01",
+        "handles": [],
+        "flags": 0
+      },
+      "expect": {
+        "result": "MOJO_RESULT_FAILED_PRECONDITION"
+      }
+    },
+    {
+      "id": 7,
+      "op": "read_message",
+      "args": {
+        "handle": "h1",
+        "max_num_bytes": 0,
+        "max_num_handles": 0,
+        "flags": 0
+      },
+      "expect": {
+        "result": "MOJO_RESULT_FAILED_PRECONDITION"
+      }
+    },
+    {
+      "id": 8,
+      "op": "query_signals_state",
+      "args": {
+        "handle": "h1"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK"
+      }
+    },
+    {
+      "id": 9,
+      "op": "close",
+      "args": {
+        "handle": "h1"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK"
+      }
+    },
+    {
+      "id": 10,
+      "op": "message_pipe_create",
+      "args": {
+        "flags": 0
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK",
+        "produce": [
+          "h2",
+          "h3"
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "op": "close",
+      "args": {
+        "handle": "h2"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK"
+      }
+    },
+    {
+      "id": 12,
+      "op": "close",
+      "args": {
+        "handle": "h3"
+      },
+      "expect": {
+        "result": "MOJO_RESULT_OK"
+      }
+    }
   ],
   "expected_contract": {
     "note": "close is idempotent-error (second close INVALID_ARGUMENT); closed handle cannot be used; handle-table reuse must not confuse stale identities (a NEW handle after reuse must behave as new)"

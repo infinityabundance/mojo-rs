@@ -127,12 +127,12 @@ mod tests {
 
         let closed = SignalsState {
             satisfied: Signals::PEER_CLOSED,
-            satisfiable: Signals::NONE,
+            satisfiable: Signals::PEER_CLOSED | Signals::QUOTA_EXCEEDED,
         };
         assert!(closed.watch_result(Signals::READABLE).is_err());
         assert_eq!(
             closed.watch_result(Signals::READABLE).err(),
-            Some(Signals::NONE)
+            Some(Signals::PEER_CLOSED | Signals::QUOTA_EXCEEDED)
         );
         assert!(closed.watch_result(Signals::PEER_CLOSED).is_ok());
         assert!(closed.is_unsatisfiable(Signals::READABLE));

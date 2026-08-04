@@ -27,6 +27,8 @@ RUN_ID="${MOJO_RS_RUN_ID:-court}"
 CHROMIUM_COMMIT="${CHROMIUM_COMMIT:-bfa3579138998e2fbb981725570fa588c5b6f8cd}"
 CHROMIUM_TAG="${CHROMIUM_TAG:-151.0.7922.105}"
 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.96.0}"
+# The pinned checkout's own prebuilt gn (pinned by gclient hooks).
+GN_BIN="$SRC/buildtools/linux64/gn"
 
 EVDIR="$EVIDENCE/$RUN_ID"
 mkdir -p "$EVDIR"/{oracle,candidate,abi,no-delegation,failures}
@@ -64,22 +66,18 @@ log "oracle build"
 mkdir -p "$ORACLE_OUT"
 cd "$SRC"
 if [ ! -f "$ORACLE_OUT/args.gn" ]; then
-  gn gen "$ORACLE_OUT" --args='
+  "$GN_BIN" gen "$ORACLE_OUT" --args='
     is_debug = false
     is_component_build = false
     use_custom_libcxx = false
+    v8_enable_sandbox = false
     symbol_level = 0
     enable_nacl = false
     treat_warnings_as_errors = false
     use_sysroot = false
-    use_allocator = "none"
-    fieldtrial_testing_config = "[]"
-    enable_remoting = false
-    enable_print_preview = false
-    blink_symbol_level = 0
   '
 else
-  gn gen "$ORACLE_OUT"
+  "$GN_BIN" gen "$ORACLE_OUT"
 fi
 ninja -C "$ORACLE_OUT" -j"$(nproc)" mojo_rs_oracle_driver
 DRIVER="$ORACLE_OUT/mojo_rs_oracle_driver"

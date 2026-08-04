@@ -11,6 +11,9 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1785863982}"
 SRC=/work/oracle-source/src
 OUT=/work/oracle-build/out/Oracle
 COMMIT="${CHROMIUM_COMMIT:-bfa3579138998e2fbb981725570fa588c5b6f8cd}"
+# The pinned checkout's own prebuilt gn (downloaded by gclient hooks) is the
+# deterministic gn; the depot_tools gn wrapper needs an interactive bootstrap.
+GN_BIN="$SRC/buildtools/linux64/gn"
 
 log() { printf '\n=== [oracle-build] %s ===\n' "$*"; }
 fail() { echo "FATAL: $*" >&2; exit 1; }
@@ -27,27 +30,22 @@ cd "$SRC"
 
 if [ ! -f "$OUT/args.gn" ]; then
   log "gn gen (initial)"
-  gn gen "$OUT" --args='
+  "$GN_BIN" gen "$OUT" --args='
     is_debug = false
     is_component_build = false
-    use_custom_libcxx = false
+    v8_enable_sandbox = false
     symbol_level = 0
-    enable_nacl = false
     treat_warnings_as_errors = false
     use_sysroot = false
-    use_allocator = "none"
-    fieldtrial_testing_config = "[]"
-    enable_remoting = false
-    enable_print_preview = false
-    blink_symbol_level = 0
+    root_extra_deps = ["//oracle_driver:mojo_rs_oracle_driver"]
   '
 else
   log "gn gen (reuse args.gn)"
-  gn gen "$OUT"
+  "$GN_BIN" gen "$OUT"
 fi
 
-log "ninja mojo_rs_oracle_driver"
-ninja -C "$OUT" -j"$(nproc)" mojo_rs_oracle_driver
+log "ninja oracle_driver:mojo_rs_oracle_driver"
+ninja -C "$OUT" -j"$(nproc)" oracle_driver:mojo_rs_oracle_driver
 
 DRIVER="$OUT/mojo_rs_oracle_driver"
 [ -x "$DRIVER" ] || fail "oracle driver not produced"

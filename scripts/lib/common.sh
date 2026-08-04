@@ -9,7 +9,7 @@ fi
 MOJO_RS_COMMON_LOADED=1
 
 # Resolve the repository root (parent of scripts/).
-MOJO_RS_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MOJO_RS_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 mojo_rs_fail() {
   printf 'FATAL: %s\n' "$*" >&2

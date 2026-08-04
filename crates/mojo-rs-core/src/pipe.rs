@@ -19,7 +19,7 @@ use crate::dispatcher::{Dispatcher, DispatcherType, WatchId};
 use crate::error::{CoreError, CoreResult};
 use crate::message::Message;
 use crate::signal::{Signals, SignalsState};
-use crate::trap::WatchCallback;
+use crate::trap::{WatchCallback, WatchKind};
 
 /// One end of a message pipe pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +179,9 @@ impl MessagePipe {
         state.endpoints[peer as usize].peer_closed = true;
         let peer_callbacks = collect_notifications(&mut state.endpoints[peer as usize]);
         drop(state);
-        invoke_all(cancelled_here);
+        for (_id, cb, state) in cancelled_here {
+            cb(state, WatchKind::Cancelled);
+        }
         invoke_all(peer_callbacks);
     }
 
@@ -255,22 +257,30 @@ impl EndpointState {
 }
 
 /// Compute the signal state of an endpoint.
+///
+/// Mirrors the pinned epoch's `MojoQueryHandleSignalsStateIpcz` (core_ipcz.cc):
+/// the satisfiable set always includes `PEER_CLOSED | QUOTA_EXCEEDED`;
+/// `WRITABLE | PEER_REMOTE` are satisfiable only while the peer is open;
+/// `READABLE` remains satisfiable while the portal is not "dead" (a portal is
+/// dead when its peer is closed AND its parcel queue is empty); satisfied
+/// signals are the intersection of the current state with the satisfiable set.
 fn signals_of(ep: &EndpointState) -> SignalsState {
     let mut satisfied = Signals::NONE;
     let mut satisfiable = Signals::NONE;
     if !ep.local_closed {
-        if !ep.queue.is_empty() {
-            satisfied = satisfied | Signals::READABLE;
-        }
+        satisfiable = satisfiable | Signals::PEER_CLOSED | Signals::QUOTA_EXCEEDED;
         if !ep.peer_closed {
             satisfied = satisfied | Signals::WRITABLE;
-            satisfiable =
-                satisfiable | Signals::READABLE | Signals::WRITABLE | Signals::PEER_CLOSED;
+            satisfiable = satisfiable | Signals::WRITABLE | Signals::PEER_REMOTE;
         } else {
             satisfied = satisfied | Signals::PEER_CLOSED;
-            // After peer closure nothing can change: READABLE may drain but
-            // can never be re-satisfied.
-            satisfiable = Signals::NONE;
+        }
+        let dead = ep.peer_closed && ep.queue.is_empty();
+        if !dead {
+            satisfiable = satisfiable | Signals::READABLE;
+        }
+        if !ep.queue.is_empty() {
+            satisfied = satisfied | Signals::READABLE;
         }
     }
     SignalsState {
@@ -280,7 +290,10 @@ fn signals_of(ep: &EndpointState) -> SignalsState {
 }
 
 /// Collect the callbacks that must fire for an endpoint's watchers whose
-/// conditions are now satisfied or unsatisfiable (or cancelled).
+/// conditions are now satisfied or unsatisfiable. Watchers are NOT cancelled
+/// here: firing is gated by the trap's own armed state, and a fired watcher
+/// must be able to fire again after a re-arm (official ipcz one-shot trap
+/// semantics are implemented at the trap layer, not here).
 fn collect_notifications(ep: &mut EndpointState) -> Vec<(WatchId, WatchCallback, SignalsState)> {
     let state = signals_of(ep);
     let mut out = Vec::new();
@@ -290,14 +303,15 @@ fn collect_notifications(ep: &mut EndpointState) -> Vec<(WatchId, WatchCallback,
         }
         let fired = state.is_satisfied(w.signals) || state.is_unsatisfiable(w.signals);
         if fired {
-            w.cancelled = true;
             out.push((w.id, Arc::clone(&w.callback), state));
         }
     }
     out
 }
 
-/// Cancel all watchers on an endpoint (used on local close).
+/// Cancel all watchers on an endpoint (used on local close of the watched
+/// endpoint). The trap receives a `Cancelled` notification and delivers a
+/// CANCELLED event even when unarmed (official `TrapRemovalEventHandler`).
 fn cancel_watchers(ep: &mut EndpointState) -> Vec<(WatchId, WatchCallback, SignalsState)> {
     let mut out = Vec::new();
     for w in &mut ep.watchers {
@@ -313,7 +327,7 @@ fn cancel_watchers(ep: &mut EndpointState) -> Vec<(WatchId, WatchCallback, Signa
 /// Invoke collected watch callbacks after releasing the pipe lock.
 fn invoke_all(callbacks: Vec<(WatchId, WatchCallback, SignalsState)>) {
     for (_id, cb, state) in callbacks {
-        cb(state);
+        cb(state, WatchKind::Changed);
     }
 }
 
@@ -416,10 +430,15 @@ mod tests {
     #[test]
     fn write_read_roundtrip_fifo() {
         let (a, b) = fresh();
-        a.pipe().write(End::A, Message::new(vec![1], vec![])).unwrap();
-        a.pipe().write(End::A, Message::new(vec![2], vec![])).unwrap();
+        a.pipe()
+            .write(End::A, Message::new(vec![1], vec![]))
+            .unwrap();
+        a.pipe()
+            .write(End::A, Message::new(vec![2], vec![]))
+            .unwrap();
         assert!(
-            b.pipe().query_signals(End::B)
+            b.pipe()
+                .query_signals(End::B)
                 .satisfied
                 .contains(Signals::READABLE)
         );
@@ -442,7 +461,8 @@ mod tests {
     #[test]
     fn read_too_large_keeps_message() {
         let (a, b) = fresh();
-        a.pipe().write(End::A, Message::new(vec![1, 2, 3, 4], vec![]))
+        a.pipe()
+            .write(End::A, Message::new(vec![1, 2, 3, 4], vec![]))
             .unwrap();
         let outcome = b.pipe().read(End::B, Some(2), false).unwrap();
         match outcome {
@@ -460,23 +480,34 @@ mod tests {
     #[test]
     fn peer_closure_observed() {
         let (a, b) = fresh();
-        a.pipe().write(End::A, Message::new(vec![9], vec![])).unwrap();
+        a.pipe()
+            .write(End::A, Message::new(vec![9], vec![]))
+            .unwrap();
         a.close(); // closes endpoint A
         // Queued message still readable, then FAILED_PRECONDITION.
         let st = b.pipe().query_signals(End::B);
         assert!(st.satisfied.contains(Signals::READABLE));
         assert!(st.satisfied.contains(Signals::PEER_CLOSED));
+        // While messages remain the portal is not dead: READABLE stays
+        // satisfiable and WRITABLE drops out.
+        assert!(st.satisfiable.contains(Signals::READABLE));
+        assert!(st.satisfiable.contains(Signals::PEER_CLOSED));
+        assert!(!st.satisfiable.contains(Signals::WRITABLE));
         let _ = b.pipe().read(End::B, None, false).unwrap();
         assert_eq!(
             b.pipe().read(End::B, None, false).unwrap_err(),
             CoreError::FailedPrecondition
         );
-        // After draining: READABLE unsatisfied and unsatisfiable.
+        // After draining: the portal is dead (peer closed, no parcels):
+        // READABLE is satisfied by nothing and no longer satisfiable;
+        // WRITABLE can never be satisfied; PEER_CLOSED stays satisfied.
         let st = b.pipe().query_signals(End::B);
         assert!(!st.satisfied.contains(Signals::READABLE));
+        assert!(st.satisfied.contains(Signals::PEER_CLOSED));
         assert!(!st.satisfiable.contains(Signals::READABLE));
         assert!(!st.satisfiable.contains(Signals::WRITABLE));
-        assert!(!st.satisfiable.contains(Signals::PEER_CLOSED));
+        assert!(st.satisfiable.contains(Signals::PEER_CLOSED));
+        assert!(st.satisfiable.contains(Signals::QUOTA_EXCEEDED));
     }
 
     #[test]
@@ -494,11 +525,13 @@ mod tests {
         use std::sync::mpsc;
         let (a, b) = fresh();
         let (tx, rx) = mpsc::channel();
-        let cb: WatchCallback = Arc::new(move |state| {
+        let cb: WatchCallback = Arc::new(move |state, _kind| {
             let _ = tx.send(state);
         });
         b.pipe().register_watch(End::B, Signals::READABLE, cb);
-        a.pipe().write(End::A, Message::new(vec![7], vec![])).unwrap();
+        a.pipe()
+            .write(End::A, Message::new(vec![7], vec![]))
+            .unwrap();
         let state = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         assert!(state.satisfied.contains(Signals::READABLE));
     }

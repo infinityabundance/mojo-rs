@@ -1,0 +1,11 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"result","handle":"h1","op_id":2,"result":"MOJO_RESULT_OK","seq":3,"signals":{"satisfiable":["READABLE","WRITABLE","PEER_CLOSED","PEER_REMOTE","QUOTA_EXCEEDED"],"satisfied":["WRITABLE"]}}
+{"event":"result","handle":"h0","op_id":3,"result":"MOJO_RESULT_DEADLINE_EXCEEDED","seq":4,"signals":{"satisfiable":["READABLE","WRITABLE","PEER_CLOSED","PEER_REMOTE","QUOTA_EXCEEDED"],"satisfied":["WRITABLE"]}}
+{"event":"result","handle":"h1","op_id":4,"result":"MOJO_RESULT_OK","seq":5}
+{"event":"result","handle":"h0","op_id":5,"result":"MOJO_RESULT_OK","seq":6,"signals":{"satisfiable":["READABLE","WRITABLE","PEER_CLOSED","PEER_REMOTE","QUOTA_EXCEEDED"],"satisfied":["READABLE","WRITABLE"]}}
+{"event":"result","handle":"h0","op_id":6,"result":"MOJO_RESULT_DEADLINE_EXCEEDED","seq":7,"signals":{"satisfiable":["READABLE","WRITABLE","PEER_CLOSED","PEER_REMOTE","QUOTA_EXCEEDED"],"satisfied":["READABLE","WRITABLE"]}}
+{"event":"result","handle":"h1","op_id":7,"result":"MOJO_RESULT_OK","seq":8}
+{"event":"result","handle":"h0","op_id":8,"result":"MOJO_RESULT_OK","seq":9,"signals":{"satisfiable":["READABLE","PEER_CLOSED","QUOTA_EXCEEDED"],"satisfied":["READABLE","PEER_CLOSED"]}}
+{"event":"result","handle":"h0","op_id":9,"result":"MOJO_RESULT_OK","seq":10}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":11}

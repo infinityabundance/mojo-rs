@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mojo-rs.dev/schema/events.schema.json",
   "title": "mojo-rs harness events",
-  "description": "JSONL event stream produced by executing a casefile against one implementation (oracle driver or candidate harness). One JSON object per line.",
+  "description": "JSONL event stream produced by executing a casefile against one implementation (oracle driver or candidate harness). One JSON object per line. The shape matches the oracle driver's emission exactly (base::JSONWriter, lexicographically sorted keys): trap events carry the trigger result in the top-level `result`, the trigger context in `trigger_context`, and the signal state in `signals_state`.",
   "type": "object",
   "required": ["seq", "op_id", "event", "result"],
   "properties": {
@@ -11,23 +11,25 @@
     "event": {"type": "string", "enum": [
       "result", "signals", "message", "handle", "trap", "data", "buffer", "invitation", "process", "info", "error", "lifecycle"
     ]},
-    "result": {"type": "string", "description": "MOJO_RESULT_* name or numeric"},
+    "result": {"type": "string", "description": "MOJO_RESULT_* name; for trap events this is the trigger event's result (OK when satisfied, FAILED_PRECONDITION when unsatisfiable, CANCELLED on removal/closure)"},
     "handle": {"type": "string", "description": "symbolic handle token from the casefile"},
     "payload_hex": {"type": "string"},
     "handles": {"type": "array", "items": {"type": "string"}},
     "signals": {
       "type": "object",
+      "description": "signal state for `signals` events (query_signals_state / wait)",
       "properties": {
         "satisfied": {"type": "array", "items": {"type": "string"}},
         "satisfiable": {"type": "array", "items": {"type": "string"}}
       }
     },
-    "trap": {
+    "trigger_context": {"type": "integer", "description": "the trigger context for trap events"},
+    "signals_state": {
       "type": "object",
+      "description": "signal state at a trap event",
       "properties": {
-        "trigger_context": {"type": "integer"},
-        "signals_state": {"type": "object"},
-        "result": {"type": "string"}
+        "satisfied": {"type": "array", "items": {"type": "string"}},
+        "satisfiable": {"type": "array", "items": {"type": "string"}}
       }
     },
     "outputs": {"type": "object", "additionalProperties": true},

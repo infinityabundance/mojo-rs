@@ -1,0 +1,7 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"handle","handle":"p0","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"handle","handle":"p0","op_id":2,"result":"MOJO_RESULT_OK","seq":3}
+{"event":"handle","handle":"p0","op_id":3,"payload_hex":"","result":"MOJO_RESULT_OK","seq":4}
+{"event":"handle","handle":"p1","op_id":4,"result":"MOJO_RESULT_INVALID_ARGUMENT","seq":5}
+{"event":"handle","handle":"p1","op_id":5,"result":"MOJO_RESULT_INVALID_ARGUMENT","seq":6}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":7}

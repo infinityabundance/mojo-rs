@@ -89,17 +89,23 @@ solutions = [
 ]
 EOF
 
+# Shallow syncs are used throughout: deepening already-shallow dep clones
+# costs many hours for zero build benefit (the working tree at the pinned rev
+# is identical). If the shallow attempt fails, retry shallow once.
 SYNC_OK=0
 if [ "$SHALLOW" = 1 ]; then
-  info "gclient sync --shallow (attempt 1)"
-  if (cd "$SRC_ROOT" && gclient sync --shallow --no-history >> "$LOG" 2>&1); then
-    SYNC_OK=1
-  else
-    info "shallow sync failed; falling back to full sync"
-  fi
+  for attempt in 1 2 3; do
+    info "gclient sync --shallow (attempt $attempt)"
+    if (cd "$SRC_ROOT" && gclient sync --shallow --no-history >> "$LOG" 2>&1); then
+      SYNC_OK=1
+      break
+    fi
+    info "shallow attempt $attempt failed; retrying"
+  done
 fi
 if [ "$SYNC_OK" = 0 ]; then
-  (cd "$SRC_ROOT" && gclient sync >> "$LOG" 2>&1) || fail "gclient sync failed"
+  (cd "$SRC_ROOT" && gclient sync --shallow --no-history >> "$LOG" 2>&1) \
+    || fail "gclient sync failed"
 fi
 info "gclient sync complete"
 

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "MESSAGE_PIPE.HANDLES.003",
+  "status": "pass",
+  "oracle_events": 9,
+  "candidate_events": 9,
+  "normalizers_applied": [
+    "normalize.fd"
+  ],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "4c9613a861e9835c429364e0cd355d2210acd51c94060d6eaf23d3a3c60773ba",
+    "candidate_events_sha256": "4c9613a861e9835c429364e0cd355d2210acd51c94060d6eaf23d3a3c60773ba"
+  }
+}

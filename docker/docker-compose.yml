@@ -19,7 +19,7 @@ services:
       context: .
       dockerfile: docker/oracle.Dockerfile
       args:
-        ORACLE_BASE_IMAGE: ${MOJO_RS_ORACLE_BASE_IMAGE:-mojo-rs/ubuntu-base:latest}
+        ORACLE_BASE_IMAGE: ${MOJO_RS_BASE_IMAGE:-mojo-rs/ubuntu-base:18a42173dc0c9a02}
     image: mojo-rs/oracle:${MOJO_RS_ORACLE_IMAGE_TAG:-local}
     environment:
       MOJO_RS_DOCKER_ROOT: ${MOJO_RS_DOCKER_ROOT:-/nonexistent}
@@ -40,7 +40,7 @@ services:
       context: .
       dockerfile: docker/candidate.Dockerfile
       args:
-        CANDIDATE_BASE_IMAGE: ${MOJO_RS_CANDIDATE_BASE_IMAGE:-mojo-rs/ubuntu-base:latest}
+        CANDIDATE_BASE_IMAGE: ${MOJO_RS_BASE_IMAGE:-mojo-rs/ubuntu-base:18a42173dc0c9a02}
         RUST_TOOLCHAIN: ${MOJO_RS_RUST_TOOLCHAIN:-1.96.0}
     image: mojo-rs/candidate:${MOJO_RS_CANDIDATE_IMAGE_TAG:-local}
     environment:
@@ -59,7 +59,7 @@ services:
       context: .
       dockerfile: docker/court.Dockerfile
       args:
-        COURT_BASE_IMAGE: ${MOJO_RS_COURT_BASE_IMAGE:-mojo-rs/ubuntu-base:latest}
+        COURT_BASE_IMAGE: ${MOJO_RS_BASE_IMAGE:-mojo-rs/ubuntu-base:18a42173dc0c9a02}
     image: mojo-rs/court:${MOJO_RS_COURT_IMAGE_TAG:-local}
     environment:
       MOJO_RS_DOCKER_ROOT: ${MOJO_RS_DOCKER_ROOT:-/nonexistent}

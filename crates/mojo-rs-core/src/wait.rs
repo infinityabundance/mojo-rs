@@ -116,7 +116,7 @@ impl Waiter {
     fn watch_callback(&self) -> WatchCallback {
         let inner = Arc::clone(&self.inner);
         let cond = Arc::clone(&self.cond);
-        Arc::new(move |_state: SignalsState| {
+        Arc::new(move |_state: SignalsState, _kind: crate::trap::WatchKind| {
             if let Ok(mut i) = inner.lock() {
                 i.woken = true;
             }

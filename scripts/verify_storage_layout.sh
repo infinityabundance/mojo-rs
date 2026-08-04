@@ -16,6 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mojo_rs_require_cmd docker
 
+# The project daemon is the ONLY daemon this script may talk to.
+mojo_rs_export_docker_env
+
 FAIL=0
 fail() { printf '  FAIL: %s\n' "$*" >&2; FAIL=1; }
 ok() { printf '  OK: %s\n' "$*" >&2; }
@@ -54,11 +57,11 @@ if docker info >/dev/null 2>&1; then
   DOCKER_OK=1
   DOCKER_REPORTED_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "")"
   # The project daemon is required — the socket must be the configured one.
-  case "$DOCKER_HOST" in
+  case "${DOCKER_HOST:-}" in
     "$MOJO_RS_DOCKER_HOST")
       ok "project socket in use: $DOCKER_HOST" ;;
     *)
-      fail "DOCKER_HOST ($DOCKER_HOST) != configured project socket ($MOJO_RS_DOCKER_HOST)" ;;
+      fail "DOCKER_HOST (${DOCKER_HOST:-<unset>}) != configured project socket ($MOJO_RS_DOCKER_HOST)" ;;
   esac
 else
   fail "project daemon not reachable (run scripts/start_project_docker.sh)"

@@ -16,7 +16,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mojo_rs_log "project Docker daemon at $MOJO_RS_DOCKER_HOST"
 mojo_rs_require_cmd docker
-mojo_rs_require_cmd rootlesskit
 
 # Mandatory sub-layout under the project docker root.
 for sub in data-root exec-root buildkit run logs tmp bin state work; do
@@ -24,6 +23,7 @@ for sub in data-root exec-root buildkit run logs tmp bin state work; do
 done
 
 export PATH="$MOJO_RS_DOCKER_ROOT/bin:$PATH"
+mojo_rs_require_cmd rootlesskit
 mojo_rs_export_docker_env
 
 # ---------------------------------------------------------------------------

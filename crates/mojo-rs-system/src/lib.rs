@@ -9,6 +9,7 @@ pub mod message_pipe;
 pub mod shared_buffer;
 pub mod trap;
 
+/// Convenience re-exports.
 pub mod prelude {
-    pub use crate::message_pipe::{MessagePipe, MessagePipeEndpoint};
+    pub use crate::message_pipe::MessagePipeEndpoint;
 }

@@ -10,5 +10,5 @@ pub mod compare;
 pub mod events;
 pub mod normalizers;
 
-pub use casefile::{Casefile, Operation, Process, ProcessName};
+pub use casefile::{Casefile, Operation, Process};
 pub use events::Event;

@@ -13,17 +13,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TZ=UTC0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates xz-utils bzip2 file lsb-release pkg-config \
-    build-essential clang lld llvm ninja-build python3 \
+    sudo curl ca-certificates lsb-release pkg-config build-essential clang \
+    ninja-build python3 git xz-utils bzip2 file lld llvm \
     jq strace gdb binutils libc6-dbg \
-    libglib2.0-dev libnss3-dev libdrm-dev libxkbcommon-dev libgtk-3-dev \
-    libasound2-dev libpulse-dev libpci-dev libatk-bridge2.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned depot_tools (for gn/ninja during the oracle phase).
+# Canonical Chromium build dependencies (pinned revision).
+ARG CHROMIUM_TAG=151.0.7922.105
+RUN curl -fsSL "https://chromium.googlesource.com/chromium/src/+/refs/tags/${CHROMIUM_TAG}/build/install-build-deps.sh?format=TEXT" \
+    | base64 -d > /tmp/install-build-deps.sh \
+    && chmod +x /tmp/install-build-deps.sh \
+    && /tmp/install-build-deps.sh --no-prompt \
+    && rm -f /tmp/install-build-deps.sh
+
+# Pinned depot_tools.
 ARG DEPOT_TOOLS_COMMIT=d22ef3bf62a8c3c76d9c7427015bdfec7665587a
 RUN git clone https://chromium.googlesource.com/chromium/tools/depot_tools /opt/depot_tools \
     && git -C /opt/depot_tools checkout ${DEPOT_TOOLS_COMMIT} \
+    && cd /opt/depot_tools && ./update_depot_tools --no-history \
     && rm -rf /opt/depot_tools/.git
 ENV PATH="/opt/depot_tools:${PATH}"
 

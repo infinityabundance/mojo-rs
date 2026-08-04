@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "MESSAGE_PIPE.BIDIRECTIONAL.005",
+  "status": "pass",
+  "oracle_events": 9,
+  "candidate_events": 9,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "d5ba4e4fb05bcff7ce98c587bd5aef752eb80ad173b8dba09aba87b4f4f34a7c",
+    "candidate_events_sha256": "d5ba4e4fb05bcff7ce98c587bd5aef752eb80ad173b8dba09aba87b4f4f34a7c"
+  }
+}

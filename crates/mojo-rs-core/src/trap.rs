@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::dispatcher::{Dispatcher, WatchId};
+use crate::dispatcher::{Dispatcher, DispatcherType, WatchId};
 use crate::error::{CoreError, CoreResult};
 use crate::signal::SignalsState;
 
@@ -47,14 +47,23 @@ impl TrapCallback {
 }
 
 /// A callback invoked by a watched dispatcher when its signal state changes.
-pub type WatchCallback = Arc<dyn Fn(SignalsState) + Send + Sync>;
+pub type WatchCallback = Arc<dyn Fn(SignalsState, WatchKind) + Send + Sync>;
+
+/// Why a watch callback fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchKind {
+    /// The watched signals became satisfied or unsatisfiable (state change).
+    Changed,
+    /// The watched object was closed locally; the trigger is cancelled.
+    Cancelled,
+}
 
 /// The signal-change observer installed on a watched dispatcher.
 pub(crate) fn watch_callback(trap: &Weak<Trap>, context: u64) -> WatchCallback {
     let weak = Weak::clone(trap);
-    Arc::new(move |state| {
+    Arc::new(move |state, kind| {
         if let Some(trap) = weak.upgrade() {
-            trap.on_signal_change(context, state);
+            trap.on_watch(context, state, kind);
         }
     })
 }
@@ -148,7 +157,8 @@ impl Trap {
 
     /// Arm the trap. If any trigger is already satisfied (or unsatisfiable),
     /// returns `CoreError::FailedPrecondition` and delivers the immediate
-    /// events through the callback.
+    /// events through the callback. Mirrors the official `MojoTrap::Arm`:
+    /// the trap becomes armed only if every trigger could be installed.
     pub fn arm(&self) -> CoreResult<()> {
         let mut inner = self.inner.lock().map_err(|_| CoreError::Internal)?;
         if inner.armed {
@@ -161,11 +171,26 @@ impl Trap {
                 continue;
             }
             let state = t.dispatcher.query_signals();
-            if state.is_satisfied(t.signals) || state.is_unsatisfiable(t.signals) {
+            if t.signals.is_empty() {
+                // Triggers watching no signals can never be armed.
+                immediate.push(TrapEvent {
+                    trigger_context: t.context,
+                    signals_state: SignalsState::default(),
+                    result: CoreError::FailedPrecondition,
+                });
+                continue;
+            }
+            if state.is_satisfied(t.signals) {
                 immediate.push(TrapEvent {
                     trigger_context: t.context,
                     signals_state: state,
                     result: CoreError::Ok,
+                });
+            } else if state.is_unsatisfiable(t.signals) {
+                immediate.push(TrapEvent {
+                    trigger_context: t.context,
+                    signals_state: state,
+                    result: CoreError::FailedPrecondition,
                 });
             }
         }
@@ -181,33 +206,67 @@ impl Trap {
         Ok(())
     }
 
-    /// Called by a watched dispatcher when the signal state changes.
-    fn on_signal_change(&self, context: u64, state: SignalsState) {
-        let mut inner = match self.inner.lock() {
-            Ok(i) => i,
-            Err(_) => return,
-        };
-        if !inner.armed {
-            return;
+    /// Called by a watched dispatcher when the signal state changes or the
+    /// watched object is closed.
+    fn on_watch(&self, context: u64, state: SignalsState, kind: WatchKind) {
+        match kind {
+            WatchKind::Cancelled => {
+                // The watched handle was closed: the trigger is removed and a
+                // CANCELLED event is delivered even if the trap is unarmed
+                // (official `HandleTrapRemoved` semantics).
+                let mut inner = match self.inner.lock() {
+                    Ok(i) => i,
+                    Err(_) => return,
+                };
+                let Some(idx) = inner
+                    .triggers
+                    .iter()
+                    .position(|t| t.context == context && !t.removed)
+                else {
+                    return;
+                };
+                let event = TrapEvent {
+                    trigger_context: context,
+                    signals_state: SignalsState::default(),
+                    result: CoreError::Cancelled,
+                };
+                inner.triggers[idx].removed = true;
+                drop(inner);
+                self.callback.invoke(&event);
+            }
+            WatchKind::Changed => {
+                let mut inner = match self.inner.lock() {
+                    Ok(i) => i,
+                    Err(_) => return,
+                };
+                if !inner.armed {
+                    return;
+                }
+                let Some(trigger) = inner
+                    .triggers
+                    .iter()
+                    .find(|t| t.context == context && !t.removed)
+                else {
+                    return;
+                };
+                // The watch fired because the signals became satisfied or
+                // unsatisfiable; the event result distinguishes the two
+                // (official `GetEventResultForSignalsState`).
+                let result = if state.is_satisfied(trigger.signals) {
+                    CoreError::Ok
+                } else {
+                    CoreError::FailedPrecondition
+                };
+                let event = TrapEvent {
+                    trigger_context: context,
+                    signals_state: state,
+                    result,
+                };
+                inner.armed = false;
+                drop(inner);
+                self.callback.invoke(&event);
+            }
         }
-        let Some(trigger) = inner
-            .triggers
-            .iter()
-            .find(|t| t.context == context && !t.removed)
-        else {
-            return;
-        };
-        // The watch fired because the signals became satisfied or
-        // unsatisfiable (the dispatcher only notifies in those cases).
-        let _ = trigger;
-        let event = TrapEvent {
-            trigger_context: context,
-            signals_state: state,
-            result: CoreError::Ok,
-        };
-        inner.armed = false;
-        drop(inner);
-        self.callback.invoke(&event);
     }
 
     /// Fire a cancellation event for a removed trigger.
@@ -260,5 +319,29 @@ mod tests {
         };
         cb.invoke(&e);
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+}
+
+impl Dispatcher for Trap {
+    fn dispatcher_type(&self) -> DispatcherType {
+        DispatcherType::Trap
+    }
+
+    fn query_signals(&self) -> SignalsState {
+        SignalsState::default()
+    }
+
+    fn on_closed(&self) {
+        self.close();
+    }
+
+    fn start_watch(&self, _signals: crate::signal::Signals, _callback: WatchCallback) -> WatchId {
+        WatchId::new(0)
+    }
+
+    fn cancel_watch(&self, _id: WatchId) {}
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

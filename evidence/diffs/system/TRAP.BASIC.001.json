@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "TRAP.BASIC.001",
+  "status": "pass",
+  "oracle_events": 17,
+  "candidate_events": 17,
+  "normalizers_applied": [
+    "normalize.timestamp"
+  ],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "a0f34697faa73d388cb29db7a929434d92092b8e77cc4a0d85420ba73638b1c1",
+    "candidate_events_sha256": "a0f34697faa73d388cb29db7a929434d92092b8e77cc4a0d85420ba73638b1c1"
+  }
+}

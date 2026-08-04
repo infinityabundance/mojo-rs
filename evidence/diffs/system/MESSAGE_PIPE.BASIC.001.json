@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "MESSAGE_PIPE.BASIC.001",
+  "status": "pass",
+  "oracle_events": 10,
+  "candidate_events": 10,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "02b0b6b706e32b418b6924feca1127dd3085dd746b9e6c86e4391b8fe82455b2",
+    "candidate_events_sha256": "02b0b6b706e32b418b6924feca1127dd3085dd746b9e6c86e4391b8fe82455b2"
+  }
+}

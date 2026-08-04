@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "SIGNALS.STATES.001",
+  "status": "pass",
+  "oracle_events": 17,
+  "candidate_events": 17,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "06eafc2e59d6aecacda9a799e6445e44f464d6a68462e3ea375d6867f16700ea",
+    "candidate_events_sha256": "06eafc2e59d6aecacda9a799e6445e44f464d6a68462e3ea375d6867f16700ea"
+  }
+}

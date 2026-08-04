@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "HANDLE.CLOSE.001",
+  "status": "pass",
+  "oracle_events": 14,
+  "candidate_events": 14,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "cee20d3c8fa2e57e0fe065890b5fde1d0fe113703be93095dccd50d6180f93b8",
+    "candidate_events_sha256": "cee20d3c8fa2e57e0fe065890b5fde1d0fe113703be93095dccd50d6180f93b8"
+  }
+}

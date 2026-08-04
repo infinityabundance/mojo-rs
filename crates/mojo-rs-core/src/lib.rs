@@ -12,6 +12,7 @@ pub mod error;
 pub mod handle;
 pub mod message;
 pub mod pipe;
+pub mod platform_handle;
 pub mod signal;
 pub mod trap;
 pub mod wait;

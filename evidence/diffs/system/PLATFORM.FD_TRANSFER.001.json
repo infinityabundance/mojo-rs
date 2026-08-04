@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "PLATFORM.FD_TRANSFER.001",
+  "status": "pass",
+  "oracle_events": 7,
+  "candidate_events": 7,
+  "normalizers_applied": [
+    "normalize.fd"
+  ],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "690490d46e52a9bf41d741eb7a2fdc9032f0386b7a32e9c1c563f470c2c0888a",
+    "candidate_events_sha256": "690490d46e52a9bf41d741eb7a2fdc9032f0386b7a32e9c1c563f470c2c0888a"
+  }
+}

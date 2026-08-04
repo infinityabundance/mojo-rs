@@ -95,6 +95,9 @@ MOJO_RS_ARTIFACT_ROOT="${MOJO_RS_ARTIFACT_ROOT:-$MOJO_RS_DOCKER_ROOT/artifacts}"
 MOJO_RS_MIN_FREE_BYTES="${MOJO_RS_MIN_FREE_BYTES:-53687091200}"
 MOJO_RS_MIN_FREE_BUILD_BYTES="${MOJO_RS_MIN_FREE_BUILD_BYTES:-32212254720}"
 MOJO_RS_ROOTLESS_TOOLING_SOURCE="${MOJO_RS_ROOTLESS_TOOLING_SOURCE:-}"
+# Pinned base image tag (deterministic from the admitted Ubuntu image digest;
+# see scripts/import_ubuntu_base.sh). Used as the FROM base for all images.
+MOJO_RS_BASE_IMAGE="${MOJO_RS_BASE_IMAGE:-mojo-rs/ubuntu-base:18a42173dc0c9a02}"
 
 # ---------------------------------------------------------------------------
 # validation / normalization
@@ -129,7 +132,7 @@ MOJO_RS_DOCKER_SOCK MOJO_RS_DOCKER_PIDFILE MOJO_RS_DAEMON_DATA MOJO_RS_DAEMON_EX
 MOJO_RS_BUILDKIT_ROOT MOJO_RS_ORACLE_SOURCE_ROOT MOJO_RS_WORK_ROOT MOJO_RS_LOGS \
 MOJO_RS_STATE MOJO_RS_UBUNTU_IMAGE_DIR MOJO_RS_UBUNTU_IMAGE MOJO_RS_BUILD_CACHE \
 MOJO_RS_ARTIFACT_ROOT MOJO_RS_MIN_FREE_BYTES MOJO_RS_MIN_FREE_BUILD_BYTES \
-MOJO_RS_ROOTLESS_TOOLING_SOURCE"
+MOJO_RS_ROOTLESS_TOOLING_SOURCE MOJO_RS_BASE_IMAGE"
 
 if [ "$MOJO_RS_PRINT_HUMAN" = 1 ]; then
   cat >&2 <<EOF
@@ -150,6 +153,7 @@ mojo-rs resolved configuration:
   Local config file:    ${mojo_rs_local_config:-<none>}
   Min free bytes:       $MOJO_RS_MIN_FREE_BYTES
   Min free build bytes: $MOJO_RS_MIN_FREE_BUILD_BYTES
+  Base image:           $MOJO_RS_BASE_IMAGE
 EOF
 fi
 

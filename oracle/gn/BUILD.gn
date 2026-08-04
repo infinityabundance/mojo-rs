@@ -1,0 +1,21 @@
+# mojo-rs oracle driver target.
+#
+# Compiled inside the pinned Chromium tree (applied via a deterministic patch
+# generated from oracle/driver/ and oracle/gn/BUILD.gn). Links the OFFICIAL
+# mojo core embedder — this is the behavioral oracle. The driver itself uses
+# only the public Mojo C System API plus base::JSON for the casefile protocol.
+
+executable("mojo_rs_oracle_driver") {
+  sources = [
+    "oracle_driver.cc",
+  ]
+
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
+  deps = [
+    "//base",
+    "//mojo/core/embedder:embedder",
+    "//mojo/public/c/system:headers",
+    "//mojo/public/c/system:system",
+  ]
+}

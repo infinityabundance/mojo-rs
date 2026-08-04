@@ -1,0 +1,31 @@
+{
+  "acceptor_exit": 0,
+  "artifacts": {
+    "oracle-acceptor.events": {
+      "bytes": 476,
+      "sha256": "e919e219a463d87d1035e47da9416f19eede94746289e889358caca092ef6e53"
+    },
+    "oracle-broker.events": {
+      "bytes": 547,
+      "sha256": "97b3ea0265d57ef04a036f295704ba9b9bcba22502abf1bdea89de2dfe8e123e"
+    },
+    "wire/acceptor-to-broker.bin": {
+      "bytes": 752,
+      "sha256": "8fb363c5261285d8c2a0aba570cfff2f0ae39fc933c2970079e01f173f1f1f2f"
+    },
+    "wire/broker-to-acceptor.bin": {
+      "bytes": 536,
+      "sha256": "af2a0e35bb0406a9bd8f20142d6023af2290d035ff69f7c1816f77a302ebb69b"
+    }
+  },
+  "broker_exit": 0,
+  "court": "invitations",
+  "generated_at_utc": "20260804T213647Z",
+  "inputs": {
+    "oracle_driver_binary": "4ba76470f008aa934721e673d8292e613f86c621598704a970496846f4d26d84",
+    "wire_relay_binary": "ed5f32347227a41b2051f1dc1dc9691d5166f2577693f6fe17c6486bf043d4a3"
+  },
+  "relay_exit": 0,
+  "schema_version": 1,
+  "status": "pass"
+}

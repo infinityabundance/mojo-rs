@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 pub mod dispatcher;
+pub mod error;
 pub mod handle;
 pub mod message;
 pub mod pipe;
@@ -15,12 +16,14 @@ pub mod signal;
 pub mod trap;
 pub mod wait;
 
+/// Convenience re-exports of the core API.
 pub mod prelude {
-    pub use crate::dispatcher::Dispatcher;
-    pub use crate::handle::{Handle, HandleTable, Token};
+    pub use crate::dispatcher::{Dispatcher, DispatcherType, WatchId};
+    pub use crate::error::{CoreError, CoreResult};
+    pub use crate::handle::{Handle, HandleTable, MojoHandleValue};
     pub use crate::message::{Message, MessageBody};
-    pub use crate::pipe::MessagePipe;
-    pub use crate::signal::Signals;
-    pub use crate::trap::{Trap, TriggerContext};
+    pub use crate::pipe::{End, MessagePipe, MessagePipeDispatcher, ReadOutcome};
+    pub use crate::signal::{Signals, SignalsState};
+    pub use crate::trap::{Trap, TrapCallback, TrapEvent, WatchCallback};
     pub use crate::wait::Waiter;
 }

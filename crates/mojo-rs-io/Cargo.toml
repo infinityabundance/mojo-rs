@@ -10,8 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-core = { path = "../mojo-rs-core" }
-mojo-rs-platform = { path = "../mojo-rs-platform" }
+mojo-rs-core = { workspace = true }
+mojo-rs-platform = { workspace = true }
 
 [lints]
 workspace = true

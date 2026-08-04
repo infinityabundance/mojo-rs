@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-casefile = { path = "../mojo-rs-casefile" }
+mojo-rs-casefile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

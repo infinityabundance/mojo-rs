@@ -10,11 +10,11 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-casefile = { path = "../mojo-rs-casefile" }
-mojo-rs-core = { path = "../mojo-rs-core" }
-mojo-rs-platform = { path = "../mojo-rs-platform" }
-mojo-rs-system = { path = "../mojo-rs-system" }
-mojo-rs-bindings = { path = "../mojo-rs-bindings" }
+mojo-rs-casefile = { workspace = true }
+mojo-rs-core = { workspace = true }
+mojo-rs-platform = { workspace = true }
+mojo-rs-system = { workspace = true }
+mojo-rs-bindings = { workspace = true }
 serde_json = { workspace = true }
 hex = "0.4"
 libc = { workspace = true }

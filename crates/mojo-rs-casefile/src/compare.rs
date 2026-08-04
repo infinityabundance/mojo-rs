@@ -176,6 +176,9 @@ fn sha256_events(events: &[Event]) -> Result<String, serde_json::Error> {
 }
 
 #[cfg(test)]
+// Test assertions intentionally use `unwrap()`; the workspace policy denies it
+// in runtime paths, and these modules are test-only.
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

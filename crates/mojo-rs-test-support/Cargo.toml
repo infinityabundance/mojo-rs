@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-casefile = { path = "../mojo-rs-casefile" }
+mojo-rs-casefile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = "0.4"

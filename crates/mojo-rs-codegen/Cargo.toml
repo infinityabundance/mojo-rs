@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-mojom = { path = "../mojo-rs-mojom" }
+mojo-rs-mojom = { workspace = true }
 
 [lints]
 workspace = true

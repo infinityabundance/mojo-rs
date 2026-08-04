@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-platform = { path = "../mojo-rs-platform" }
+mojo-rs-platform = { workspace = true }
 
 [dev-dependencies]
 loom = "0.7"

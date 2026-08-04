@@ -10,9 +10,15 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-mojo-rs-system = { path = "../mojo-rs-system" }
-mojo-rs-core = { path = "../mojo-rs-core" }
-mojo-rs-c-api = { path = "../mojo-rs-c-api" }
+mojo-rs-system = { workspace = true }
+mojo-rs-core = { workspace = true }
+mojo-rs-c-api = { workspace = true }
+mojo-rs-wire = { workspace = true }
+mojo-rs-platform = { workspace = true }
+mojo-rs-io = { workspace = true }
+mojo-rs-bindings = { workspace = true }
+mojo-rs-mojom = { workspace = true }
+mojo-rs-codegen = { workspace = true }
 
 [lints]
 workspace = true

@@ -98,6 +98,9 @@ pub fn json_eq(a: &Value, b: &Value) -> bool {
 }
 
 #[cfg(test)]
+// Test assertions intentionally use `unwrap()`; the workspace policy denies it
+// in runtime paths, and these modules are test-only.
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::events::{Event, EventKind};

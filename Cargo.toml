@@ -24,14 +24,31 @@ edition = "2024"
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
 authors = ["mojo-rs contributors"]
-repository = "https://example.invalid/mojo-rs"
-homepage = "https://example.invalid/mojo-rs"
+repository = "https://github.com/infinityabundance/mojo-rs"
+homepage = "https://github.com/infinityabundance/mojo-rs"
 description = "Native Rust implementation of Chromium Mojo IPC, serialization, bindings, and the public Mojo System C ABI, developed through forensic differential parity against a pinned official Chromium Mojo oracle."
 
 [workspace.dependencies]
 libc = { version = "0.2.172", default-features = false }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+
+# Internal workspace crates. Published to crates.io in lockstep: the `version`
+# satisfies crates.io publish resolution, the `path` keeps local builds pinned
+# to this checkout. Bump versions here and in every member manifest together.
+mojo-rs-bindings = { version = "0.1.0", path = "crates/mojo-rs-bindings" }
+mojo-rs-c-api = { version = "0.1.0", path = "crates/mojo-rs-c-api" }
+mojo-rs-casefile = { version = "0.1.0", path = "crates/mojo-rs-casefile" }
+mojo-rs-codegen = { version = "0.1.0", path = "crates/mojo-rs-codegen" }
+mojo-rs-core = { version = "0.1.0", path = "crates/mojo-rs-core" }
+mojo-rs-interop = { version = "0.1.0", path = "crates/mojo-rs-interop" }
+mojo-rs-io = { version = "0.1.0", path = "crates/mojo-rs-io" }
+mojo-rs-mojom = { version = "0.1.0", path = "crates/mojo-rs-mojom" }
+mojo-rs-oracle = { version = "0.1.0", path = "crates/mojo-rs-oracle" }
+mojo-rs-platform = { version = "0.1.0", path = "crates/mojo-rs-platform" }
+mojo-rs-system = { version = "0.1.0", path = "crates/mojo-rs-system" }
+mojo-rs-test-support = { version = "0.1.0", path = "crates/mojo-rs-test-support" }
+mojo-rs-wire = { version = "0.1.0", path = "crates/mojo-rs-wire" }
 
 # Runtime crates must stay dependency-light. Only mojo-rs-platform may depend on
 # libc; only tooling crates (casefile/oracle/interop/test-support) may use serde.

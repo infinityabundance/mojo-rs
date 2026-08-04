@@ -4,3 +4,4 @@
 #![deny(missing_docs)]
 
 pub mod clients;
+pub mod ipcz;

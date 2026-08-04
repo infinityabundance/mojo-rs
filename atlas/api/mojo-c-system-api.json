@@ -1,0 +1,2031 @@
+{
+  "schema_version": 1,
+  "generated_at": null,
+  "chromium_tag": "151.0.7922.105",
+  "chromium_commit": "bfa3579138998e2fbb981725570fa588c5b6f8cd",
+  "headers": [
+    {
+      "path": "mojo/public/c/system/buffer.h",
+      "local": "atlas/reference/buffer.h",
+      "sha256": "9a27ef7c263d29dee747f547e6bbd8b2d7ebf70e511f05c077905cf6ee6324b5",
+      "bytes": 9750
+    },
+    {
+      "path": "mojo/public/c/system/core.h",
+      "local": "atlas/reference/core.h",
+      "sha256": "5f2ed9840d715c7df190926a74c68208896599bb95fdb3a1c6358268a3b5973f",
+      "bytes": 847
+    },
+    {
+      "path": "mojo/public/c/system/data_pipe.h",
+      "local": "atlas/reference/data_pipe.h",
+      "sha256": "2498de2d4cd6aeb05cea05b2ee1a9cc9c1db0e60119b2590f1ca1a53bbffebb1",
+      "bytes": 19448
+    },
+    {
+      "path": "mojo/public/c/system/functions.h",
+      "local": "atlas/reference/functions.h",
+      "sha256": "22f6661d6a695e08690d7c8cbe7f2d95163af023fbeea20a1767d9fbc6e48c19",
+      "bytes": 4448
+    },
+    {
+      "path": "mojo/public/c/system/invitation.h",
+      "local": "atlas/reference/invitation.h",
+      "sha256": "fa72152c1d7e653007a869e136d16fc33b72520f39288d855d44882f26b2b6b7",
+      "bytes": 26728
+    },
+    {
+      "path": "mojo/public/c/system/macros.h",
+      "local": "atlas/reference/macros.h",
+      "sha256": "f3ea06898510664c0f0d34f5f5fdf6068a159701662520919690ede11fd2066e",
+      "bytes": 2654
+    },
+    {
+      "path": "mojo/public/c/system/message_pipe.h",
+      "local": "atlas/reference/message_pipe.h",
+      "sha256": "151238df0708f5433b8cbc17cd45933e2d021dc6d2e832e0cae50880e65523aa",
+      "bytes": 27393
+    },
+    {
+      "path": "mojo/public/c/system/platform_handle.h",
+      "local": "atlas/reference/platform_handle.h",
+      "sha256": "21551d225abee343a51e1f0ed50d94edd05b593a923b1808e8c2e9aef18dce9d",
+      "bytes": 14659
+    },
+    {
+      "path": "mojo/public/c/system/quota.h",
+      "local": "atlas/reference/quota.h",
+      "sha256": "90b1306dc831f8c423d34dbdbb9bf1089d11f7a6258436b98b6dd1a492b680a9",
+      "bytes": 5111
+    },
+    {
+      "path": "mojo/public/c/system/system_export.h",
+      "local": "atlas/reference/system_export.h",
+      "sha256": "82454a6d01223f41c35deb1a9e69b15d85d0a5d67e142f0ef857251911a77322",
+      "bytes": 710
+    },
+    {
+      "path": "mojo/public/c/system/trap.h",
+      "local": "atlas/reference/trap.h",
+      "sha256": "d4800cd98602852507924ba3c3eff3adfc9d4af2af67bdd31ed0d1916c4eb0ae",
+      "bytes": 13606
+    },
+    {
+      "path": "mojo/public/c/system/types.h",
+      "local": "atlas/reference/types.h",
+      "sha256": "4fd4800e902a4f3ddef04301d12a45972b7da11587c028a409bc9bf01934cfaa",
+      "bytes": 13810
+    },
+    {
+      "path": "mojo/public/c/system/thunks.h",
+      "local": "atlas/reference/thunks.h",
+      "sha256": "21b6baa7f946c5c4379e301fcb0503801ae6a76311611f2feb9ab6f979764eec",
+      "bytes": 20790
+    }
+  ],
+  "functions": [
+    {
+      "name": "MojoCreateSharedBuffer",
+      "return": "MojoResult",
+      "params": [
+        "uint64_t num_bytes",
+        "const struct MojoCreateSharedBufferOptions* options",
+        "MojoHandle* shared_buffer_handle"
+      ]
+    },
+    {
+      "name": "MojoDuplicateBufferHandle",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle buffer_handle",
+        "const struct MojoDuplicateBufferHandleOptions* options",
+        "MojoHandle* new_buffer_handle"
+      ]
+    },
+    {
+      "name": "MojoMapBuffer",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle buffer_handle",
+        "uint64_t offset",
+        "uint64_t num_bytes",
+        "const struct MojoMapBufferOptions* options",
+        "void** buffer"
+      ]
+    },
+    {
+      "name": "MojoUnmapBuffer",
+      "return": "MojoResult",
+      "params": [
+        "void* buffer"
+      ]
+    },
+    {
+      "name": "MojoGetBufferInfo",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle buffer_handle",
+        "const struct MojoGetBufferInfoOptions* options",
+        "struct MojoSharedBufferInfo* info"
+      ]
+    },
+    {
+      "name": "MojoCreateDataPipe",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoCreateDataPipeOptions* options",
+        "MojoHandle* data_pipe_producer_handle",
+        "MojoHandle* data_pipe_consumer_handle"
+      ]
+    },
+    {
+      "name": "MojoWriteData",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle data_pipe_producer_handle",
+        "const void* elements",
+        "uint32_t* num_bytes",
+        "const struct MojoWriteDataOptions* options"
+      ]
+    },
+    {
+      "name": "MojoBeginWriteData",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle data_pipe_producer_handle",
+        "const struct MojoBeginWriteDataOptions* options",
+        "void** buffer",
+        "uint32_t* buffer_num_bytes"
+      ]
+    },
+    {
+      "name": "MojoEndWriteData",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle data_pipe_producer_handle",
+        "uint32_t num_bytes_written",
+        "const struct MojoEndWriteDataOptions* options"
+      ]
+    },
+    {
+      "name": "MojoReadData",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle data_pipe_consumer_handle",
+        "const struct MojoReadDataOptions* options",
+        "void* elements",
+        "uint32_t* num_bytes"
+      ]
+    },
+    {
+      "name": "MojoBeginReadData",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle data_pipe_consumer_handle",
+        "const struct MojoBeginReadDataOptions* options",
+        "const void** buffer",
+        "uint32_t* buffer_num_bytes"
+      ]
+    },
+    {
+      "name": "MojoEndReadData",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle data_pipe_consumer_handle",
+        "uint32_t num_bytes_read",
+        "const struct MojoEndReadDataOptions* options"
+      ]
+    },
+    {
+      "name": "MojoInitialize",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoInitializeOptions* options"
+      ]
+    },
+    {
+      "name": "MojoShutdown",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoShutdownOptions* options"
+      ]
+    },
+    {
+      "name": "MojoClose",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle handle"
+      ]
+    },
+    {
+      "name": "MojoQueryHandleSignalsState",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle handle",
+        "struct MojoHandleSignalsState* signals_state"
+      ]
+    },
+    {
+      "name": "MojoCreateInvitation",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoCreateInvitationOptions* options",
+        "MojoHandle* invitation_handle"
+      ]
+    },
+    {
+      "name": "MojoAttachMessagePipeToInvitation",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle invitation_handle",
+        "const void* name",
+        "uint32_t name_num_bytes",
+        "const struct MojoAttachMessagePipeToInvitationOptions* options",
+        "MojoHandle* message_pipe_handle"
+      ]
+    },
+    {
+      "name": "MojoExtractMessagePipeFromInvitation",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle invitation_handle",
+        "const void* name",
+        "uint32_t name_num_bytes",
+        "const struct MojoExtractMessagePipeFromInvitationOptions* options",
+        "MojoHandle* message_pipe_handle"
+      ]
+    },
+    {
+      "name": "MojoSendInvitation",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle invitation_handle",
+        "const struct MojoPlatformProcessHandle* process_handle",
+        "const struct MojoInvitationTransportEndpoint* transport_endpoint",
+        "MojoProcessErrorHandler error_handler",
+        "uintptr_t error_handler_context",
+        "const struct MojoSendInvitationOptions* options"
+      ]
+    },
+    {
+      "name": "MojoAcceptInvitation",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoInvitationTransportEndpoint* transport_endpoint",
+        "const struct MojoAcceptInvitationOptions* options",
+        "MojoHandle* invitation_handle"
+      ]
+    },
+    {
+      "name": "MojoSetDefaultProcessErrorHandler",
+      "return": "MojoResult",
+      "params": [
+        "MojoDefaultProcessErrorHandler handler",
+        "const struct MojoSetDefaultProcessErrorHandlerOptions* options"
+      ]
+    },
+    {
+      "name": "MojoCreateMessagePipe",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoCreateMessagePipeOptions* options",
+        "// Optional. MojoHandle* message_pipe_handle0",
+        "// Out. MojoHandle* message_pipe_handle1"
+      ]
+    },
+    {
+      "name": "MojoWriteMessage",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle message_pipe_handle",
+        "MojoMessageHandle message",
+        "const struct MojoWriteMessageOptions* options"
+      ]
+    },
+    {
+      "name": "MojoReadMessage",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle message_pipe_handle",
+        "const struct MojoReadMessageOptions* options",
+        "MojoMessageHandle* message"
+      ]
+    },
+    {
+      "name": "MojoFuseMessagePipes",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle handle0",
+        "MojoHandle handle1",
+        "const struct MojoFuseMessagePipesOptions* options"
+      ]
+    },
+    {
+      "name": "MojoCreateMessage",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoCreateMessageOptions* options",
+        "MojoMessageHandle* message"
+      ]
+    },
+    {
+      "name": "MojoDestroyMessage",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message"
+      ]
+    },
+    {
+      "name": "MojoSerializeMessage",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "const struct MojoSerializeMessageOptions* options"
+      ]
+    },
+    {
+      "name": "MojoReserveMessageCapacity",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "uint32_t payload_buffer_size",
+        "uint32_t* buffer_size"
+      ]
+    },
+    {
+      "name": "MojoAppendMessageData",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "uint32_t payload_size",
+        "const MojoHandle* handles",
+        "uint32_t num_handles",
+        "const struct MojoAppendMessageDataOptions* options",
+        "void** buffer",
+        "uint32_t* buffer_size"
+      ]
+    },
+    {
+      "name": "MojoGetMessageData",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "const struct MojoGetMessageDataOptions* options",
+        "void** buffer",
+        "uint32_t* num_bytes",
+        "MojoHandle* handles",
+        "uint32_t* num_handles"
+      ]
+    },
+    {
+      "name": "MojoSetMessageContext",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "uintptr_t context",
+        "MojoMessageContextSerializer serializer",
+        "MojoMessageContextDestructor destructor",
+        "const struct MojoSetMessageContextOptions* options"
+      ]
+    },
+    {
+      "name": "MojoGetMessageContext",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "const struct MojoGetMessageContextOptions* options",
+        "uintptr_t* context"
+      ]
+    },
+    {
+      "name": "MojoNotifyBadMessage",
+      "return": "MojoResult",
+      "params": [
+        "MojoMessageHandle message",
+        "const char* error",
+        "uint32_t error_num_bytes",
+        "const struct MojoNotifyBadMessageOptions* options"
+      ]
+    },
+    {
+      "name": "MojoWrapPlatformHandle",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoPlatformHandle* platform_handle",
+        "const struct MojoWrapPlatformHandleOptions* options",
+        "MojoHandle* mojo_handle"
+      ]
+    },
+    {
+      "name": "MojoUnwrapPlatformHandle",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle mojo_handle",
+        "const struct MojoUnwrapPlatformHandleOptions* options",
+        "struct MojoPlatformHandle* platform_handle"
+      ]
+    },
+    {
+      "name": "MojoWrapPlatformSharedMemoryRegion",
+      "return": "MojoResult",
+      "params": [
+        "const struct MojoPlatformHandle* platform_handles",
+        "uint32_t num_platform_handles",
+        "uint64_t num_bytes",
+        "const struct MojoSharedBufferGuid* guid",
+        "MojoPlatformSharedMemoryRegionAccessMode access_mode",
+        "const struct MojoWrapPlatformSharedMemoryRegionOptions* options",
+        "MojoHandle* mojo_handle"
+      ]
+    },
+    {
+      "name": "MojoUnwrapPlatformSharedMemoryRegion",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle mojo_handle",
+        "const struct MojoUnwrapPlatformSharedMemoryRegionOptions* options",
+        "struct MojoPlatformHandle* platform_handles",
+        "uint32_t* num_platform_handles",
+        "uint64_t* num_bytes",
+        "struct MojoSharedBufferGuid* guid",
+        "MojoPlatformSharedMemoryRegionAccessMode* access_mode"
+      ]
+    },
+    {
+      "name": "MojoSetQuota",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle handle",
+        "MojoQuotaType type",
+        "uint64_t limit",
+        "const struct MojoSetQuotaOptions* options"
+      ]
+    },
+    {
+      "name": "MojoQueryQuota",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle handle",
+        "MojoQuotaType type",
+        "const struct MojoQueryQuotaOptions* options",
+        "uint64_t* limit",
+        "uint64_t* usage"
+      ]
+    },
+    {
+      "name": "MojoCreateTrap",
+      "return": "MojoResult",
+      "params": [
+        "MojoTrapEventHandler handler",
+        "const struct MojoCreateTrapOptions* options",
+        "MojoHandle* trap_handle"
+      ]
+    },
+    {
+      "name": "MojoAddTrigger",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle trap_handle",
+        "MojoHandle handle",
+        "MojoHandleSignals signals",
+        "MojoTriggerCondition condition",
+        "uintptr_t context",
+        "const struct MojoAddTriggerOptions* options"
+      ]
+    },
+    {
+      "name": "MojoRemoveTrigger",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle trap_handle",
+        "uintptr_t context",
+        "const struct MojoRemoveTriggerOptions* options"
+      ]
+    },
+    {
+      "name": "MojoArmTrap",
+      "return": "MojoResult",
+      "params": [
+        "MojoHandle trap_handle",
+        "const struct MojoArmTrapOptions* options",
+        "uint32_t* num_blocking_events",
+        "struct MojoTrapEvent* blocking_events"
+      ]
+    }
+  ],
+  "structs": [
+    {
+      "name": "MojoCreateSharedBufferOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoCreateSharedBufferFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoGetBufferInfoOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoGetBufferInfoFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSharedBufferInfo",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "uint64_t",
+          "name": "size"
+        }
+      ]
+    },
+    {
+      "name": "MojoDuplicateBufferHandleOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoDuplicateBufferHandleFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoMapBufferOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoMapBufferFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoCreateSharedBufferOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoGetBufferInfoOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSharedBufferInfo",
+      "size_bytes": 16,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoDuplicateBufferHandleOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoMapBufferOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoCreateDataPipeOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoCreateDataPipeFlags",
+          "name": "flags"
+        },
+        {
+          "type": "uint32_t",
+          "name": "element_num_bytes"
+        },
+        {
+          "type": "uint32_t",
+          "name": "capacity_num_bytes"
+        }
+      ]
+    },
+    {
+      "name": "MojoWriteDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoWriteDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoBeginWriteDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoBeginWriteDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoEndWriteDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoEndWriteDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoReadDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoReadDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoBeginReadDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoBeginReadDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoEndReadDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoEndReadDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoCreateDataPipeOptions",
+      "size_bytes": 16,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoWriteDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoBeginWriteDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoEndWriteDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoReadDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoBeginReadDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoEndReadDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoProcessErrorDetails",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "uint32_t",
+          "name": "error_message_length"
+        },
+        {
+          "type": "MojoProcessErrorFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoPlatformProcessHandle",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "uint64_t",
+          "name": "value"
+        }
+      ]
+    },
+    {
+      "name": "MojoInvitationTransportEndpoint",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoInvitationTransportType",
+          "name": "type"
+        },
+        {
+          "type": "uint32_t",
+          "name": "num_platform_handles"
+        }
+      ]
+    },
+    {
+      "name": "MojoCreateInvitationOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoCreateInvitationFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoAttachMessagePipeToInvitationOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoAttachMessagePipeToInvitationFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoExtractMessagePipeFromInvitationOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoExtractMessagePipeFromInvitationFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSendInvitationOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoSendInvitationFlags",
+          "name": "flags"
+        },
+        {
+          "type": "uint32_t",
+          "name": "isolated_connection_name_length"
+        }
+      ]
+    },
+    {
+      "name": "MojoAcceptInvitationOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoAcceptInvitationFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSetDefaultProcessErrorHandlerOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoSetDefaultProcessErrorHandlerFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoProcessErrorDetails",
+      "size_bytes": 24,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoPlatformProcessHandle",
+      "size_bytes": 16,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoInvitationTransportEndpoint",
+      "size_bytes": 24,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoCreateInvitationOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoAttachMessagePipeToInvitationOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSendInvitationOptions",
+      "size_bytes": 24,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoAcceptInvitationOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSetDefaultProcessErrorHandlerOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoCreateMessagePipeOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoCreateMessagePipeFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoWriteMessageOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoWriteMessageFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoReadMessageOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoReadMessageFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoFuseMessagePipesOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoFuseMessagePipesFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoCreateMessageOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoCreateMessageFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSerializeMessageOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoSerializeMessageFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoAppendMessageDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoAppendMessageDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoGetMessageDataOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoGetMessageDataFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSetMessageContextOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoSetMessageContextFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoGetMessageContextOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoGetMessageContextFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoNotifyBadMessageOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoNotifyBadMessageFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoCreateMessagePipeOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoWriteMessageOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoReadMessageOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoFuseMessagePipesOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoCreateMessageOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSerializeMessageOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoAppendMessageDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoGetMessageDataOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSetMessageContextOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoGetMessageContextOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoNotifyBadMessageOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoPlatformHandle",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoPlatformHandleType",
+          "name": "type"
+        },
+        {
+          "type": "uint64_t",
+          "name": "value"
+        }
+      ]
+    },
+    {
+      "name": "MojoWrapPlatformHandleOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoWrapPlatformHandleFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoUnwrapPlatformHandleOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoUnwrapPlatformHandleFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSharedBufferGuid",
+      "fields": [
+        {
+          "type": "uint64_t",
+          "name": "high"
+        },
+        {
+          "type": "uint64_t",
+          "name": "low"
+        }
+      ]
+    },
+    {
+      "name": "MojoWrapPlatformSharedMemoryRegionOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoWrapPlatformSharedMemoryRegionFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoUnwrapPlatformSharedMemoryRegionOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoUnwrapPlatformSharedMemoryRegionFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoPlatformHandle",
+      "size_bytes": 16,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoWrapPlatformHandleOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoUnwrapPlatformHandleOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoWrapPlatformSharedMemoryRegionOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSetQuotaOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoSetQuotaFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoQueryQuotaOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoQueryQuotaFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoSetQuotaOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoQueryQuotaOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoTrapEvent",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoTrapEventFlags",
+          "name": "flags"
+        },
+        {
+          "type": "MojoResult",
+          "name": "result"
+        },
+        {
+          "type": "struct MojoHandleSignalsState",
+          "name": "signals_state"
+        }
+      ]
+    },
+    {
+      "name": "MojoCreateTrapOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoCreateTrapFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoAddTriggerOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoAddTriggerFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoRemoveTriggerOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoRemoveTriggerFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoArmTrapOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoArmTrapFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoTrapEvent",
+      "size_bytes": 32,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoCreateTrapOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoAddTriggerOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoRemoveTriggerOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoArmTrapOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoInitializeOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoInitializeFlags",
+          "name": "flags"
+        },
+        {
+          "type": "uint32_t",
+          "name": "mojo_core_path_length"
+        },
+        {
+          "type": "int32_t",
+          "name": "argc"
+        }
+      ]
+    },
+    {
+      "name": "MojoShutdownOptions",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "struct_size"
+        },
+        {
+          "type": "MojoShutdownFlags",
+          "name": "flags"
+        }
+      ]
+    },
+    {
+      "name": "MojoHandleSignalsState",
+      "fields": [
+        {
+          "type": "MojoHandleSignals",
+          "name": "satisfied_signals"
+        },
+        {
+          "type": "MojoHandleSignals",
+          "name": "satisfiable_signals"
+        }
+      ]
+    },
+    {
+      "name": "MojoInitializeOptions",
+      "size_bytes": 32,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoShutdownOptions",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoHandleSignalsState",
+      "size_bytes": 8,
+      "from_static_assert": true
+    },
+    {
+      "name": "MojoSystemThunks2",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "size"
+        }
+      ]
+    },
+    {
+      "name": "MojoSystemThunks",
+      "fields": [
+        {
+          "type": "uint32_t",
+          "name": "size"
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "name": "MojoCreateSharedBufferFlags"
+    },
+    {
+      "name": "MojoGetBufferInfoFlags"
+    },
+    {
+      "name": "MojoDuplicateBufferHandleFlags"
+    },
+    {
+      "name": "MojoMapBufferFlags"
+    },
+    {
+      "name": "MojoCreateDataPipeFlags"
+    },
+    {
+      "name": "MojoWriteDataFlags"
+    },
+    {
+      "name": "MojoBeginWriteDataFlags"
+    },
+    {
+      "name": "MojoEndWriteDataFlags"
+    },
+    {
+      "name": "MojoReadDataFlags"
+    },
+    {
+      "name": "MojoBeginReadDataFlags"
+    },
+    {
+      "name": "MojoEndReadDataFlags"
+    },
+    {
+      "name": "MojoProcessErrorFlags"
+    },
+    {
+      "name": "MojoCreateInvitationFlags"
+    },
+    {
+      "name": "MojoAttachMessagePipeToInvitationFlags"
+    },
+    {
+      "name": "MojoExtractMessagePipeFromInvitationFlags"
+    },
+    {
+      "name": "MojoSendInvitationFlags"
+    },
+    {
+      "name": "MojoAcceptInvitationFlags"
+    },
+    {
+      "name": "MojoSetDefaultProcessErrorHandlerFlags"
+    },
+    {
+      "name": "MojoCreateMessagePipeFlags"
+    },
+    {
+      "name": "MojoWriteMessageFlags"
+    },
+    {
+      "name": "MojoReadMessageFlags"
+    },
+    {
+      "name": "MojoFuseMessagePipesFlags"
+    },
+    {
+      "name": "MojoCreateMessageFlags"
+    },
+    {
+      "name": "MojoSerializeMessageFlags"
+    },
+    {
+      "name": "MojoAppendMessageDataFlags"
+    },
+    {
+      "name": "MojoGetMessageDataFlags"
+    },
+    {
+      "name": "MojoSetMessageContextFlags"
+    },
+    {
+      "name": "MojoGetMessageContextFlags"
+    },
+    {
+      "name": "MojoNotifyBadMessageFlags"
+    },
+    {
+      "name": "MojoWrapPlatformHandleFlags"
+    },
+    {
+      "name": "MojoUnwrapPlatformHandleFlags"
+    },
+    {
+      "name": "MojoWrapPlatformSharedMemoryRegionFlags"
+    },
+    {
+      "name": "MojoUnwrapPlatformSharedMemoryRegionFlags"
+    },
+    {
+      "name": "MojoSetQuotaFlags"
+    },
+    {
+      "name": "MojoQueryQuotaFlags"
+    },
+    {
+      "name": "MojoTrapEventFlags"
+    },
+    {
+      "name": "MojoCreateTrapFlags"
+    },
+    {
+      "name": "MojoAddTriggerFlags"
+    },
+    {
+      "name": "MojoRemoveTriggerFlags"
+    },
+    {
+      "name": "MojoArmTrapFlags"
+    },
+    {
+      "name": "MojoInitializeFlags"
+    },
+    {
+      "name": "MojoShutdownFlags"
+    }
+  ],
+  "constants": [
+    {
+      "name": "MOJO_CREATE_SHARED_BUFFER_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_GET_BUFFER_INFO_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_DUPLICATE_BUFFER_HANDLE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_DUPLICATE_BUFFER_HANDLE_FLAG_READ_ONLY",
+      "value": "((uint32_t)1 << 0)"
+    },
+    {
+      "name": "MOJO_MAP_BUFFER_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_CREATE_DATA_PIPE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_WRITE_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_WRITE_DATA_FLAG_ALL_OR_NONE",
+      "value": "((uint32_t)1 << 0)"
+    },
+    {
+      "name": "MOJO_BEGIN_WRITE_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_BEGIN_WRITE_DATA_FLAG_ALL_OR_NONE",
+      "value": "((uint32_t)1 << 0)"
+    },
+    {
+      "name": "MOJO_END_WRITE_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_READ_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_READ_DATA_FLAG_ALL_OR_NONE",
+      "value": "((uint32_t)1 << 0)"
+    },
+    {
+      "name": "MOJO_READ_DATA_FLAG_DISCARD",
+      "value": "((uint32_t)1 << 1)"
+    },
+    {
+      "name": "MOJO_READ_DATA_FLAG_QUERY",
+      "value": "((uint32_t)1 << 2)"
+    },
+    {
+      "name": "MOJO_READ_DATA_FLAG_PEEK",
+      "value": "((uint32_t)1 << 3)"
+    },
+    {
+      "name": "MOJO_BEGIN_READ_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_END_READ_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_PROCESS_ERROR_FLAG_NONE",
+      "value": "((MojoProcessErrorFlags)0)"
+    },
+    {
+      "name": "MOJO_PROCESS_ERROR_FLAG_DISCONNECTED",
+      "value": "((MojoProcessErrorFlags)1)"
+    },
+    {
+      "name": "MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL",
+      "value": "((MojoInvitationTransportType)0)"
+    },
+    {
+      "name": "MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL_SERVER",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL_ASYNC",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_CREATE_INVITATION_FLAG_NONE",
+      "value": "((MojoCreateInvitationFlags)0)"
+    },
+    {
+      "name": "MOJO_ATTACH_MESSAGE_PIPE_TO_INVITATION_FLAG_NONE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_EXTRACT_MESSAGE_PIPE_FROM_INVITATION_FLAG_NONE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_SEND_INVITATION_FLAG_NONE",
+      "value": "((MojoSendInvitationFlags)0)"
+    },
+    {
+      "name": "MOJO_SEND_INVITATION_FLAG_ISOLATED",
+      "value": "((MojoSendInvitationFlags)1)"
+    },
+    {
+      "name": "MOJO_SEND_INVITATION_FLAG_UNTRUSTED_PROCESS",
+      "value": "((MojoSendInvitationFlags)2)"
+    },
+    {
+      "name": "MOJO_SEND_INVITATION_FLAG_ELEVATED",
+      "value": "((MojoSendInvitationFlags)4)"
+    },
+    {
+      "name": "MOJO_SEND_INVITATION_FLAG_SHARE_BROKER",
+      "value": "((MojoSendInvitationFlags)8)"
+    },
+    {
+      "name": "MOJO_ACCEPT_INVITATION_FLAG_NONE",
+      "value": "((MojoAcceptInvitationFlags)0)"
+    },
+    {
+      "name": "MOJO_ACCEPT_INVITATION_FLAG_ISOLATED",
+      "value": "((MojoAcceptInvitationFlags)1)"
+    },
+    {
+      "name": "MOJO_ACCEPT_INVITATION_FLAG_LEAK_TRANSPORT_ENDPOINT",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_ACCEPT_INVITATION_FLAG_ELEVATED",
+      "value": "((MojoAcceptInvitationFlags)4)"
+    },
+    {
+      "name": "MOJO_ACCEPT_INVITATION_FLAG_INHERIT_BROKER",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_SET_DEFAULT_PROCESS_ERROR_HANDLER_FLAG_NONE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_MESSAGE_HANDLE_INVALID",
+      "value": "((MojoMessageHandle)0)"
+    },
+    {
+      "name": "MOJO_CREATE_MESSAGE_PIPE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_WRITE_MESSAGE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_READ_MESSAGE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_FUSE_MESSAGE_PIPES_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_CREATE_MESSAGE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_CREATE_MESSAGE_FLAG_UNLIMITED_SIZE",
+      "value": "((uint32_t)1)"
+    },
+    {
+      "name": "MOJO_SERIALIZE_MESSAGE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_APPEND_MESSAGE_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_APPEND_MESSAGE_DATA_FLAG_COMMIT_SIZE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_GET_MESSAGE_DATA_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_GET_MESSAGE_DATA_FLAG_IGNORE_HANDLES",
+      "value": "((uint32_t)1)"
+    },
+    {
+      "name": "MOJO_SET_MESSAGE_CONTEXT_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_GET_MESSAGE_CONTEXT_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_NOTIFY_BAD_MESSAGE_FLAG_NONE",
+      "value": "((uint32_t)0)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_INVALID",
+      "value": "((MojoPlatformHandleType)0)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_FILE_DESCRIPTOR",
+      "value": "((MojoPlatformHandleType)1)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_MACH_PORT",
+      "value": "((MojoPlatformHandleType)2)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_WINDOWS_HANDLE",
+      "value": "((MojoPlatformHandleType)3)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_FUCHSIA_HANDLE",
+      "value": "((MojoPlatformHandleType)4)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_MACH_SEND_RIGHT",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_MACH_RECEIVE_RIGHT",
+      "value": "((MojoPlatformHandleType)5)"
+    },
+    {
+      "name": "MOJO_PLATFORM_HANDLE_TYPE_BINDER",
+      "value": "((MojoPlatformHandleType)6)"
+    },
+    {
+      "name": "MOJO_WRAP_PLATFORM_HANDLE_FLAG_NONE",
+      "value": "((MojoWrapPlatformHandleFlags)0)"
+    },
+    {
+      "name": "MOJO_UNWRAP_PLATFORM_HANDLE_FLAG_NONE",
+      "value": "((MojoUnwrapPlatformHandleFlags)0)"
+    },
+    {
+      "name": "MOJO_PLATFORM_SHARED_MEMORY_REGION_ACCESS_MODE_READ_ONLY",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_PLATFORM_SHARED_MEMORY_REGION_ACCESS_MODE_WRITABLE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_PLATFORM_SHARED_MEMORY_REGION_ACCESS_MODE_UNSAFE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_WRAP_PLATFORM_SHARED_BUFFER_HANDLE_FLAG_NONE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_UNWRAP_PLATFORM_SHARED_BUFFER_HANDLE_FLAG_NONE",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_SET_QUOTA_FLAG_NONE",
+      "value": "((MojoSetQuotaFlags)0)"
+    },
+    {
+      "name": "MOJO_QUERY_QUOTA_FLAG_NONE",
+      "value": "((MojoQueryQuotaFlags)0)"
+    },
+    {
+      "name": "MOJO_QUOTA_LIMIT_NONE",
+      "value": "((uint64_t)0xffffffffffffffff)"
+    },
+    {
+      "name": "MOJO_QUOTA_TYPE_RECEIVE_QUEUE_LENGTH",
+      "value": "((MojoQuotaType)0)"
+    },
+    {
+      "name": "MOJO_QUOTA_TYPE_RECEIVE_QUEUE_MEMORY_SIZE",
+      "value": "((MojoQuotaType)1)"
+    },
+    {
+      "name": "MOJO_QUOTA_TYPE_UNREAD_MESSAGE_COUNT",
+      "value": "((MojoQuotaType)2)"
+    },
+    {
+      "name": "MOJO_PUBLIC_C_SYSTEM_SYSTEM_EXPORT_H_",
+      "value": "#if defined(COMPONENT_BUILD)"
+    },
+    {
+      "name": "MOJO_SYSTEM_EXPORT",
+      "value": "__declspec(dllexport)"
+    },
+    {
+      "name": "MOJO_SYSTEM_EXPORT",
+      "value": "__declspec(dllimport)"
+    },
+    {
+      "name": "MOJO_SYSTEM_EXPORT",
+      "value": "__attribute__((visibility(\"default\")))"
+    },
+    {
+      "name": "MOJO_SYSTEM_EXPORT",
+      "value": "#endif  // defined(COMPONENT_BUILD)"
+    },
+    {
+      "name": "MOJO_TRAP_EVENT_FLAG_NONE",
+      "value": "((MojoTrapEventFlags)0)"
+    },
+    {
+      "name": "MOJO_TRAP_EVENT_FLAG_WITHIN_API_CALL",
+      "value": "((MojoTrapEventFlags)1 << 0)"
+    },
+    {
+      "name": "MOJO_TRIGGER_CONDITION_SIGNALS_UNSATISFIED",
+      "value": "((MojoTriggerCondition)0)"
+    },
+    {
+      "name": "MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED",
+      "value": "((MojoTriggerCondition)1)"
+    },
+    {
+      "name": "MOJO_CREATE_TRAP_FLAG_NONE",
+      "value": "((MojoCreateTrapFlags)0)"
+    },
+    {
+      "name": "MOJO_ADD_TRIGGER_FLAG_NONE",
+      "value": "((MojoAddTriggerFlags)0)"
+    },
+    {
+      "name": "MOJO_REMOVE_TRIGGER_FLAG_NONE",
+      "value": "((MojoRemoveTriggerFlags)0)"
+    },
+    {
+      "name": "MOJO_ARM_TRAP_FLAG_NONE",
+      "value": "((MojoArmTrapFlags)0)"
+    },
+    {
+      "name": "MOJO_HANDLE_INVALID",
+      "value": "((MojoHandle)0)"
+    },
+    {
+      "name": "MOJO_RESULT_OK",
+      "value": "((MojoResult)0)"
+    },
+    {
+      "name": "MOJO_RESULT_CANCELLED",
+      "value": "((MojoResult)1)"
+    },
+    {
+      "name": "MOJO_RESULT_UNKNOWN",
+      "value": "((MojoResult)2)"
+    },
+    {
+      "name": "MOJO_RESULT_INVALID_ARGUMENT",
+      "value": "((MojoResult)3)"
+    },
+    {
+      "name": "MOJO_RESULT_DEADLINE_EXCEEDED",
+      "value": "((MojoResult)4)"
+    },
+    {
+      "name": "MOJO_RESULT_NOT_FOUND",
+      "value": "((MojoResult)5)"
+    },
+    {
+      "name": "MOJO_RESULT_ALREADY_EXISTS",
+      "value": "((MojoResult)6)"
+    },
+    {
+      "name": "MOJO_RESULT_PERMISSION_DENIED",
+      "value": "((MojoResult)7)"
+    },
+    {
+      "name": "MOJO_RESULT_RESOURCE_EXHAUSTED",
+      "value": "((MojoResult)8)"
+    },
+    {
+      "name": "MOJO_RESULT_FAILED_PRECONDITION",
+      "value": "((MojoResult)9)"
+    },
+    {
+      "name": "MOJO_RESULT_ABORTED",
+      "value": "((MojoResult)10)"
+    },
+    {
+      "name": "MOJO_RESULT_OUT_OF_RANGE",
+      "value": "((MojoResult)11)"
+    },
+    {
+      "name": "MOJO_RESULT_UNIMPLEMENTED",
+      "value": "((MojoResult)12)"
+    },
+    {
+      "name": "MOJO_RESULT_INTERNAL",
+      "value": "((MojoResult)13)"
+    },
+    {
+      "name": "MOJO_RESULT_UNAVAILABLE",
+      "value": "((MojoResult)14)"
+    },
+    {
+      "name": "MOJO_RESULT_DATA_LOSS",
+      "value": "((MojoResult)15)"
+    },
+    {
+      "name": "MOJO_RESULT_BUSY",
+      "value": "((MojoResult)16)"
+    },
+    {
+      "name": "MOJO_RESULT_SHOULD_WAIT",
+      "value": "((MojoResult)17)"
+    },
+    {
+      "name": "MOJO_INITIALIZE_FLAG_NONE",
+      "value": "((MojoInitializeFlags)0)"
+    },
+    {
+      "name": "MOJO_INITIALIZE_FLAG_AS_BROKER",
+      "value": "((MojoInitializeFlags)1)"
+    },
+    {
+      "name": "MOJO_INITIALIZE_FLAG_FORCE_DIRECT_SHARED_MEMORY_ALLOCATION",
+      "value": "\\"
+    },
+    {
+      "name": "MOJO_INITIALIZE_FLAG_LOAD_ONLY",
+      "value": "((MojoInitializeFlags)4)"
+    },
+    {
+      "name": "MOJO_SHUTDOWN_FLAG_NONE",
+      "value": "((MojoShutdownFlags)0)"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_NONE",
+      "value": "((MojoHandleSignals)0)"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_READABLE",
+      "value": "((MojoHandleSignals)1 << 0)"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_WRITABLE",
+      "value": "((MojoHandleSignals)1 << 1)"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_PEER_CLOSED",
+      "value": "((MojoHandleSignals)1 << 2)"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_NEW_DATA_READABLE",
+      "value": "((MojoHandleSignals)1 << 3);"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_PEER_REMOTE",
+      "value": "((MojoHandleSignals)1 << 4);"
+    },
+    {
+      "name": "MOJO_HANDLE_SIGNAL_QUOTA_EXCEEDED",
+      "value": "((MojoHandleSignals)1 << 5);"
+    },
+    {
+      "name": "MOJO_WATCH_CONDITION_SATISFIED",
+      "value": "MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED"
+    },
+    {
+      "name": "MOJO_WATCH_CONDITION_NOT_SATISFIED",
+      "value": "\\"
+    }
+  ]
+}

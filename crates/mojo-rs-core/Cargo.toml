@@ -1,0 +1,19 @@
+[package]
+name = "mojo-rs-core"
+description = "Native Mojo runtime core for mojo-rs: handle table, dispatchers, message pipes, signals, traps, waits, invitations, routing, resource accounting, shutdown."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-platform = { path = "../mojo-rs-platform" }
+
+[dev-dependencies]
+loom = "0.7"
+
+[lints]
+workspace = true

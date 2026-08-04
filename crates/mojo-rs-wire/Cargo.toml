@@ -1,0 +1,19 @@
+[package]
+name = "mojo-rs-wire"
+description = "Wire-format encoding, decoding, and validation for Chromium Mojo messages (epoch 1: 151.0.7922.105, CoreIpcz)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+hex = "0.4"
+
+[lints]
+workspace = true

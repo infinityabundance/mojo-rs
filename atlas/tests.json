@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "epoch": 1,
+  "chromium_tag": "151.0.7922.105",
+  "provenance": {
+    "note": "Upstream test inventory: mojo test targets at the pinned revision that define the observable contract. The oracle driver and courts are built to reproduce the externally observable behavior these tests assert.",
+    "verified": true
+  },
+  "test_targets": [
+    {
+      "path": "mojo/core",
+      "targets": [
+        "mojo_core_unittests",
+        "mojo_core_tests",
+        "mojo_core_perftests"
+      ],
+      "coverage": [
+        "message pipe semantics",
+        "data pipe semantics",
+        "shared buffer semantics",
+        "platform handles",
+        "traps",
+        "invitations",
+        "node channel routing",
+        "port transfer",
+        "process death"
+      ]
+    },
+    {
+      "path": "mojo/public/c/system",
+      "targets": ["mojo_public_system_unittests", "mojo_public_system_perftests"],
+      "coverage": ["C System API behavior", "message read/write probing", "handle signals"]
+    },
+    {
+      "path": "mojo/public/cpp/bindings",
+      "targets": ["mojo_cpp_bindings_unittests"],
+      "coverage": ["serialization", "validation", "request/response", "associated interfaces", "versioning"]
+    },
+    {
+      "path": "mojo/public/cpp/system",
+      "targets": ["mojo_cpp_system_unittests"],
+      "coverage": ["C++ RAII wrappers", "traps via C++", "data pipe C++ API"]
+    },
+    {
+      "path": "mojo/public/tools/mojom",
+      "targets": ["mojom_parser_unittests", "mojom_generator_unittests"],
+      "coverage": ["mojom grammar", "semantic validation", "code generation"]
+    }
+  ],
+  "use": "These targets are rebuilt by the oracle where practical and used as the compatibility oracle for the corresponding mojo-rs courts."
+}

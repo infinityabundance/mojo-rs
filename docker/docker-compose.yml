@@ -1,0 +1,84 @@
+# ---------------------------------------------------------------------------
+# mojo-rs portable docker-compose (addendum §3, §7).
+#
+# This file contains NO host-specific paths. All host-specific values arrive
+# via environment variables resolved by scripts/configure_local_environment.sh
+# and exported by scripts/compose_project.sh:
+#   MOJO_RS_DOCKER_ROOT  (bind-mounted host state: oracle source, build, toolchain)
+#   MOJO_RS_REPO_ROOT    (read-only bind mount of the checked-out repository)
+#
+# Container-internal paths and one named volume (court-evidence) are used
+# throughout. The isolated daemon's data root places the named volume under the
+# configured project storage automatically. A bind mount that resolves to the
+# portable fallback (e.g. /nonexistent) fails loudly at container start, which
+# is the intended behavior when the environment was not configured.
+# ---------------------------------------------------------------------------
+services:
+  oracle:
+    build:
+      context: .
+      dockerfile: docker/oracle.Dockerfile
+      args:
+        ORACLE_BASE_IMAGE: ${MOJO_RS_ORACLE_BASE_IMAGE:-mojo-rs/ubuntu-base:latest}
+    image: mojo-rs/oracle:${MOJO_RS_ORACLE_IMAGE_TAG:-local}
+    environment:
+      MOJO_RS_DOCKER_ROOT: ${MOJO_RS_DOCKER_ROOT:-/nonexistent}
+      CHROMIUM_TAG: ${MOJO_RS_CHROMIUM_TAG:-151.0.7922.105}
+      CHROMIUM_COMMIT: ${MOJO_RS_CHROMIUM_COMMIT:-bfa3579138998e2fbb981725570fa588c5b6f8cd}
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      TZ: UTC0
+      SOURCE_DATE_EPOCH: "1785863982"
+    volumes:
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/oracle-source:/work/oracle-source:ro
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/oracle-build:/work/oracle-build
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/toolchain:/work/toolchain
+    entrypoint: ["/usr/local/bin/oracle-build.sh"]
+
+  candidate:
+    build:
+      context: .
+      dockerfile: docker/candidate.Dockerfile
+      args:
+        CANDIDATE_BASE_IMAGE: ${MOJO_RS_CANDIDATE_BASE_IMAGE:-mojo-rs/ubuntu-base:latest}
+        RUST_TOOLCHAIN: ${MOJO_RS_RUST_TOOLCHAIN:-1.96.0}
+    image: mojo-rs/candidate:${MOJO_RS_CANDIDATE_IMAGE_TAG:-local}
+    environment:
+      RUST_TOOLCHAIN: ${MOJO_RS_RUST_TOOLCHAIN:-1.96.0}
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      TZ: UTC0
+      SOURCE_DATE_EPOCH: "1785863982"
+    volumes:
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/toolchain:/work/toolchain
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/candidate-target:/work/target
+    entrypoint: ["/usr/local/bin/candidate-build.sh"]
+
+  court:
+    build:
+      context: .
+      dockerfile: docker/court.Dockerfile
+      args:
+        COURT_BASE_IMAGE: ${MOJO_RS_COURT_BASE_IMAGE:-mojo-rs/ubuntu-base:latest}
+    image: mojo-rs/court:${MOJO_RS_COURT_IMAGE_TAG:-local}
+    environment:
+      MOJO_RS_DOCKER_ROOT: ${MOJO_RS_DOCKER_ROOT:-/nonexistent}
+      MOJO_RS_REPO_ROOT: ${MOJO_RS_REPO_ROOT:-/repo}
+      CHROMIUM_TAG: ${MOJO_RS_CHROMIUM_TAG:-151.0.7922.105}
+      CHROMIUM_COMMIT: ${MOJO_RS_CHROMIUM_COMMIT:-bfa3579138998e2fbb981725570fa588c5b6f8cd}
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      TZ: UTC0
+      SOURCE_DATE_EPOCH: "1785863982"
+    volumes:
+      - ${MOJO_RS_REPO_ROOT:-/repo}:/repo:ro
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/oracle-source:/work/oracle-source:ro
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/oracle-build:/work/oracle-build
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/toolchain:/work/toolchain
+      - ${MOJO_RS_DOCKER_ROOT:-/nonexistent}/work/candidate-target:/work/target
+      - court-evidence:/work/evidence
+    entrypoint: ["/usr/local/bin/court-run.sh"]
+
+volumes:
+  court-evidence:
+    name: mojo-rs-court-evidence

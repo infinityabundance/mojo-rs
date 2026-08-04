@@ -1,0 +1,19 @@
+[package]
+name = "mojo-rs-oracle"
+description = "Oracle-side harness: drives the official pinned Mojo C API via the casefile protocol and emits machine-readable events. Physically and logically separate from the candidate runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-casefile = { path = "../mojo-rs-casefile" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[lints]
+workspace = true

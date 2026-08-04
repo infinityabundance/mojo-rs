@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "case_id": "PLATFORM.FD_TRANSFER.001",
+  "court": "platform",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["platform_handles"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "platform_handle_wrap", "args": {"source": "memfd", "content_hex": "0123456789abcdef", "produce": ["p0"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 2, "op": "platform_handle_wrap", "args": {"source": "pipe", "content_hex": "", "produce": ["p1"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "platform_handle_unwrap", "args": {"handle": "p0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "platform_handle_unwrap", "args": {"handle": "p1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "platform_handle_unwrap", "args": {"handle": "p1"}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}}
+  ],
+  "expected_contract": {
+    "note": "wrap/unwrap round-trips preserve descriptor identity and content; a platform handle cannot be unwrapped twice (ownership consumed on first unwrap)"
+  },
+  "normalizers": [{"id": "normalize.fd"}]
+}

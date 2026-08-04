@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "case_id": "MESSAGE_PIPE.PEER_CLOSE.004",
+  "court": "message-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["message_pipe"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h0", "h1"]}},
+    {"id": 2, "op": "write_message", "args": {"handle": "h1", "payload_hex": "00", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "close", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 7, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "peer closure is eventually observable: queued messages remain readable, then reads fail with FAILED_PRECONDITION and PEER_CLOSED becomes satisfied"
+  },
+  "normalizers": []
+}

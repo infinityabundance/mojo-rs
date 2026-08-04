@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "epoch": 1,
+  "generated_at": null,
+  "provenance": "verified against chromium.googlesource / chromiumdash / local host",
+  "chromium": {
+    "tag": "151.0.7922.105",
+    "commit": "bfa3579138998e2fbb981725570fa588c5b6f8cd",
+    "committer_time": "2026-08-03T20:40:11Z",
+    "channel": "Stable",
+    "milestone": 151,
+    "architecture": "CoreIpcz",
+    "note": "In this epoch Mojo Core is implemented as a driver over ipcz (mojo/core -> CoreIpcz). The public C System ABI and wire format remain the compatibility contract."
+  },
+  "depot_tools": {
+    "commit": "d22ef3bf62a8c3c76d9c7427015bdfec7665587a",
+    "committer_time": "2026-08-04T11:05:49Z",
+    "note": "rolling tooling repo; pinned for deterministic gclient/gn/ninja behavior"
+  },
+  "rust": {
+    "toolchain": "1.96.0",
+    "msrv": "1.85.1",
+    "profile": "minimal",
+    "components": ["rustfmt", "clippy", "rust-src"]
+  },
+  "rootless_tooling": {
+    "rootlesskit_version": "2.3.2",
+    "rootlesskit_sha256": "d93d865f2de005efcf5a64d4bbd76506bd17c3ec6eb1e13046ab01c4ea8fbe71",
+    "rootlessctl_sha256": "f0da39a18b93d8da066e680d233c546a594de720d1be92e4b872e961b70a97f3",
+    "rootlesskit_docker_proxy_sha256": "35775c01e21797e88f4ccb8cee889b51d379615b616e16e83264c51614a3d77f",
+    "slirp4netns_version": "1.3.2",
+    "slirp4netns_sha256": "4d55a3658ae259e3e74bb75cf058eb05d6e39ad6bbe170ca8e94c2462bea0eb1",
+    "slirp4netns_commit": "0f13345bcef588d2bb70d662d41e92ee8a816d85",
+    "note": "moby/rootlesskit release assets are no longer downloadable upstream; binaries are staged from a verified local source (MOJO_RS_ROOTLESS_TOOLING_SOURCE) or pinned URLs where available"
+  },
+  "ubuntu_base_image": {
+    "file": "noble-server-cloudimg-amd64.img",
+    "sha256": "18a42173dc0c9a02c8230212c978b14cc3bbcff173f95dfa954cdaaa04f4a172",
+    "release": "Ubuntu 24.04 LTS noble server cloud image",
+    "arch": "amd64",
+    "source_dir_env": "MOJO_RS_UBUNTU_IMAGE_DIR"
+  },
+  "docker": {
+    "client": "29.1.5",
+    "server_min": "29.6.2",
+    "compose": "v5.1.1",
+    "buildx": "0.35.0",
+    "isolated_daemon": true,
+    "daemon_root_env": "MOJO_RS_DOCKER_ROOT"
+  },
+  "host_pins": {
+    "os": "CachyOS Linux (Arch-based)",
+    "kernel_observed": "7.1.4-1-cachyos",
+    "arch": "x86_64",
+    "glibc_observed": "2.43"
+  }
+}

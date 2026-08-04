@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mojo-rs",
+    "crates/mojo-rs-wire",
+    "crates/mojo-rs-core",
+    "crates/mojo-rs-system",
+    "crates/mojo-rs-platform",
+    "crates/mojo-rs-c-api",
+    "crates/mojo-rs-bindings",
+    "crates/mojo-rs-mojom",
+    "crates/mojo-rs-codegen",
+    "crates/mojo-rs-io",
+    "crates/mojo-rs-oracle",
+    "crates/mojo-rs-casefile",
+    "crates/mojo-rs-interop",
+    "crates/mojo-rs-test-support",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.1"
+license = "MIT OR Apache-2.0"
+authors = ["mojo-rs contributors"]
+repository = "https://example.invalid/mojo-rs"
+homepage = "https://example.invalid/mojo-rs"
+description = "Native Rust implementation of Chromium Mojo IPC, serialization, bindings, and the public Mojo System C ABI, developed through forensic differential parity against a pinned official Chromium Mojo oracle."
+
+[workspace.dependencies]
+libc = { version = "0.2.172", default-features = false }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+
+# Runtime crates must stay dependency-light. Only mojo-rs-platform may depend on
+# libc; only tooling crates (casefile/oracle/interop/test-support) may use serde.
+# No async runtime is hard-wired anywhere: mojo-rs-io integrates with the
+# executor of the embedding application.
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

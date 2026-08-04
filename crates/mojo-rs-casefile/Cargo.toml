@@ -1,0 +1,21 @@
+[package]
+name = "mojo-rs-casefile"
+description = "Casefile schema, replay protocol, harness events, and differential comparison for the mojo-rs forensic courts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "mojo-rs-casefile"
+path = "src/bin/mojo-rs-casefile.rs"
+
+[lints]
+workspace = true

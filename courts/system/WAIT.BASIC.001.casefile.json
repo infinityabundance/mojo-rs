@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "case_id": "WAIT.BASIC.001",
+  "court": "trap-and-wait",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["message_pipe", "wait"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h0", "h1"]}},
+    {"id": 2, "op": "wait", "args": {"handle": "h1", "signals": ["WRITABLE"], "deadline_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "wait", "args": {"handle": "h0", "signals": ["READABLE"], "deadline_ms": 100}, "expect": {"result": "MOJO_RESULT_DEADLINE_EXCEEDED"}},
+    {"id": 4, "op": "write_message", "args": {"handle": "h1", "payload_hex": "ff", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "wait", "args": {"handle": "h0", "signals": ["READABLE"], "deadline_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "wait", "args": {"handle": "h0", "signals": ["PEER_CLOSED"], "deadline_ms": 100}, "expect": {"result": "MOJO_RESULT_DEADLINE_EXCEEDED"}},
+    {"id": 7, "op": "close", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "wait", "args": {"handle": "h0", "signals": ["PEER_CLOSED"], "deadline_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "wait blocks until satisfied or deadline; satisfied-wait returns immediately; unsatisfiable conditions return FAILED_PRECONDITION (covered elsewhere)"
+  },
+  "normalizers": [{"id": "normalize.timestamp"}]
+}

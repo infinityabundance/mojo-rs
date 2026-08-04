@@ -1,0 +1,18 @@
+[package]
+name = "mojo-rs-interop"
+description = "Interoperability test clients: unchanged-style C++/C consumers and mixed-language interface courts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-casefile = { path = "../mojo-rs-casefile" }
+mojo-rs-system = { path = "../mojo-rs-system" }
+mojo-rs-bindings = { path = "../mojo-rs-bindings" }
+
+[lints]
+workspace = true

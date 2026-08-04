@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "epoch": 1,
+  "chromium_tag": "151.0.7922.105",
+  "provenance": {
+    "note": "All sizes and layouts below are extracted from the pinned revision's headers (atlas/reference/wire/*) and verified by static_assert in the source. This is ground truth, not prose.",
+    "sources": [
+      "mojo/public/cpp/bindings/lib/bindings_internal.h",
+      "mojo/public/cpp/bindings/lib/message_internal.h",
+      "mojo/public/cpp/bindings/lib/array_internal.h",
+      "mojo/public/cpp/bindings/lib/map_internal.h",
+      "mojo/public/cpp/bindings/lib/string_internal.h",
+      "mojo/public/cpp/bindings/lib/union_internal.h",
+      "mojo/public/c/system/message_pipe.h"
+    ]
+  },
+  "alignment": {
+    "kMessageAlignment": 8,
+    "note": "messages are padded to 8-byte alignment; all wire objects are 8-aligned"
+  },
+  "packed_headers": {
+    "note": "message header structs are declared under #pragma pack(push, 1)"
+  },
+  "struct_header": {
+    "name": "StructHeader",
+    "size_bytes": 8,
+    "fields": [
+      {"name": "num_bytes", "type": "uint32", "offset": 0},
+      {"name": "version", "type": "uint32", "offset": 4}
+    ]
+  },
+  "message_headers": [
+    {
+      "name": "MessageHeader",
+      "size_bytes": 24,
+      "fields": [
+        {"name": "struct_header", "type": "StructHeader", "offset": 0, "size": 8},
+        {"name": "interface_id", "type": "uint32", "offset": 8},
+        {"name": "name", "type": "uint32", "offset": 12},
+        {"name": "flags", "type": "uint32", "offset": 16},
+        {"name": "trace_nonce", "type": "uint32", "offset": 20}
+      ]
+    },
+    {
+      "name": "MessageHeaderV1",
+      "size_bytes": 32,
+      "extends": "MessageHeader",
+      "fields": [
+        {"name": "request_id", "type": "uint64", "offset": 24}
+      ],
+      "note": "used when kFlagExpectsResponse or kFlagIsResponse is set"
+    },
+    {
+      "name": "MessageHeaderV2",
+      "size_bytes": 48,
+      "extends": "MessageHeaderV1",
+      "fields": [
+        {"name": "payload", "type": "GenericPointer", "offset": 32},
+        {"name": "payload_interface_ids", "type": "Pointer<Array_Data<uint32_t>>", "offset": 40}
+      ],
+      "note": "used when kFlagHasInterfaceId or associated endpoints present"
+    },
+    {
+      "name": "MessageHeaderV3",
+      "size_bytes": 56,
+      "extends": "MessageHeaderV2",
+      "fields": [
+        {"name": "creation_timeticks_us", "type": "int64", "offset": 48}
+      ],
+      "note": "used when kFlagUseV3Header (trace timeticks)"
+    }
+  ],
+  "message_flags": {
+    "kFlagExpectsResponse": "0x1",
+    "kFlagIsResponse": "0x2",
+    "kFlagIsSync": "0x4",
+    "kFlagHasInterfaceId": "0x8",
+    "kFlagUseV3Header": "0x10",
+    "note": "defined in mojo/public/cpp/bindings/message.h"
+  },
+  "pointer": {
+    "name": "Pointer<T>",
+    "size_bytes": 8,
+    "note": "offset from the pointer's own address to the target; 0 = null. EncodePointer/DecodePointer in bindings_internal.h"
+  },
+  "array_header": {
+    "name": "ArrayHeader",
+    "size_bytes": 8,
+    "fields": [
+      {"name": "num_bytes", "type": "uint32", "offset": 0},
+      {"name": "num_elements", "type": "uint32", "offset": 4}
+    ],
+    "note": "element alignment 8 unless packed; inline data follows the header"
+  },
+  "map_header": {
+    "note": "map encoding = struct { keys: Pointer<Array_Data<K>>, values: Pointer<Array_Data<V>> } (12 bytes padded to 16), validated for equal element counts"
+  },
+  "string": {
+    "note": "string encoding = struct { ArrayHeader (8 bytes), inline UTF-8 data, NUL terminator, padded to 8 }; no embedded NULs permitted in the payload"
+  },
+  "union": {
+    "note": "union encoding = struct { uint32 size, uint32 tag } followed by inline data aligned to max(8, field alignment); size covers header+inline data; larger unions are unsupported (>= 2^32-1 rejected)"
+  },
+  "handles": {
+    "Handle_Data": {"size_bytes": 4, "invalid": "0xFFFFFFFF (kEncodedInvalidHandleValue)"},
+    "Interface_Data": {"size_bytes": 8, "fields": ["Handle_Data handle", "uint32 version"]},
+    "AssociatedEndpointHandle_Data": {"size_bytes": 4, "invalid": "0xFFFFFFFF"},
+    "AssociatedInterface_Data": {"size_bytes": 8, "fields": ["AssociatedEndpointHandle_Data handle", "uint32 version"]},
+    "note": "handle values in messages are indices into the message's attached handle list (or associated-endpoint table for interface ids)"
+  },
+  "validation": {
+    "note": "validation model: relative offsets must be 8-aligned, in-bounds, and non-overlapping (claimed-region tracking); num_bytes checks; version checks; recursion limits; handle-count limits; no trust of attacker lengths; exact error classification via ValidationError enum (see validation_errors.h)"
+  }
+}

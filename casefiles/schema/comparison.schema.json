@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mojo-rs.dev/schema/comparison.schema.json",
+  "title": "mojo-rs case comparison result",
+  "description": "Result of comparing oracle events vs candidate events for one casefile after applying the declared normalizers.",
+  "type": "object",
+  "required": ["schema_version", "case_id", "status", "oracle_events", "candidate_events", "normalizers_applied", "residuals"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "case_id": {"type": "string"},
+    "status": {"type": "string", "enum": ["pass", "fail", "error"]},
+    "oracle_events": {"type": "integer"},
+    "candidate_events": {"type": "integer"},
+    "normalizers_applied": {"type": "array", "items": {"type": "string"}},
+    "residuals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "seq": {"type": "integer"},
+          "kind": {"type": "string", "enum": ["missing", "extra", "mismatch", "order", "field"]},
+          "oracle": {"type": "object"},
+          "candidate": {"type": "object"},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "oracle_events_sha256": {"type": "string"},
+        "candidate_events_sha256": {"type": "string"}
+      }
+    }
+  }
+}

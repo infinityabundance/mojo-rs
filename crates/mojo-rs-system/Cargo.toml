@@ -1,0 +1,17 @@
+[package]
+name = "mojo-rs-system"
+description = "Idiomatic safe Rust System API above the mojo-rs core. Ownership is enforced by Rust types; compatibility lives at the C ABI boundary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-core = { path = "../mojo-rs-core" }
+mojo-rs-platform = { path = "../mojo-rs-platform" }
+
+[lints]
+workspace = true

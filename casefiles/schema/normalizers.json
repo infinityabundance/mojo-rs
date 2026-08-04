@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "note": "Normalizer registry. Every normalizer used by a casefile must be registered here with a documented, tested, narrow scope. Normalization is ONLY for fields the public contract explicitly leaves nondeterministic: process ids, fd numbers, random endpoint tokens, absolute addresses, monotonic timestamps, and scheduler-dependent ordering where multiple valid orders are permitted by the contract.",
+  "normalizers": [
+    {
+      "id": "normalize.pid",
+      "scope": "event.pid, process ids",
+      "rule": "replace any process id with 'PID'",
+      "narrowness": "only pid fields",
+      "test": "casefiles/curated/NORMALIZER.PID.001"
+    },
+    {
+      "id": "normalize.fd",
+      "scope": "event.fd, descriptor numbers reported by platform_handle_wrap/unwrap",
+      "rule": "replace fd numbers with 'FD' (identity is tracked separately by the harness token)",
+      "narrowness": "only fd number fields; descriptor identity/closure state is NOT normalized",
+      "test": "casefiles/curated/NORMALIZER.FD.001"
+    },
+    {
+      "id": "normalize.timestamp",
+      "scope": "event.timestamp / monotonic clock fields",
+      "rule": "replace with elapsed ms since case start",
+      "narrowness": "only timestamp fields; ordering is preserved",
+      "test": "casefiles/curated/NORMALIZER.TIMESTAMP.001"
+    },
+    {
+      "id": "normalize.token",
+      "scope": "random endpoint/port tokens in event outputs",
+      "rule": "replace with deterministic token derived from sequence position",
+      "narrowness": "only fields explicitly marked token",
+      "test": "casefiles/curated/NORMALIZER.TOKEN.001"
+    },
+    {
+      "id": "normalize.trap_order",
+      "scope": "drain_trap_events ordering when multiple triggers are simultaneously satisfiable",
+      "rule": "sort events by (trigger_context) when the casefile declares multi-trigger nondeterminism",
+      "narrowness": "only applied when the casefile declares 'permitted_orders': ['trigger_context']",
+      "test": "casefiles/curated/NORMALIZER.TRAP_ORDER.001"
+    }
+  ]
+}

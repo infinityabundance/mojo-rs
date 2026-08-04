@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "court": "system",
+  "note": "System-level courts: message pipes, signals, traps, waits, handle lifecycle, platform handles, and (Phase 3+) cross-process transfer. Each case runs identically against the oracle driver and the candidate harness.",
+  "cases": [
+    "MESSAGE_PIPE.BASIC.001",
+    "MESSAGE_PIPE.PAYLOAD.002",
+    "MESSAGE_PIPE.HANDLES.003",
+    "MESSAGE_PIPE.PEER_CLOSE.004",
+    "MESSAGE_PIPE.BIDIRECTIONAL.005",
+    "SIGNALS.STATES.001",
+    "TRAP.BASIC.001",
+    "PLATFORM.FD_TRANSFER.001",
+    "WAIT.BASIC.001",
+    "HANDLE.CLOSE.001"
+  ],
+  "gates": [
+    "oracle-compared for every listed case",
+    "candidate events identical to oracle events after declared normalizers",
+    "no-delegation proof per run"
+  ]
+}

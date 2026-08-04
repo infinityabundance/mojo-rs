@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mojo-rs.dev/schema/events.schema.json",
+  "title": "mojo-rs harness events",
+  "description": "JSONL event stream produced by executing a casefile against one implementation (oracle driver or candidate harness). One JSON object per line.",
+  "type": "object",
+  "required": ["seq", "op_id", "event", "result"],
+  "properties": {
+    "seq": {"type": "integer", "minimum": 1},
+    "op_id": {"type": "integer", "minimum": 0, "description": "0 for lifecycle events outside operations"},
+    "event": {"type": "string", "enum": [
+      "result", "signals", "message", "handle", "trap", "data", "buffer", "invitation", "process", "info", "error", "lifecycle"
+    ]},
+    "result": {"type": "string", "description": "MOJO_RESULT_* name or numeric"},
+    "handle": {"type": "string", "description": "symbolic handle token from the casefile"},
+    "payload_hex": {"type": "string"},
+    "handles": {"type": "array", "items": {"type": "string"}},
+    "signals": {
+      "type": "object",
+      "properties": {
+        "satisfied": {"type": "array", "items": {"type": "string"}},
+        "satisfiable": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "trap": {
+      "type": "object",
+      "properties": {
+        "trigger_context": {"type": "integer"},
+        "signals_state": {"type": "object"},
+        "result": {"type": "string"}
+      }
+    },
+    "outputs": {"type": "object", "additionalProperties": true},
+    "process": {"type": "string", "description": "process name for multi-process cases (parent or peer name)"},
+    "pid": {"type": "integer"},
+    "fd": {"type": "integer"},
+    "note": {"type": "string"}
+  }
+}

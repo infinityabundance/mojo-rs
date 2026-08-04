@@ -1,0 +1,17 @@
+[package]
+name = "mojo-rs-io"
+description = "I/O integration for mojo-rs: executor/task integration without hard-wiring one async runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-core = { path = "../mojo-rs-core" }
+mojo-rs-platform = { path = "../mojo-rs-platform" }
+
+[lints]
+workspace = true

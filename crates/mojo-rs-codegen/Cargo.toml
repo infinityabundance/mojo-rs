@@ -1,0 +1,16 @@
+[package]
+name = "mojo-rs-codegen"
+description = "Deterministic Rust code generation from mojom definitions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-mojom = { path = "../mojo-rs-mojom" }
+
+[lints]
+workspace = true

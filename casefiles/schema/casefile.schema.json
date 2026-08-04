@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mojo-rs.dev/schema/casefile.schema.json",
+  "title": "mojo-rs casefile",
+  "description": "A replayable case file executed identically by the oracle driver (official Mojo C API) and the candidate harness (mojo-rs). The casefile is the single input; each side produces events.jsonl; the court compares.",
+  "type": "object",
+  "required": ["schema_version", "case_id", "court", "reference_revision", "seed", "preconditions", "operations", "expected_contract", "normalizers"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "case_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_.-]+$"},
+    "court": {"type": "string", "enum": ["wire", "abi", "system", "routing", "lifecycle", "platform", "bindings", "security", "performance", "handle-transfer", "message-pipe", "signals", "trap-and-wait", "data-pipe", "shared-buffer", "invitation-bootstrap"]},
+    "reference_revision": {"type": "string"},
+    "seed": {"type": "integer", "minimum": 0},
+    "preconditions": {
+      "type": "object",
+      "properties": {
+        "required_capabilities": {"type": "array", "items": {"type": "string"}},
+        "init": {"$ref": "#/$defs/init_options"}
+      }
+    },
+    "processes": {
+      "type": "object",
+      "description": "Multi-process cases. The parent operations run in the harness; each named peer runs in a spawned child process connected by a socketpair transport.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["operations"],
+        "properties": {
+          "operations": {"type": "array", "items": {"$ref": "#/$defs/operation"}},
+          "bootstrap": {"type": "string", "description": "name of the parent process this peer bootstraps from (default: parent)"}
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/operation"}
+    },
+    "expected_contract": {
+      "type": "object",
+      "description": "Named contract assertions the court checks beyond event equality.",
+      "additionalProperties": true
+    },
+    "normalizers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/normalizer"},
+      "description": "Named, narrow normalization rules applied to BOTH sides before comparison. Every rule must exist in the normalizer registry (casefiles/schema/normalizers.json)."
+    }
+  },
+  "$defs": {
+    "init_options": {
+      "type": "object",
+      "properties": {
+        "mode": {"type": "string", "enum": ["default", "broker", "non-broker"]},
+        "flags": {"type": "integer"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "required": ["id", "op"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "op": {"type": "string", "enum": [
+          "init", "shutdown",
+          "message_pipe_create", "write_message", "read_message", "query_signals_state",
+          "wait", "fuse_message_pipes",
+          "trap_create", "trap_add_trigger", "trap_remove_trigger", "trap_arm", "trap_close", "drain_trap_events",
+          "close",
+          "platform_handle_wrap", "platform_handle_unwrap", "wrap_platform_shared_memory_region", "unwrap_platform_shared_memory_region",
+          "data_pipe_create", "write_data", "read_data", "begin_write_data", "end_write_data", "begin_read_data", "end_read_data",
+          "shared_buffer_create", "duplicate_buffer_handle", "map_buffer", "unmap_buffer", "get_buffer_info",
+          "create_invitation", "attach_message_pipe_to_invitation", "extract_message_pipe_from_invitation",
+          "send_invitation", "accept_invitation",
+          "set_quota", "query_quota",
+          "set_process_error_handler",
+          "nop", "record", "yield"
+        ]},
+        "args": {"type": "object", "additionalProperties": true},
+        "expect": {
+          "type": "object",
+          "description": "Expected outcomes: result, produced handles, event kinds.",
+          "properties": {
+            "result": {"type": "string"},
+            "produce": {"type": "array", "items": {"type": "string"}},
+            "events": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "note": {"type": "string"}
+      }
+    },
+    "normalizer": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "description": "key into the normalizer registry"},
+        "params": {"type": "object", "additionalProperties": true}
+      }
+    }
+  }
+}

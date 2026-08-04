@@ -1,0 +1,21 @@
+[package]
+name = "mojo-rs-platform"
+description = "Platform layer for mojo-rs: Unix-domain transport, descriptor transfer, shared memory, polling, process bootstrap. Linux first; interfaces do not hard-code Unix semantics into the core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]

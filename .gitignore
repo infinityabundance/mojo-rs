@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# mojo-rs .gitignore
+#
+# Host-specific / machine-local configuration must NEVER be committed.
+# See .env.example for the portable template.
+# ---------------------------------------------------------------------------
+
+# Host-specific local environment overrides (addendum §4, §11)
+.env.local
+config/local.env
+.local/mojo-rs.env
+
+# Rust build output
+target/
+**/target/
+
+# Cargo build artifacts that must not be committed
+*.rlib
+*.rmeta
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+
+# Oracle source checkouts / large intermediate artifacts live OUTSIDE the repo
+# under the configured MOJO_RS_DOCKER_ROOT (host-specific; never committed).
+oracle-source/
+oracle/build/
+docker/cache/
+
+# Evidence staging (large, generated). Curated evidence is committed explicitly.
+evidence/staging/
+evidence/generated/
+
+# Court scratch
+courts/.scratch/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

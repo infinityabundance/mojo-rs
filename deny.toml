@@ -1,0 +1,29 @@
+# cargo-deny policy (Phase 0 gate: dependency auditing).
+# Run: cargo deny check --all-features
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+default = "deny"
+confidence-threshold = 0.8

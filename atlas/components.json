@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "epoch": 1,
+  "chromium_tag": "151.0.7922.105",
+  "provenance": {
+    "note": "Paths verified against the pinned revision via gitiles. Behavioral notes describe what the component is responsible for in this epoch (CoreIpcz architecture).",
+    "verified": true
+  },
+  "components": [
+    {
+      "name": "mojo/public/c/system",
+      "path": "mojo/public/c/system",
+      "type": "public C System ABI",
+      "role": "The compatibility contract: C headers, thunks, and the Mojo System C API (45 functions in this epoch).",
+      "files": [
+        "types.h", "functions.h", "message_pipe.h", "data_pipe.h", "buffer.h",
+        "platform_handle.h", "invitation.h", "trap.h", "quota.h", "macros.h",
+        "core.h", "system_export.h", "thunks.h", "thunks.cc"
+      ],
+      "notes": [
+        "thunks.h/cc: the C API is dispatched through a function-pointer table (MojoSystemThunks); libmojo_core.so exports MojoGetSystemThunks32/64.",
+        "consolidated headers in this epoch: data_pipe_consumer.h+producer.h -> data_pipe.h; shared_buffer.h -> buffer.h; handle.h -> types.h; wait_set.h and abi.h removed.",
+        "quota.h is new in this epoch (MojoSetQuota/MojoQueryQuota)."
+      ]
+    },
+    {
+      "name": "mojo/core (CoreIpcz)",
+      "path": "mojo/core",
+      "type": "core runtime",
+      "role": "Mojo Core implemented as a driver over ipcz: message pipes, data pipes, shared buffers, invitations, routing, traps, platform handles.",
+      "files": [
+        "core_ipcz.h", "embedder/embedder.h", "embedder/configuration.h",
+        "ipcz_driver/*", "BUILD.gn"
+      ],
+      "notes": [
+        "mojo/core:embedder_internal -> libmojo_core_embedder_internal",
+        "mojo/core/embedder:embedder -> libmojo_core_embedder (MojoInitialize/MojoShutdown)",
+        "//third_party/ipcz/src:ipcz_chromium provides the port/node machinery",
+        "routing, ports, and endpoint transfer semantics in this epoch come from ipcz"
+      ]
+    },
+    {
+      "name": "mojo/public/cpp/system",
+      "path": "mojo/public/cpp/system",
+      "type": "C++ System API",
+      "role": "RAII C++ wrappers over the C API (ScopedHandle, MessagePipeHandle, DataPipe, SharedBuffer, Trap).",
+      "notes": [
+        "compatibility target for unchanged C++ clients using the C System API"
+      ]
+    },
+    {
+      "name": "mojo/public/cpp/bindings",
+      "path": "mojo/public/cpp/bindings",
+      "type": "bindings runtime",
+      "role": "Interface bindings, serialization, validation, request/response correlation, control messages, associated interfaces.",
+      "files": [
+        "lib/bindings_internal.h", "lib/message_internal.h", "lib/message_header.h",
+        "lib/array_internal.h", "lib/map_internal.h", "lib/string_internal.h",
+        "lib/union_internal.h", "lib/validation_errors.h", "lib/message_framer.h",
+        "message.h", "interface_ptr.h", "receiver.h"
+      ]
+    },
+    {
+      "name": "mojo/public/tools/mojom",
+      "path": "mojo/public/tools/mojom",
+      "type": "mojom toolchain",
+      "role": "The Mojom IDL compiler (lexer, parser, semantic validation, C++/Java/JS code generators).",
+      "notes": [
+        "mojo-rs-mojom + mojo-rs-codegen must accept upstream .mojom corpora as compatibility inputs"
+      ]
+    },
+    {
+      "name": "ipcz",
+      "path": "third_party/ipcz/src",
+      "type": "routing engine",
+      "role": "Port-based message routing used by CoreIpcz: nodes, ports, route proxying, endpoint transfer, driver transport abstraction.",
+      "notes": [
+        "in this epoch, port transfer and routing state machines are ipcz's"
+      ]
+    },
+    {
+      "name": "mojo/core/channel",
+      "path": "mojo/core/channel_*",
+      "type": "platform transport",
+      "role": "Node-to-node transport: Unix domain sockets with SCM_RIGHTS fd transfer on Linux.",
+      "notes": [
+        "mojo-rs-platform implements the Linux transport natively"
+      ]
+    },
+    {
+      "name": "mojo/public/cpp/platform",
+      "path": "mojo/public/cpp/platform",
+      "type": "platform channel",
+      "role": "PlatformChannel / PlatformChannelEndpoint: socketpair-based process bootstrap used by invitations.",
+      "files": ["platform_channel.h", "platform_channel_endpoint.h"]
+    },
+    {
+      "name": "mojo/core/embedder",
+      "path": "mojo/core/embedder",
+      "type": "embedder entry",
+      "role": "MojoInitialize/MojoShutdown, process error callbacks, configuration.",
+      "files": ["embedder.h", "configuration.h", "scoped_ipc_support.h"]
+    }
+  ]
+}

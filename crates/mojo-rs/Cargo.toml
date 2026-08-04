@@ -1,0 +1,18 @@
+[package]
+name = "mojo-rs"
+description = "mojo-rs facade: the native Rust implementation of Chromium Mojo IPC, serialization, bindings, and the public Mojo System C ABI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-system = { path = "../mojo-rs-system" }
+mojo-rs-core = { path = "../mojo-rs-core" }
+mojo-rs-c-api = { path = "../mojo-rs-c-api" }
+
+[lints]
+workspace = true

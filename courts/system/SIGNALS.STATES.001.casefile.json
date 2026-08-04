@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "case_id": "SIGNALS.STATES.001",
+  "court": "signals",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["message_pipe", "signals"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h0", "h1"]}},
+    {"id": 2, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "query_signals_state", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "write_message", "args": {"handle": "h1", "payload_hex": "01", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "write_message", "args": {"handle": "h1", "payload_hex": "02", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "write_message", "args": {"handle": "h1", "payload_hex": "03", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 11, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 12, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 13, "op": "close", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 14, "op": "query_signals_state", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 15, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "complete signal-state structures compared at every step: satisfied/satisfiable sets and peer-closed flag; not only success codes"
+  },
+  "normalizers": []
+}

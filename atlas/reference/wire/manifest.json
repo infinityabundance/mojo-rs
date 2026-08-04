@@ -1,0 +1,65 @@
+{
+  "chromium_tag": "151.0.7922.105",
+  "files": [
+    {
+      "path": "mojo/public/cpp/bindings/lib/message_internal.h",
+      "local": "atlas/reference/wire/message_internal.h",
+      "bytes": 3085,
+      "sha256": "e9273c8501ec9cb3f3a5b2b239bdc261816a1fc327aa70e2786a625e24e790d7"
+    },
+    {
+      "path": "mojo/public/cpp/bindings/lib/validation_context.h",
+      "local": "atlas/reference/wire/validation_context.h",
+      "bytes": 6951,
+      "sha256": "c3a77d8702b16d66c3972b44cd9f977900f86da4ffce7eb84961542e96b367a4"
+    },
+    {
+      "path": "mojo/public/cpp/bindings/message.h",
+      "local": "atlas/reference/wire/message.h",
+      "bytes": 18957,
+      "sha256": "5136647de15c09bc76cd484ebddea305a681bf7e1d901b4512be10c2bae93091"
+    },
+    {
+      "path": "mojo/public/c/system/message_pipe.h",
+      "local": "atlas/reference/wire/message_pipe.h",
+      "bytes": 27393,
+      "sha256": "151238df0708f5433b8cbc17cd45933e2d021dc6d2e832e0cae50880e65523aa"
+    },
+    {
+      "path": "mojo/public/cpp/platform/platform_channel.h",
+      "local": "atlas/reference/wire/platform_channel.h",
+      "bytes": 4810,
+      "sha256": "08f515662a1e44908cddeee24c9b0722c679608c7a75190fc41d7ead3fc35a08"
+    },
+    {
+      "path": "mojo/public/cpp/platform/platform_channel_endpoint.h",
+      "local": "atlas/reference/wire/platform_channel_endpoint.h",
+      "bytes": 3614,
+      "sha256": "3d26d0e1b19534639212ddba42370de512f1701a706e5b9a6a63932e1cee0e5e"
+    },
+    {
+      "path": "mojo/public/cpp/bindings/lib/bindings_internal.h",
+      "local": "atlas/reference/wire/bindings_internal.h",
+      "bytes": 10207,
+      "sha256": "e0711bb56a5c3e7723850b87d76630e4e6184d03e9591c7e6c47128742a1e019"
+    },
+    {
+      "path": "mojo/public/cpp/bindings/lib/serialization.h",
+      "local": "atlas/reference/wire/serialization.h",
+      "bytes": 5031,
+      "sha256": "eb6e90519f8d4257322d85771a9129052399df02d79f7354e4dc95bd472f657e"
+    },
+    {
+      "path": "mojo/public/cpp/bindings/lib/array_internal.h",
+      "local": "atlas/reference/wire/array_internal.h",
+      "bytes": 20243,
+      "sha256": "2bbe6d97f3da3c25ea8810f9c1011f234640d6f7ed29c9e28a20080d96af0e7c"
+    },
+    {
+      "path": "mojo/public/cpp/bindings/lib/validation_errors.h",
+      "local": "atlas/reference/wire/validation_errors.h",
+      "bytes": 8543,
+      "sha256": "7ba12e17b8f9e7cf10c1a65eefb4aa630f925750ec7325ad0eb546da000e32a9"
+    }
+  ]
+}

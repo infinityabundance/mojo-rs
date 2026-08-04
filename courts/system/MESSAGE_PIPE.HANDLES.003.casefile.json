@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "case_id": "MESSAGE_PIPE.HANDLES.003",
+  "court": "handle-transfer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["message_pipe", "platform_handles"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h0", "h1"]}},
+    {"id": 2, "op": "platform_handle_wrap", "args": {"source": "memfd", "content_hex": "73656372657400", "produce": ["p0"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "write_message", "args": {"handle": "h1", "payload_hex": "", "handles": ["p0"], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 1, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "platform_handle_unwrap", "args": {"handle": "h0_handle_0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "close", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "a wrapped platform handle attached to a message transfers ownership; the reader extracts it and unwraps the identical descriptor with identical content"
+  },
+  "normalizers": [{"id": "normalize.fd"}]
+}

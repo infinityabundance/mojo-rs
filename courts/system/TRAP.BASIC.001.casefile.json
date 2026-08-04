@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "case_id": "TRAP.BASIC.001",
+  "court": "trap-and-wait",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["message_pipe", "traps"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "message_pipe_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["h0", "h1"]}},
+    {"id": 2, "op": "trap_create", "args": {"flags": 0}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["t0"]}},
+    {"id": 3, "op": "trap_add_trigger", "args": {"trap": "t0", "handle": "h0", "signals": ["READABLE"], "context": 7}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "trap_arm", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "write_message", "args": {"handle": "h1", "payload_hex": "10", "handles": [], "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "drain_trap_events", "args": {"trap": "t0", "count": 1, "timeout_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "read_message", "args": {"handle": "h0", "max_num_bytes": 0, "max_num_handles": 0, "flags": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "trap_arm", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "close", "args": {"handle": "h1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "drain_trap_events", "args": {"trap": "t0", "count": 1, "timeout_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 11, "op": "trap_remove_trigger", "args": {"trap": "t0", "handle": "h0", "context": 7}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 12, "op": "trap_close", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 13, "op": "close", "args": {"handle": "h0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "trigger fires on readability with the registered context; rearms; fires again on peer close; removal and trap close are clean"
+  },
+  "normalizers": [{"id": "normalize.timestamp"}]
+}

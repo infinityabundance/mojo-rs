@@ -1,0 +1,20 @@
+[package]
+name = "mojo-rs-c-api"
+description = "Export of the compatible public Mojo C System ABI (epoch 1), built on mojo-rs-core. No panic may cross the ABI boundary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-core = { path = "../mojo-rs-core" }
+mojo-rs-platform = { path = "../mojo-rs-platform" }
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[lints]
+workspace = true

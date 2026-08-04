@@ -1,0 +1,15 @@
+[package]
+name = "mojo-rs-mojom"
+description = "Mojom language toolchain: lexer, parser, AST, imports, module resolution, semantic validation. Accepts upstream .mojom corpora."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "mojo-rs-bindings"
+description = "Interface bindings runtime for mojo-rs: remotes, receivers, request/response correlation, control messages, associated interfaces, version negotiation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+mojo-rs-core = { path = "../mojo-rs-core" }
+mojo-rs-wire = { path = "../mojo-rs-wire" }
+
+[lints]
+workspace = true

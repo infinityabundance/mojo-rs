@@ -9,7 +9,12 @@
   "state_machines": [
     {
       "name": "message_pipe_endpoint",
-      "states": ["local_peer", "transferred", "peer_closed", "local_closed"],
+      "states": [
+        "local_peer",
+        "transferred",
+        "peer_closed",
+        "local_closed"
+      ],
       "transitions": [
         "create -> local_peer (both endpoints)",
         "transfer -> transferred (message in flight / at remote node)",
@@ -24,29 +29,46 @@
         "a closed endpoint cannot be resurrected",
         "transferred handle has exactly one logical owner"
       ],
-      "courts": ["message-pipe", "routing", "lifecycle"]
+      "courts": [
+        "message-pipe",
+        "routing",
+        "lifecycle"
+      ],
+      "signals_model": "MojoQueryHandleSignalsStateIpcz: satisfiable always includes PEER_CLOSED|QUOTA_EXCEEDED; WRITABLE|PEER_REMOTE satisfiable only while peer open; READABLE satisfiable while portal not DEAD (peer closed AND queue empty); verified byte-identical across SIGNALS.STATES.001 and MESSAGE_PIPE.PEER_CLOSE.004"
     },
     {
       "name": "handle_table_entry",
-      "states": ["live", "closed"],
+      "states": [
+        "live",
+        "closed"
+      ],
       "invariants": [
         "handle-table reuse cannot confuse stale identities (generation counters)",
         "double close is a detectable error, never UB",
         "close during in-flight transfer does not leak or duplicate ownership"
       ],
-      "courts": ["handle-lifecycle"]
+      "courts": [
+        "handle-lifecycle"
+      ]
     },
     {
       "name": "trap",
-      "states": ["unregistered", "registered_trigger", "armed", "fired", "disarmed_trigger", "cancelled"],
+      "states": [
+        "unregistered",
+        "registered_trigger",
+        "armed",
+        "fired",
+        "disarmed_trigger",
+        "cancelled"
+      ],
       "transitions": [
         "trap_create -> unregistered",
         "add_trigger -> registered_trigger",
-        "arm -> armed (or fires immediately if context already satisfies)",
-        "signal change -> fired (callback)",
-        "remove_trigger -> disarmed_trigger",
-        "handle close -> trigger cancelled (callback with MOJO_RESULT_CANCELLED)",
-        "trap close -> all triggers cancelled"
+        "arm -> armed (or FAILED_PRECONDITION with blocking events if a trigger is already satisfied/unsatisfiable; blocking event result is OK when satisfied, FAILED_PRECONDITION when unsatisfiable, FAILED_PRECONDITION for zero-signal triggers)",
+        "signal change (armed) -> fired (event result OK when satisfied, FAILED_PRECONDITION when unsatisfiable; whole trap disarmed)",
+        "remove_trigger -> CANCELLED event with zero signal state (even when unarmed)",
+        "watched handle close -> trigger removed + CANCELLED event with zero signal state (even when unarmed; official TrapRemovalEventHandler)",
+        "trap close -> all triggers cancelled (CANCELLED events)"
       ],
       "invariants": [
         "a trap fires at most as permitted by its registration state",
@@ -54,43 +76,77 @@
         "no callback while holding internal locks",
         "no wakeup loss"
       ],
-      "courts": ["trap-and-wait", "signals", "concurrency"]
+      "courts": [
+        "trap-and-wait",
+        "signals",
+        "concurrency"
+      ],
+      "oracle_verified": "TRAP.BASIC.001 byte-identical vs official oracle (event result OK on READABLE satisfaction, FAILED_PRECONDITION on READABLE-unsatisfiable after peer close)"
     },
     {
       "name": "data_pipe",
-      "states": ["producer_open", "consumer_open", "peer_closed", "both_closed"],
+      "states": [
+        "producer_open",
+        "consumer_open",
+        "peer_closed",
+        "both_closed"
+      ],
       "invariants": [
         "element-size and capacity constraints",
         "two-phase begin/end ownership (no double begin, no end without begin)",
         "commit sizes validated",
         "signal transitions (READABLE/WRITABLE/PEER_CLOSED) exact"
       ],
-      "courts": ["data-pipe", "signals"]
+      "courts": [
+        "data-pipe",
+        "signals"
+      ]
     },
     {
       "name": "shared_buffer_mapping",
-      "states": ["mapped", "unmapped", "handle_closed_while_mapped"],
+      "states": [
+        "mapped",
+        "unmapped",
+        "handle_closed_while_mapped"
+      ],
       "invariants": [
         "mapping lifetime independent of handle lifetime",
         "read-only duplication enforced",
         "no aliasing mutable mappings incorrectly"
       ],
-      "courts": ["shared-buffer"]
+      "courts": [
+        "shared-buffer"
+      ]
     },
     {
       "name": "invitation",
-      "states": ["created", "attached", "sent", "accepted", "failed"],
+      "states": [
+        "created",
+        "attached",
+        "sent",
+        "accepted",
+        "failed"
+      ],
       "invariants": [
         "named attachments unique",
         "no reuse of a sent invitation",
         "peer death before acceptance cleans up",
         "bootstrap races handled deterministically"
       ],
-      "courts": ["invitation-bootstrap", "routing"]
+      "courts": [
+        "invitation-bootstrap",
+        "routing"
+      ]
     },
     {
       "name": "node_routing (CoreIpcz)",
-      "states": ["direct_peer", "proxied_route", "migrating", "stale_route", "node_lost"],
+      "states": [
+        "direct_peer",
+        "proxied_route",
+        "migrating",
+        "stale_route",
+        "node_lost"
+      ],
       "invariants": [
         "ordering preserved across route changes",
         "port transfer with queued messages",
@@ -98,7 +154,9 @@
         "closure during migration",
         "cleanup after node death"
       ],
-      "courts": ["routing"]
+      "courts": [
+        "routing"
+      ]
     }
   ]
 }

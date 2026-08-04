@@ -3,30 +3,156 @@
   "epoch": 1,
   "generated_at": null,
   "note": "Authoritative capability matrix. Every capability carries a status from the sealed ladder. A capability is NOT claimed until the corresponding court evidence exists. Statuses are updated only with receipts.",
-  "ladder": ["Scaffolded", "Parsed", "Implemented", "Unit-tested", "Oracle-compared", "Interoperable", "ABI-compatible", "Stress-sealed", "Platform-sealed", "Drop-in sealed"],
+  "ladder": [
+    "Scaffolded",
+    "Parsed",
+    "Implemented",
+    "Unit-tested",
+    "Oracle-compared",
+    "Interoperable",
+    "ABI-compatible",
+    "Stress-sealed",
+    "Platform-sealed",
+    "Drop-in sealed"
+  ],
   "capabilities": [
-    {"id": "c-api.symbols", "name": "C System ABI exported symbols", "status": "Parsed", "evidence": null},
-    {"id": "c-api.layouts", "name": "C struct sizes/offsets/alignments", "status": "Parsed", "evidence": "atlas/api/mojo-c-system-api.json"},
-    {"id": "c-api.constants", "name": "Constants/flags/enums", "status": "Parsed", "evidence": "atlas/api/mojo-c-system-api.json"},
-    {"id": "wire.headers", "name": "Message header layouts v0-v3", "status": "Parsed", "evidence": "atlas/reference/wire/message_internal.h"},
-    {"id": "wire.struct", "name": "Struct/array/map/string/union encoding", "status": "Parsed", "evidence": "atlas/reference/wire/bindings_internal.h"},
-    {"id": "wire.validation", "name": "Wire validation (malformed-input rejection)", "status": "Scaffolded", "evidence": null},
-    {"id": "message-pipe.basic", "name": "Message pipe create/write/read/close", "status": "Scaffolded", "evidence": null},
-    {"id": "message-pipe.signals", "name": "Signal states (READABLE/WRITABLE/PEER_CLOSED)", "status": "Scaffolded", "evidence": null},
-    {"id": "trap.wait", "name": "Traps and waits", "status": "Scaffolded", "evidence": null},
-    {"id": "handle.transfer", "name": "Handle attachment/extraction", "status": "Scaffolded", "evidence": null},
-    {"id": "platform.unix-transport", "name": "Linux Unix-domain transport", "status": "Scaffolded", "evidence": null},
-    {"id": "platform.fd-transfer", "name": "SCM_RIGHTS fd transfer", "status": "Scaffolded", "evidence": null},
-    {"id": "data-pipe", "name": "Data pipes (one/two-phase)", "status": "Scaffolded", "evidence": null},
-    {"id": "shared-buffer", "name": "Shared buffers and mappings", "status": "Scaffolded", "evidence": null},
-    {"id": "invitation", "name": "Invitations and bootstrap", "status": "Scaffolded", "evidence": null},
-    {"id": "routing", "name": "Multi-node routing and port transfer", "status": "Scaffolded", "evidence": null},
-    {"id": "mojom.toolchain", "name": "Mojom lexer/parser/codegen", "status": "Scaffolded", "evidence": null},
-    {"id": "bindings.runtime", "name": "Remotes/receivers/correlation", "status": "Scaffolded", "evidence": null},
-    {"id": "interop.cpp", "name": "C++ client <-> Rust server (and reverse)", "status": "Scaffolded", "evidence": null},
-    {"id": "concurrency", "name": "Loom/TSan/stress sealing", "status": "Scaffolded", "evidence": null},
-    {"id": "security.fuzz", "name": "Fuzz + differential fuzzing", "status": "Scaffolded", "evidence": null},
-    {"id": "platform.windows", "name": "Windows gate", "status": "Scaffolded", "evidence": null},
-    {"id": "platform.macos", "name": "macOS gate", "status": "Scaffolded", "evidence": null}
+    {
+      "id": "c-api.symbols",
+      "name": "C System ABI exported symbols",
+      "status": "Parsed",
+      "evidence": "atlas/api/mojo-c-system-api.json; oracle driver compiled against the pinned headers"
+    },
+    {
+      "id": "c-api.layouts",
+      "name": "C struct sizes/offsets/alignments",
+      "status": "Parsed",
+      "evidence": "atlas/api/mojo-c-system-api.json"
+    },
+    {
+      "id": "c-api.constants",
+      "name": "Constants/flags/enums",
+      "status": "Parsed",
+      "evidence": "atlas/api/mojo-c-system-api.json"
+    },
+    {
+      "id": "wire.headers",
+      "name": "Message header layouts v0-v3",
+      "status": "Parsed",
+      "evidence": "atlas/reference/wire/message_internal.h"
+    },
+    {
+      "id": "wire.struct",
+      "name": "Struct/array/map/string/union encoding",
+      "status": "Parsed",
+      "evidence": "atlas/reference/wire/bindings_internal.h"
+    },
+    {
+      "id": "wire.validation",
+      "name": "Wire validation (malformed-input rejection)",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "message-pipe.basic",
+      "name": "Message pipe create/write/read/close",
+      "status": "Oracle-compared",
+      "evidence": "evidence/diffs/system/MESSAGE_PIPE.BASIC.001.json; MESSAGE_PIPE.PAYLOAD.002.json; MESSAGE_PIPE.BIDIRECTIONAL.005.json; MESSAGE_PIPE.PEER_CLOSE.004.json (byte-identical)"
+    },
+    {
+      "id": "message-pipe.signals",
+      "name": "Signal states (READABLE/WRITABLE/PEER_CLOSED)",
+      "status": "Oracle-compared",
+      "evidence": "evidence/diffs/system/SIGNALS.STATES.001.json; MESSAGE_PIPE.PEER_CLOSE.004.json (ipcz satisfiable model, byte-identical)"
+    },
+    {
+      "id": "trap.wait",
+      "name": "Traps and waits",
+      "status": "Oracle-compared",
+      "evidence": "evidence/diffs/system/TRAP.BASIC.001.json; WAIT.BASIC.001.json (trap event results, arm semantics, poll-based wait)"
+    },
+    {
+      "id": "handle.transfer",
+      "name": "Handle attachment/extraction",
+      "status": "Oracle-compared",
+      "evidence": "evidence/diffs/system/HANDLE.CLOSE.001.json; MESSAGE_PIPE.HANDLES.003.json (in-process handle attachment/extraction)"
+    },
+    {
+      "id": "platform.unix-transport",
+      "name": "Linux Unix-domain transport",
+      "status": "Unit-tested",
+      "evidence": "crates/mojo-rs-platform transport/socket tests; cross_process_message_and_fd_transfer"
+    },
+    {
+      "id": "platform.fd-transfer",
+      "name": "SCM_RIGHTS fd transfer",
+      "status": "Oracle-compared",
+      "evidence": "evidence/diffs/system/PLATFORM.FD_TRANSFER.001.json"
+    },
+    {
+      "id": "data-pipe",
+      "name": "Data pipes (one/two-phase)",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "shared-buffer",
+      "name": "Shared buffers and mappings",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "invitation",
+      "name": "Invitations and bootstrap",
+      "status": "Oracle-compared",
+      "evidence": "evidence/manifests/invite-*.json (official broker/acceptor bootstrap + wire capture; native acceptor NOT yet implemented)"
+    },
+    {
+      "id": "routing",
+      "name": "Multi-node routing and port transfer",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "mojom.toolchain",
+      "name": "Mojom lexer/parser/codegen",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "bindings.runtime",
+      "name": "Remotes/receivers/correlation",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "interop.cpp",
+      "name": "C++ client <-> Rust server (and reverse)",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "concurrency",
+      "name": "Loom/TSan/stress sealing",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "security.fuzz",
+      "name": "Fuzz + differential fuzzing",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "platform.windows",
+      "name": "Windows gate",
+      "status": "Scaffolded",
+      "evidence": null
+    },
+    {
+      "id": "platform.macos",
+      "name": "macOS gate",
+      "status": "Scaffolded",
+      "evidence": null
+    }
   ]
 }

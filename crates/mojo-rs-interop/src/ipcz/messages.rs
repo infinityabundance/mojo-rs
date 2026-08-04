@@ -144,6 +144,50 @@ pub fn decode_node_message(payload: &[u8]) -> Result<NodeMessage, WireError> {
 pub const MSG_ID_CONNECT_FROM_BROKER_TO_NON_BROKER: u8 = 0;
 /// The message id for `ConnectFromNonBrokerToBroker`.
 pub const MSG_ID_CONNECT_FROM_NON_BROKER_TO_BROKER: u8 = 1;
+/// `AcceptParcel` — a parcel (portal message) delivered over a NodeLink.
+pub const MSG_ID_ACCEPT_PARCEL: u8 = 20;
+/// `AcceptParcelDriverObjects` — driver objects for an in-flight parcel.
+pub const MSG_ID_ACCEPT_PARCEL_DRIVER_OBJECTS: u8 = 21;
+/// `RouteClosed` — a route endpoint observed peer closure.
+pub const MSG_ID_ROUTE_CLOSED: u8 = 22;
+/// `BypassPeerWithLink` — route optimization.
+pub const MSG_ID_BYPASS_PEER_WITH_LINK: u8 = 34;
+/// `StopProxyingToLocalPeer` — route optimization.
+pub const MSG_ID_STOP_PROXYING_TO_LOCAL_PEER: u8 = 35;
+/// `FlushRouter` — route state flush.
+pub const MSG_ID_FLUSH_ROUTER: u8 = 36;
+
+/// The official name of a node message id (node_messages_generator.h).
+pub fn message_id_name(id: u8) -> &'static str {
+    match id {
+        MSG_ID_CONNECT_FROM_BROKER_TO_NON_BROKER => "ConnectFromBrokerToNonBroker",
+        MSG_ID_CONNECT_FROM_NON_BROKER_TO_BROKER => "ConnectFromNonBrokerToBroker",
+        2 => "ReferNonBroker",
+        3 => "ConnectToReferredBroker",
+        4 => "ConnectToReferredNonBroker",
+        5 => "NonBrokerReferralAccepted",
+        6 => "NonBrokerReferralRejected",
+        7 => "ConnectFromBrokerToBroker",
+        10 => "RequestIntroduction",
+        11 => "AcceptIntroduction",
+        12 => "RejectIntroduction",
+        13 => "RequestIndirectIntroduction",
+        14 => "AddBlockBuffer",
+        MSG_ID_ACCEPT_PARCEL => "AcceptParcel",
+        MSG_ID_ACCEPT_PARCEL_DRIVER_OBJECTS => "AcceptParcelDriverObjects",
+        MSG_ID_ROUTE_CLOSED => "RouteClosed",
+        23 => "RouteDisconnected",
+        30 => "BypassPeer",
+        31 => "AcceptBypassLink",
+        32 => "StopProxying",
+        33 => "ProxyWillStop",
+        MSG_ID_BYPASS_PEER_WITH_LINK => "BypassPeerWithLink",
+        MSG_ID_STOP_PROXYING_TO_LOCAL_PEER => "StopProxyingToLocalPeer",
+        MSG_ID_FLUSH_ROUTER => "FlushRouter",
+        64 => "RequestMemory",
+        _ => "Unknown",
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -207,5 +251,23 @@ mod tests {
         payload[2] = 0; // ConnectFromBrokerToNonBroker
         payload[24] = 64; // params StructHeader size (more than present)
         assert!(decode_node_message(&payload).is_err());
+    }
+
+    #[test]
+    fn message_id_names_cover_the_capture() {
+        use crate::ipcz::wire::parse_stream;
+        for name in ["broker-to-acceptor.bin", "acceptor-to-broker.bin"] {
+            let data = fixture(name);
+            let msgs = parse_stream(&data).unwrap();
+            for m in &msgs {
+                let hdr = crate::ipcz::wire::parse_message_header(&m.payload).unwrap();
+                assert_ne!(
+                    message_id_name(hdr.message_id),
+                    "Unknown",
+                    "captured message id {} not in the registry",
+                    hdr.message_id
+                );
+            }
+        }
     }
 }

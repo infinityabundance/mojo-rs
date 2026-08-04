@@ -1,0 +1,126 @@
+{
+  "cases": {
+    "HANDLE.CLOSE.001": {
+      "byte_identical": true,
+      "candidate_events": 14,
+      "candidate_events_sha256": "f77176a5c348c53fb2545d66f57334806501e35acffb98a57040a11f0acc80d5",
+      "comparison_sha256": "41d6f1bbdf4c7e3cb326f0e7b1d69759cc840d12bfde051c1bcb6ea219297d8f",
+      "oracle_events": 14,
+      "oracle_events_sha256": "f77176a5c348c53fb2545d66f57334806501e35acffb98a57040a11f0acc80d5",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "MESSAGE_PIPE.BASIC.001": {
+      "byte_identical": true,
+      "candidate_events": 10,
+      "candidate_events_sha256": "b5cd41aae813cbac1e07db9cb28a2c6508c3c715e9665cc1aea52ab71df6799e",
+      "comparison_sha256": "3fc6e8eec995ce806b634c4bc497e55bc4fb5b50e2b3a5c49567ca88a0ae01a9",
+      "oracle_events": 10,
+      "oracle_events_sha256": "b5cd41aae813cbac1e07db9cb28a2c6508c3c715e9665cc1aea52ab71df6799e",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "MESSAGE_PIPE.BIDIRECTIONAL.005": {
+      "byte_identical": true,
+      "candidate_events": 9,
+      "candidate_events_sha256": "5f906d39d5bb397854efdde968a9cee196668cb8c2511bd53ca162f2270837eb",
+      "comparison_sha256": "32655fa4197db2bdb1af6b325affa2b87b2f527e0d593df47adfe7fc943ceb18",
+      "oracle_events": 9,
+      "oracle_events_sha256": "5f906d39d5bb397854efdde968a9cee196668cb8c2511bd53ca162f2270837eb",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "MESSAGE_PIPE.HANDLES.003": {
+      "byte_identical": true,
+      "candidate_events": 9,
+      "candidate_events_sha256": "594543721bd907851bb8b7ec5be614a6b0a6ccd221946af45addfee3353adb7e",
+      "comparison_sha256": "e2810deb27edbf34ce3a627cd8b36f2367e85322a6c28b58355754e9c45aff97",
+      "oracle_events": 9,
+      "oracle_events_sha256": "594543721bd907851bb8b7ec5be614a6b0a6ccd221946af45addfee3353adb7e",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "MESSAGE_PIPE.PAYLOAD.002": {
+      "byte_identical": true,
+      "candidate_events": 10,
+      "candidate_events_sha256": "bd4a0ff43f64dc66fb9316064e9377d3ede3c398449d2471ea9f34ce26c40f21",
+      "comparison_sha256": "2170590d81045010fc8297f85185376cf6a92cf9fa668ebe872723ba55bbaa83",
+      "oracle_events": 10,
+      "oracle_events_sha256": "bd4a0ff43f64dc66fb9316064e9377d3ede3c398449d2471ea9f34ce26c40f21",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "MESSAGE_PIPE.PEER_CLOSE.004": {
+      "byte_identical": true,
+      "candidate_events": 10,
+      "candidate_events_sha256": "95a86927da054f5284fefd19b48a8dd2c1dcaaf019b04050acb1cacafccb7461",
+      "comparison_sha256": "2603594e038df8ec9ed0c69c8858ec17cc002f8900fc2e5741654f79a8e26ab0",
+      "oracle_events": 10,
+      "oracle_events_sha256": "95a86927da054f5284fefd19b48a8dd2c1dcaaf019b04050acb1cacafccb7461",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "PLATFORM.FD_TRANSFER.001": {
+      "byte_identical": true,
+      "candidate_events": 7,
+      "candidate_events_sha256": "a27987f46d4050b2a6339a94cb8a6936d2523116f0b75ae2235d08161d4dcb0f",
+      "comparison_sha256": "0727cc8ca35d7918284d53ac8d7c4a356946eb67999fe36b6a11411036c912c2",
+      "oracle_events": 7,
+      "oracle_events_sha256": "a27987f46d4050b2a6339a94cb8a6936d2523116f0b75ae2235d08161d4dcb0f",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "SIGNALS.STATES.001": {
+      "byte_identical": true,
+      "candidate_events": 17,
+      "candidate_events_sha256": "6aa129c5d7b0c000ac3c5a1026792935bbf9409cfe670be316b9f0070aea4afc",
+      "comparison_sha256": "4d5f8ad54f6b1e931a85a5be6ccce472c6333ada596e293acae07fec637e3f7a",
+      "oracle_events": 17,
+      "oracle_events_sha256": "6aa129c5d7b0c000ac3c5a1026792935bbf9409cfe670be316b9f0070aea4afc",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "TRAP.BASIC.001": {
+      "byte_identical": true,
+      "candidate_events": 17,
+      "candidate_events_sha256": "d9a69136bf630461365474434a5735fdd426f197fcebfc6a69a0c158c6f61f4e",
+      "comparison_sha256": "78226e274b197cd71f17007111dfd02c21f5eccb4724daecd5105f234772c7a3",
+      "oracle_events": 17,
+      "oracle_events_sha256": "d9a69136bf630461365474434a5735fdd426f197fcebfc6a69a0c158c6f61f4e",
+      "residuals": 0,
+      "status": "pass"
+    },
+    "WAIT.BASIC.001": {
+      "byte_identical": true,
+      "candidate_events": 11,
+      "candidate_events_sha256": "2d13e96228010d27aba3bf7f3fc74544ccdb7743c195f5c5eea2f3416325c0af",
+      "comparison_sha256": "be5dbb3e3ba5e4378de12dc430154fa77d7746bbfb639e8cdb1a42ef2899c36e",
+      "oracle_events": 11,
+      "oracle_events_sha256": "2d13e96228010d27aba3bf7f3fc74544ccdb7743c195f5c5eea2f3416325c0af",
+      "residuals": 0,
+      "status": "pass"
+    }
+  },
+  "court": "system",
+  "failed": 0,
+  "failed_cases": [],
+  "generated_at_utc": "20260804T212649Z",
+  "inputs": {
+    "candidate_harness_binary": "171ba821133234f4f147541e61e50a5a0e69acc2b0a870b544b35ed6e7fa39e1",
+    "casefile:HANDLE.CLOSE.001": "fac84cf2a6a827827b43e591a82d46c102d748ff1c9b5a18381e6405739fa532",
+    "casefile:MESSAGE_PIPE.BASIC.001": "897bba76b96b70523828e80bea8df964c619beac0ef7fa5831f479e890632250",
+    "casefile:MESSAGE_PIPE.BIDIRECTIONAL.005": "c57524ba35bb4af613f46a8b2b6353cb5f68a822da1fba884c44307c816739c1",
+    "casefile:MESSAGE_PIPE.HANDLES.003": "c5a4b43aa78b5b48889f77c7362cb38165d5a9b76037a1aaaa1817bb393ba1db",
+    "casefile:MESSAGE_PIPE.PAYLOAD.002": "0ac98c4dc051f840cf3534ed627badb4ac0e5d0732b7c352ed42efc1b1121991",
+    "casefile:MESSAGE_PIPE.PEER_CLOSE.004": "3851d993fa6f322ba347a6893cd464550ca765864a8a1360227919b43bcdcf62",
+    "casefile:PLATFORM.FD_TRANSFER.001": "113be80a68ac887c6b60adc4b8209d7a91b810e2922d39de8640f6b6bd783c6c",
+    "casefile:SIGNALS.STATES.001": "60d10b06d996d4e2c555759fff6aa67b1859f64231ad9504074e6928ee44967f",
+    "casefile:TRAP.BASIC.001": "ab0200d6b55d7baa602551a6077c0b19f5f7e9cea8cd91471855655cde28e7c3",
+    "casefile:WAIT.BASIC.001": "c150abc834aa34bb4771798c58c89b873e68e404d033f7ded5a9950f8a22ae12",
+    "casefile_cli_binary": "948576223c9a36bc3a2cf9357cda4219d4d94137f50133bdde45a24fb9495dff",
+    "oracle_driver_binary": "4ba76470f008aa934721e673d8292e613f86c621598704a970496846f4d26d84"
+  },
+  "passed": 10,
+  "schema_version": 1,
+  "status": "pass"
+}

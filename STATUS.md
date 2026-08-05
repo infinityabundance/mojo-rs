@@ -6,6 +6,15 @@ bfa3579138998e2fbb981725570fa588c5b6f8cd, CoreIpcz architecture).
 The capability ladder (atlas/feature-matrix.json) is authoritative. A status
 below is a CLAIM only when the cited evidence exists and verifies.
 
+## Distribution
+
+* Repository: <https://github.com/infinityabundance/mojo-rs> (public, `main`).
+* Crates.io: `mojo-rs` umbrella + 13 `mojo-rs-*` crates, all v0.1.0
+  (published 2026-08-05). The umbrella re-exports the runtime and
+  language-toolchain crates; forensic tooling is published separately.
+* Publication does not change the sealed capability matrix: a claim below is
+  still a claim only with its cited evidence.
+
 ## Sealed
 
 ### First differential parity seal — in-process system court (10 cases)

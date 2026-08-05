@@ -2285,6 +2285,225 @@ int RunExhaustAcceptor(int socket_fd, const char* events_path) {
   return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// Bypass court (acceptor-initiated block-capacity exhaustion)
+// ---------------------------------------------------------------------------
+//   invite-broker-bypass   <socket-fd> <events.jsonl>
+//   invite-acceptor-bypass <socket-fd> <events.jsonl>
+//
+// This court seals the SEND side of the `RequestMemory`/`ProvideMemory`/
+// `AddBlockBuffer` round trip. The ACCEPTOR creates fresh local pairs and
+// transfers one end of each through the bootstrap pipe
+// (`SerializeNewRouterWithLocalPeer`): every transfer allocates one
+// `RouterLinkState` from the shared 64-byte pool (held while both ends of
+// the pair stay open). When the pool exhausts, the unconditional
+// `TryAllocateRouterLinkState` lobby fires `RequestBlockCapacity(64)` and,
+// because the acceptor connected as the allocation delegate, sends
+// `RequestMemory` to the broker; the broker's `OnRequestMemory` allocates a
+// 64 KiB buffer and replies `ProvideMemory`; the acceptor adopts it and
+// shares it back via `AddBlockBuffer`.
+//
+// The baseline runs the official oracle acceptor (which performs the same
+// flow); the interop runs the native Rust `bypass-acceptor`. The broker's
+// event stream must be byte-identical. The exhaustion point itself is
+// allocation-interleaving dependent (the peer's IO thread frees the transfer
+// payload fragments concurrently) and is a documented normalized residual.
+// ---------------------------------------------------------------------------
+
+// The number of acceptor-initiated portal transfers. The shared 64-byte pool
+// (1483 allocable blocks) is consumed by the prelude (transfer-b1, the two
+// bridge-bypass states) and then one block per acceptor transfer; the
+// exhaustion and the `RequestMemory` round trip therefore occur mid-loop and
+// the remainder resolve from the new buffer.
+constexpr int kBypassTransfers = 1520;
+
+int RunBypassBroker(int socket_fd, const char* events_path) {
+  mojo::core::Configuration config;
+  config.is_broker_process = true;
+  config.force_direct_shared_memory_allocation = true;
+  mojo::core::Init(config);
+
+  EventWriter writer(events_path);
+  uint64_t op = 0;
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  MojoHandle invitation;
+  MojoResult r = MojoCreateInvitation(nullptr, &invitation);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle pipe;
+  r = MojoAttachMessagePipeToInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
+  r = MojoSendInvitation(invitation, nullptr, &endpoint, nullptr, 0, nullptr);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // The routing-court prelude: transfer B1 through the bootstrap pipe and
+  // write w1 on A1 (the acceptor verifies the transferred pipe works). The
+  // pair (A1, B1) is held for the rest of the run.
+  MojoHandle a1, b1;
+  r = MojoCreateMessagePipe(nullptr, &a1, &b1);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = SendMessageWithHandle(pipe, "transfer-b1", b1);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = SendPayload(a1, "w1");
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // The acceptor's transfers: each arrives with exactly one portal handle,
+  // which is extracted and HELD (never closed — closing would free the
+  // RouterLinkState).
+  std::string payload;
+  for (int i = 0; i < kBypassTransfers; ++i) {
+    MojoHandle bi;
+    r = RecvMessageWithHandle(pipe, &payload, &bi);
+    base::DictValue tr_extra;
+    tr_extra.Set("payload_hex", HexEncode(
+        reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+    tr_extra.Set("handles", static_cast<int>(bi != MOJO_HANDLE_INVALID ? 1 : 0));
+    writer.Emit(op++, "message", ResultName(r), tr_extra);
+    if (r != MOJO_RESULT_OK || payload != TransferPayload(i) ||
+        bi == MOJO_HANDLE_INVALID) {
+      writer.WriteOut();
+      return 1;
+    }
+    (void)bi;  // held until process exit
+  }
+
+  // The sync marker after all transfers.
+  r = RecvPayload(pipe, &payload);
+  base::DictValue s_extra;
+  s_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), s_extra);
+  if (r != MOJO_RESULT_OK || payload != "sync") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Close the bootstrap pipe; the acceptor observes peer closure.
+  MojoClose(pipe);
+  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return 0;
+}
+
+int RunBypassAcceptor(int socket_fd, const char* events_path) {
+  mojo::core::Init();
+
+  EventWriter writer(events_path);
+  uint64_t op = 0;
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
+  MojoHandle invitation;
+  MojoResult r = MojoAcceptInvitation(&endpoint, nullptr, &invitation);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle pipe;
+  r = MojoExtractMessagePipeFromInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Receive transfer-b1 and w1 (the routing-court prelude).
+  std::string payload;
+  MojoHandle b1;
+  r = RecvMessageWithHandle(pipe, &payload, &b1);
+  base::DictValue t_extra;
+  t_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  t_extra.Set("handles", static_cast<int>(b1 != MOJO_HANDLE_INVALID ? 1 : 0));
+  writer.Emit(op++, "message", ResultName(r), t_extra);
+  if (r != MOJO_RESULT_OK || payload != "transfer-b1" ||
+      b1 == MOJO_HANDLE_INVALID) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = RecvPayload(b1, &payload);
+  base::DictValue w1_extra;
+  w1_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), w1_extra);
+  if (r != MOJO_RESULT_OK || payload != "w1") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // The acceptor-initiated transfers: each creates a fresh pair and sends one
+  // end through the bootstrap pipe, HOLDING the local end (never closed —
+  // closing would free the RouterLinkState). The shared 64-byte pool
+  // exhausts mid-loop; the `RequestMemory`/`ProvideMemory`/`AddBlockBuffer`
+  // round trip is ipcz-internal, handled by the IO thread.
+  for (int i = 0; i < kBypassTransfers; ++i) {
+    MojoHandle ai, bi;
+    r = MojoCreateMessagePipe(nullptr, &ai, &bi);
+    if (r != MOJO_RESULT_OK) {
+      writer.WriteOut();
+      return 1;
+    }
+    r = SendMessageWithHandle(pipe, TransferPayload(i), bi);
+    writer.Emit(op++, "result", ResultName(r), extra);
+    if (r != MOJO_RESULT_OK) {
+      writer.WriteOut();
+      return 1;
+    }
+    (void)ai;  // held until process exit
+  }
+
+  // The sync marker.
+  r = SendPayload(pipe, "sync");
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // The broker closed the bootstrap pipe.
+  r = RecvPayload(pipe, &payload);
+  base::DictValue c_extra;
+  c_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), c_extra);
+
+  MojoClose(pipe);
+  MojoClose(invitation);
+  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
+}
+
 }  // namespace invite
 
 }  // namespace
@@ -2301,7 +2520,9 @@ int main(int argc, char** argv) {
     fprintf(stderr,
             "usage: mojo_rs_oracle_driver <baseline|invite-broker|invite-acceptor|\n"
             "       invite-broker-routing|invite-acceptor-routing|\n"
-            "       invite-broker-memory|invite-acceptor-memory> ...\n");
+            "       invite-broker-memory|invite-acceptor-memory|\n"
+            "       invite-broker-exhaust|invite-acceptor-exhaust|\n"
+            "       invite-broker-bypass|invite-acceptor-bypass> ...\n");
     return 2;
   }
   std::string command = argv[pos];
@@ -2329,7 +2550,8 @@ int main(int argc, char** argv) {
   if (command == "invite-broker" || command == "invite-acceptor" ||
       command == "invite-broker-routing" || command == "invite-acceptor-routing" ||
       command == "invite-broker-memory" || command == "invite-acceptor-memory" ||
-      command == "invite-broker-exhaust" || command == "invite-acceptor-exhaust") {
+      command == "invite-broker-exhaust" || command == "invite-acceptor-exhaust" ||
+      command == "invite-broker-bypass" || command == "invite-acceptor-bypass") {
     // The transport channel runs on a dedicated IO thread with an IO message
     // pump (the pump registers the IOWatcher the channel requires).
     base::Thread io_thread("mojo-rs-oracle-io");
@@ -2403,6 +2625,24 @@ int main(int argc, char** argv) {
       }
       int socket_fd = atoi(pos_argv[2]);
       return invite::RunExhaustAcceptor(socket_fd, pos_argv[3]);
+    }
+    if (command == "invite-broker-bypass") {
+      if (positional != 3) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-broker-bypass <socket-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_fd = atoi(pos_argv[2]);
+      return invite::RunBypassBroker(socket_fd, pos_argv[3]);
+    }
+    if (command == "invite-acceptor-bypass") {
+      if (positional != 3) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-acceptor-bypass <socket-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_fd = atoi(pos_argv[2]);
+      return invite::RunBypassAcceptor(socket_fd, pos_argv[3]);
     }
     if (positional != 3) {
       fprintf(stderr,

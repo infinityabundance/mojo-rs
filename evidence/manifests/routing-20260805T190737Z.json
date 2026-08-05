@@ -1,0 +1,56 @@
+{
+  "artifacts": {
+    "baseline/acceptor.events": {
+      "bytes": 750,
+      "sha256": "beecf169aa2b97871795517dd5f9950800fed42cbd8fa30743e4ade02f3ba59e"
+    },
+    "baseline/broker.events": {
+      "bytes": 1062,
+      "sha256": "b868076911496d4399d7c368d2b4085249969094b27dbe34ae6440daf17b1b15"
+    },
+    "baseline/wire/acceptor-to-broker.bin": {
+      "bytes": 864,
+      "sha256": "bda2f3b4a57ffb8460671e67b81f417411e36044f34eccbf59cff33d806ab276"
+    },
+    "baseline/wire/broker-to-acceptor.bin": {
+      "bytes": 856,
+      "sha256": "e5c87ad329eac4c9ffa03ae9bc7152f2cbdeb868821291686e73ac06199a4b84"
+    },
+    "interop/acceptor.events": {
+      "bytes": 747,
+      "sha256": "dc8622fd21d838cf23075f37efc445f7ba57157a240d4e533c19dd4794d48764"
+    },
+    "interop/broker.events": {
+      "bytes": 1062,
+      "sha256": "b868076911496d4399d7c368d2b4085249969094b27dbe34ae6440daf17b1b15"
+    },
+    "interop/wire/acceptor-to-broker.bin": {
+      "bytes": 864,
+      "sha256": "4ceb472851fe95c52c2dbcc2c9f6479c8fcbfecb620894a72288b9725843baae"
+    },
+    "interop/wire/broker-to-acceptor.bin": {
+      "bytes": 920,
+      "sha256": "703942af54fca8801871076131f4a6a5751976262701eedf53b390d2aca9b4cb"
+    }
+  },
+  "baseline": {
+    "acceptor_exit": 0,
+    "broker_exit": 0,
+    "relay_exit": 0
+  },
+  "broker_events_identical": true,
+  "court": "routing",
+  "generated_at_utc": "20260805T190737Z",
+  "inputs": {
+    "native_routing_acceptor_binary": "ba69dcb8104144a0a15b2f0d036baaa73b7d5befe6cfb9a0222427f9b87e8de7",
+    "oracle_driver_binary": "02ff20e907e145f4d06187ce5b77f345dd64382811ad48e8cb7a52edd03c3523",
+    "wire_relay_binary": "50b2a52c75c1348b846434259c4acbaeaaa74a2c29c4f0e554b408011e8d940e"
+  },
+  "interop": {
+    "acceptor_exit": 0,
+    "broker_exit": 0,
+    "relay_exit": 0
+  },
+  "schema_version": 1,
+  "status": "pass"
+}

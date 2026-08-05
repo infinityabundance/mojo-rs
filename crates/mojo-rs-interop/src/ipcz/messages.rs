@@ -1237,6 +1237,38 @@ pub fn encode_accept_parcel_full(
     )
 }
 
+/// The mojo driver's `ObjectHeader` type for a wrapped shared memory region
+/// (`ObjectBase::Type::kSharedBuffer`, `mojo/core/ipcz_driver/object.h`).
+const MOJO_OBJECT_TYPE_SHARED_BUFFER: u32 = 1;
+/// The mojo driver's `BufferMode::kUnsafe`
+/// (`mojo/core/ipcz_driver/shared_buffer.cc`): `UnsafeSharedMemoryRegion`
+/// carries a single memfd (a writable region would carry two).
+const MOJO_BUFFER_MODE_UNSAFE: u32 = 2;
+
+/// Serialize a mojo-driver shared buffer as the wire bytes of its driver
+/// object: `ObjectHeader{size=8, type=kSharedBuffer}` plus
+/// `BufferHeader{size=32, buffer_size, mode=kUnsafe, padding=0, guid_low,
+/// guid_high}` (40 bytes). This is exactly what the official
+/// `SharedBuffer::Serialize` emits (`mojo/core/ipcz_driver/shared_buffer.cc`)
+/// and what `SharedBuffer::Deserialize` requires: an empty object fails
+/// deserialization and the official `OnAddBlockBuffer` drops the NodeLink.
+///
+/// The GUID is any non-zero pair (the receiver's `UnguessableToken::Deserialize`
+/// only rejects an all-zero pair); it is derived deterministically from the
+/// buffer identity so the wire is reproducible.
+pub fn encode_shared_buffer_object(buffer_size: u32, seed: u64) -> Vec<u8> {
+    let mut obj = Vec::with_capacity(40);
+    obj.extend_from_slice(&8u32.to_le_bytes()); // ObjectHeader.size
+    obj.extend_from_slice(&MOJO_OBJECT_TYPE_SHARED_BUFFER.to_le_bytes());
+    obj.extend_from_slice(&32u32.to_le_bytes()); // BufferHeader.size
+    obj.extend_from_slice(&buffer_size.to_le_bytes());
+    obj.extend_from_slice(&MOJO_BUFFER_MODE_UNSAFE.to_le_bytes());
+    obj.extend_from_slice(&0u32.to_le_bytes()); // padding
+    obj.extend_from_slice(&(seed.wrapping_mul(0x9e3779b97f4a7c15)).to_le_bytes()); // guid_low
+    obj.extend_from_slice(&(seed.wrapping_mul(0xbf58476d1ce4e5b9)).to_le_bytes()); // guid_high
+    obj
+}
+
 /// Encode `RequestMemory` (id 64): V0 `{ size u32, padding u32 }`.
 pub fn encode_request_memory(size: u32) -> Vec<u8> {
     let mut b = MessageBuilder::new(MSG_ID_REQUEST_MEMORY);
@@ -1248,29 +1280,36 @@ pub fn encode_request_memory(size: u32) -> Vec<u8> {
 }
 
 /// Encode `ProvideMemory` (id 65): V0 `{ size u32, buffer u32 }` where
-/// `buffer` is the index of the buffer's driver object (0). The mojo driver
-/// serializes a memfd with zero data bytes; the descriptor travels with the
-/// message.
+/// `buffer` is the index of the buffer's driver object (0). The driver object
+/// is the mojo-driver shared-buffer serialization (the descriptor travels with
+/// the message).
 pub fn encode_provide_memory(size: u32) -> Vec<u8> {
     let mut b = MessageBuilder::new(MSG_ID_PROVIDE_MEMORY);
     let mut fields = Vec::with_capacity(8);
     fields.extend_from_slice(&size.to_le_bytes());
     fields.extend_from_slice(&0u32.to_le_bytes()); // buffer object index
     b.append_params(&fields);
-    b.append_driver_objects(&[Vec::new()]);
+    b.append_driver_objects(&[encode_shared_buffer_object(size, u64::from(size))]);
     b.build()
 }
 
 /// Encode `AddBlockBuffer` (id 14): V0 `{ id u64, block_size u32, buffer u32 }`
-/// with the buffer's driver object (one memfd, index 0).
-pub fn encode_add_block_buffer(id: u64, block_size: u32, buffer_index: u32) -> Vec<u8> {
+/// with the buffer's driver object (one memfd, index 0). `buffer_size` is the
+/// size of the shared buffer (the message carries the block size, not the
+/// buffer size; the driver object carries the latter).
+pub fn encode_add_block_buffer(
+    id: u64,
+    block_size: u32,
+    buffer_index: u32,
+    buffer_size: u32,
+) -> Vec<u8> {
     let mut b = MessageBuilder::new(MSG_ID_ADD_BLOCK_BUFFER);
     let mut fields = Vec::with_capacity(16);
     fields.extend_from_slice(&id.to_le_bytes());
     fields.extend_from_slice(&block_size.to_le_bytes());
     fields.extend_from_slice(&buffer_index.to_le_bytes());
     b.append_params(&fields);
-    b.append_driver_objects(&[Vec::new()]);
+    b.append_driver_objects(&[encode_shared_buffer_object(buffer_size, id)]);
     b.build()
 }
 
@@ -1510,5 +1549,52 @@ mod tests {
         assert!(decode_message(&msgs[1].payload, 0).is_err());
         assert!(decode_message(&msgs[1].payload, 1).is_ok());
         assert!(decode_message(&msgs[1].payload, 2).is_err());
+    }
+
+    #[test]
+    fn encode_add_block_buffer_matches_official_capture() {
+        // The official broker's AddBlockBuffer (exhaustion court capture,
+        // `broker-add-block-buffer.bin`): id=1, block_size=64, buffer 0, a
+        // 65536-byte kUnsafe shared buffer. The native's encoding must be
+        // byte-identical modulo the transmit-time sequence number and the
+        // region GUID (random in the oracle, deterministic here — both are
+        // documented normalizations).
+        let encoded = encode_add_block_buffer(1, 64, 0, 65536);
+        let data = fixture("broker-add-block-buffer.bin");
+        let msgs = parse_stream(&data).unwrap();
+        assert_eq!(msgs.len(), 1);
+        let mut captured = msgs[0].payload.clone();
+        set_message_sequence_number(&mut captured, 0);
+        // Zero the GUID words (bytes 96..112 of the payload: guid_low +
+        // guid_high within the 40-byte driver object at offset 72).
+        for b in captured.iter_mut().skip(96).take(16) {
+            *b = 0;
+        }
+        let mut encoded = encoded;
+        for b in encoded.iter_mut().skip(96).take(16) {
+            *b = 0;
+        }
+        assert_eq!(
+            encoded, captured,
+            "AddBlockBuffer must be byte-identical to the official broker's"
+        );
+    }
+
+    #[test]
+    fn shared_buffer_object_encoding_layout() {
+        // The mojo-driver shared-buffer serialization: ObjectHeader{size=8,
+        // type=kSharedBuffer=1} + BufferHeader{size=32, buffer_size, mode=
+        // kUnsafe=2, padding=0, guid_low, guid_high}.
+        let obj = encode_shared_buffer_object(65536, 7);
+        assert_eq!(obj.len(), 40);
+        assert_eq!(&obj[0..4], &8u32.to_le_bytes());
+        assert_eq!(&obj[4..8], &1u32.to_le_bytes());
+        assert_eq!(&obj[8..12], &32u32.to_le_bytes());
+        assert_eq!(&obj[12..16], &65536u32.to_le_bytes());
+        assert_eq!(&obj[16..20], &2u32.to_le_bytes());
+        assert_eq!(&obj[20..24], &0u32.to_le_bytes());
+        let low = u64::from_le_bytes(obj[24..32].try_into().unwrap());
+        let high = u64::from_le_bytes(obj[32..40].try_into().unwrap());
+        assert!(low != 0 && high != 0, "GUID must be non-zero");
     }
 }

@@ -1100,3 +1100,129 @@ mojom/bindings, concurrency/stress/fuzz sealing, other platforms.
 The proxy-bypass machinery (`BypassPeer` outbound / inbound `AcceptBypassLink`)
 and the acceptor-side `RouterLinkState` exhaustion (which triggers the
 `RequestMemory`/`ProvideMemory` send round trip) — then multi-node graphs.
+
+---
+
+## Cycle 2026-08-05 — Phase 5 bypass court: RequestMemory/ProvideMemory/AddBlockBuffer SEND side + WithLocalPeer serialization
+
+### 1. What was actually implemented
+
+* **The WithLocalPeer SEND-side serialization** (`crates/mojo-rs-interop/src/ipcz/routing.rs`):
+  `serialize_router` now implements the full `Router::SerializeNewRouter` —
+  the local-peer detection, the `TryLockForBypass`, and the preferred
+  `SerializeNewRouterWithLocalPeer` path (`serialize_router_with_local_peer`):
+  a new central link with a fresh shared `RouterLinkState` (pool allocation
+  ref + link ref) plus an adjacent decaying peripheral sublink
+  (`proxy_already_bypassed=true`, `new_decaying_sublink = new_sublink + 1`),
+  the local peer's outward edge released, the proxy's inward edge armed with
+  a deferred decay; on pool exhaustion it fires the unconditional
+  `TryAllocateRouterLinkState` lobby (`request_block_capacity` →
+  `RequestMemory`) and falls back to the plain proxy path with the LOCAL
+  outward link unlocked (the official `SerializeNewRouterAndConfigureProxy`
+  behavior — the old code wrongly rolled proxy-bypass fields for local links).
+  `begin_proxying` now handles the `proxy_already_bypassed` case
+  (`BeginProxyingToNewRouter`): the proxy's outward edge releases its old
+  local link, the inward edge adopts the decaying peripheral link, the local
+  peer adopts the new central link (`SetOutwardLink`, side-A stable mark);
+  the fresh-pair proxy decays and drops in the same flush.
+* **`open_portals`**: local pair creation (local central link, born stable),
+  mirroring `OpenPortals`.
+* **`run_bypass`** + the `bypass-acceptor` binary: the acceptor-initiated
+  block-capacity exhaustion scenario (1520 WithLocalPeer transfers, the
+  `RequestMemory` → `ProvideMemory` → `AddBlockBuffer` SEND round trip, the
+  `sync` marker, closure).
+* **Oracle driver modes** `invite-broker-bypass` / `invite-acceptor-bypass`
+  (`oracle/driver/oracle_driver.cc`; patch regenerated): the routing-court
+  prelude + 1520 acceptor-initiated transfers + sync + close.
+* **The mojo-driver SharedBuffer object encoding** (`messages.rs`):
+  `encode_shared_buffer_object` (40 bytes: `ObjectHeader{size=8,
+  type=kSharedBuffer=1}` + `BufferHeader{size=32, buffer_size, mode=kUnsafe=2,
+  padding=0, guid_low, guid_high}`) used by `encode_add_block_buffer` /
+  `encode_provide_memory`, with a deterministic non-zero GUID.
+* **`scripts/run_bypass_court.sh`** + the casefile
+  `courts/curated/phase5-bypass-court.md`; the golden fixture
+  `testdata/ipcz/broker-add-block-buffer.bin` (the official broker's
+  `AddBlockBuffer`, extracted from the exhaustion baseline capture).
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/{routing,messages,link_memory}.rs`,
+`crates/mojo-rs-interop/src/bin/bypass-acceptor.rs` (new),
+`crates/mojo-rs-interop/testdata/ipcz/broker-add-block-buffer.bin` (new),
+`oracle/driver/oracle_driver.cc`, `oracle/patches/mojo-rs-oracle-driver.patch`,
+`scripts/run_bypass_court.sh` (new), `courts/curated/phase5-bypass-court.md`
+(new), `atlas/feature-matrix.json`, `STATUS.md`, `evidence/bypass/`, this log.
+
+### 3. Compatibility claims now supported
+
+The **SEND side of the block-capacity expansion** is sealed: the native
+acceptor's `RequestMemory` → the broker's `ProvideMemory` → the native's
+`AddBlockBuffer` round trip, triggered by the acceptor exhausting its own
+shared 64-byte `RouterLinkState` pool via WithLocalPeer transfers. The
+broker's event stream is BYTE-IDENTICAL between the oracle-acceptor baseline
+and the native; both wires carry all 1520 transfers + sync; the send-side
+round trip is visible on the acceptor→broker wire in both runs; both
+acceptors exit 0. 5+ consecutive passes.
+
+### 4. Which courts were run
+
+`run_bypass_court.sh` (PASS ×5), `run_routing_court.sh` (PASS),
+`run_memory_court.sh` (PASS, wire-identical), `run_exhaust_court.sh` (PASS),
+`run_court.sh system` (26/26), `run_interop_court.sh` (PASS),
+`run_invite_court.sh` (PASS), `verify_no_oracle_dependency.sh` (PASS),
+`verify_storage_layout.sh` (PASS).
+
+### 5. Exact pass/fail counts
+
+All courts PASS. Workspace tests: 161 passed, 0 failures (5 new: 3 routing
+state-machine tests + 2 message-encoding tests). Clippy: 0 errors. fmt: clean.
+
+### 6. New residuals and evidence paths
+
+* The exhaustion POINT differs between the runs (the oracle's concurrent IO
+  thread frees payload fragments — net ~1 block/transfer; the native's
+  single-threaded loop does not wait — net ~2/transfer). Internal block
+  accounting, normalized; the broker's event stream is unaffected. See the
+  casefile.
+* Evidence: `evidence/bypass/<stamp>/` (events, wire), the manifests
+  `evidence/manifests/bypass-*.json` (the first, `20260805T185330Z`, is a
+  FAIL receipt — the empty-driver-object bug), the casefile
+  `courts/curated/phase5-bypass-court.md`.
+
+### 7. Every observed mismatch
+
+1. The first court run FAILED: the native died at transfer ~1466 with
+   `Connection reset by peer`; the broker saw `PEER_CLOSED` on the bootstrap
+   pipe mid-transfer and exited 1. The broker's NodeLink had dropped.
+2. The interop wire carried only 1469 transfers; the baseline (oracle
+   acceptor) passed completely (1520 transfers, RequestMemory + AddBlockBuffer
+   on the wire).
+
+### 8. Root cause of each fixed mismatch
+
+1+2. The native's `encode_add_block_buffer`/`encode_provide_memory` attached
+   an EMPTY driver object (no serialized data). The mojo driver's
+   `SharedBuffer::Deserialize` (`mojo/core/ipcz_driver/shared_buffer.cc`)
+   requires the 40-byte serialization; an empty object fails deserialization,
+   `OnAddBlockBuffer` returns false, and the official broker drops the
+   NodeLink (all routes close). This path had never been differentially
+   exercised (the exhaustion court sealed only the RECEIVE side). Fixed by
+   encoding the full SharedBuffer object; pinned byte-identical to the
+   official broker's capture by the golden test.
+
+### 9. Remaining unsupported behavior
+
+Per `STATUS.md`: `BypassPeer`/`AcceptBypassLink` OUTBOUND (only reachable in
+3-node graphs — in 2 nodes the broker's `MaybeStartSelfBypass` always takes
+`StartSelfBypassToLocalPeer`), multi-node graphs (message ids 2–13), node loss
+beyond the single link, multi-subparcel/split parcels; Phase 6 C ABI export,
+Phase 7 mojom/bindings, stress/fuzz, other platforms.
+
+### 10. Next highest-value parity gate
+
+**Multi-node graphs** (message ids 2–13: `ReferNonBroker`,
+`ConnectToReferredBroker/NonBroker`, `RequestIntroduction`,
+`AcceptIntroduction`, `EstablishLink`, and the broker-to-broker connect) —
+which is where the native-outbound `BypassPeer`/`AcceptBypassLink` via
+`EstablishLink` becomes reachable (the remaining Phase 5 routing work), then
+Phase 6 (C ABI export) per the directive sequence.

@@ -850,6 +850,12 @@ impl LinkMemory {
         total
     }
 
+    /// The ids of the extra (post-Connect) block buffers, in registration
+    /// order (used by the courts to verify a capacity expansion was adopted).
+    pub fn extra_buffer_ids(&self) -> Vec<u64> {
+        self.extra_order.clone()
+    }
+
     /// Whether additional capacity may be lobbied for a block size
     /// (`CanExpandBlockCapacity`). The pinned mojo embedder sets
     /// `IPCZ_MEMORY_FIXED_PARCEL_CAPACITY` (ipcz_api.cc, crbug.com/40876289),

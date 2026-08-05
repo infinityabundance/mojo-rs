@@ -307,6 +307,64 @@ Evidence: `evidence/exhaust/<stamp>/` (events, wire captures, byte-identical
 broker streams), `evidence/manifests/exhaust-<stamp>.json`, and the casefile
 `courts/curated/phase5-exhaust-court.md`.
 
+### Phase 5 bypass court — RequestMemory/ProvideMemory/AddBlockBuffer SEND side
+
+The bypass court (`scripts/run_bypass_court.sh`) seals the SEND side of the
+block-capacity expansion round trip. After the routing-court prelude (the
+broker transfers `b1` and writes `w1`), the ACCEPTOR creates 1520 fresh local
+pairs and transfers one end of each through the bootstrap pipe — the
+`SerializeNewRouterWithLocalPeer` serialization, newly implemented on the
+native send side: a new central link with a fresh pool `RouterLinkState` plus
+an adjacent decaying peripheral sublink (`proxy_already_bypassed=true`), the
+local peer's outward edge released, and the proxy's inward edge armed with a
+deferred decay (adopted in the pab-aware `BeginProxyingToNewRouter`; the
+fresh-pair proxy decays and drops in the same flush). Each transfer holds one
+`RouterLinkState` from the shared 64-byte pool. When the pool exhausts, the
+unconditional `TryAllocateRouterLinkState` lobby fires
+`request_block_capacity(64)` -> `RequestMemory{65536}` to the broker (this
+node is the allocation delegate); the broker's `OnRequestMemory` allocates a
+64 KiB buffer and replies `ProvideMemory`; the native `on_provide_memory`
+adopts it, allocates buffer id 1 from the shared header, shares it via
+`AddBlockBuffer` (transmitted BEFORE the local registration — the official
+share-then-register ordering), and registers it; the remaining transfers
+resolve their link states from the new buffer (cross-buffer fragment
+resolution).
+
+Equivalence: the broker's event stream (all 1529 events) is BYTE-IDENTICAL
+between the baseline (official oracle acceptor) and the interop (native
+`bypass-acceptor`); both wires carry all 1520 transfer parcels plus the
+`sync` marker (the broker verifies every payload and exits 0 only if all
+matched); the send-side round trip is present on the acceptor→broker wire in
+BOTH runs (`RequestMemory` + `AddBlockBuffer`, one each in the sealed runs);
+both acceptors exit 0. The court has passed 5+ consecutive runs.
+
+Documented residual: the exhaustion POINT in the transfer loop differs
+between the runs (the oracle's concurrent IO thread frees each transfer's
+payload fragment as the broker reads it — net ~1 block per transfer — while
+the native's single-threaded loop does not wait for the peer's frees — net
+~2 per transfer), so the `RequestMemory`'s wire position and the fragment
+offsets differ. The broker's event stream — the primary equivalence — is
+unaffected; block-reuse order is internal and normalized (the same
+free-list-reuse interleaving documented in the routing and exhaustion
+courts).
+
+A real bug was found and fixed by this court: the native's
+`encode_add_block_buffer`/`encode_provide_memory` attached an EMPTY driver
+object, but the mojo driver's `SharedBuffer::Deserialize` requires the
+40-byte serialization (`ObjectHeader{size=8, type=kSharedBuffer}` +
+`BufferHeader{size, buffer_size, mode=kUnsafe, padding, guid_low, guid_high}`
+— `mojo/core/ipcz_driver/shared_buffer.cc`); an empty object fails
+deserialization and the official broker drops the NodeLink (all routes close;
+the failed run is preserved under `evidence/bypass/20260805T185330Z/`). The
+encoding now carries the full object with a deterministic non-zero GUID; the
+golden test `encode_add_block_buffer_matches_official_capture` pins it
+byte-identical to the official broker's `AddBlockBuffer` (modulo the
+normalized sequence number and region GUID).
+
+Evidence: `evidence/bypass/<stamp>/` (events, wire captures, byte-identical
+broker streams), `evidence/manifests/bypass-<stamp>.json`, and the casefile
+`courts/curated/phase5-bypass-court.md`.
+
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
 streams for every case in `courts/system/`:
@@ -368,19 +426,22 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 ## Not yet sealed (next gates)
 
 - Routing / port transfer (Phase 5): the remaining portal state machines —
-  `BypassPeer`/`AcceptBypassLink` outbound, node loss (`RouteDisconnected`)
-  beyond the single-link case, the `RequestMemory`/`ProvideMemory` send round
-  trip (implemented and unit-tested; its only reachable trigger in this epoch
-  is `RouterLinkState` pool exhaustion on the ACCEPTOR side, which requires
-  the proxy-bypass machinery), the scheduler-dependent free-list reuse order
-  (the shared `RouterLinkState` frees now happen; only the interleaving with
-  the peer's IO-thread releases differs — normalized), multi-node graphs, and
-  portal transfer under load. The native routing acceptor currently seals the
-  WithLocalPeer transfer, the proxy serialization path, the acceptor-initiated
+  `BypassPeer`/`AcceptBypassLink` OUTBOUND (only reachable via a 3-node graph:
+  in a 2-node graph the broker's `MaybeStartSelfBypass` always takes
+  `StartSelfBypassToLocalPeer`, so the native's outbound `BypassPeer` (id 30)
+  and `AcceptBypassLink` (id 31) wait for the multi-node courts), node loss
+  (`RouteDisconnected`) beyond the single-link case, the scheduler-dependent
+  free-list reuse order (only the interleaving with the peer's IO-thread
+  releases differs — normalized), multi-node graphs (message ids 2–13:
+  `ReferNonBroker`, `ConnectToReferredBroker/NonBroker`, `RequestIntroduction`,
+  `AcceptIntroduction`, `EstablishLink`, ...), and portal transfer under load.
+  The native routing acceptor currently seals the WithLocalPeer transfer
+  (both directions), the proxy serialization path, the acceptor-initiated
   bridge bypass (both directions), `StopProxying` teardown, closure
   propagation over a single NodeLink, the parcel-fragment allocator (memory
   court), the `AddBlockBuffer` receive side + cross-buffer fragment resolution
-  (exhaustion court), and the `RouterLinkState` refcount lifecycle.
+  (exhaustion court), the `RequestMemory`/`ProvideMemory`/`AddBlockBuffer`
+  SEND side (bypass court), and the `RouterLinkState` refcount lifecycle.
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 
@@ -407,6 +468,10 @@ written reason here.
   (official broker ⇄ native exhaust acceptor; 1486 held portal transfers,
   `RouterLinkState` pool exhaustion, `AddBlockBuffer` adoption and
   cross-buffer fragment resolution; byte-identical broker events).
+- `scripts/run_bypass_court.sh` — Phase 5 acceptor-initiated exhaustion court
+  (official broker ⇄ native bypass acceptor; 1520 WithLocalPeer transfers
+  exhaust the acceptor-side pool; `RequestMemory` → `ProvideMemory` →
+  `AddBlockBuffer` SEND round trip sealed; byte-identical broker events).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

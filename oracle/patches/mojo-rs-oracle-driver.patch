@@ -27,10 +27,10 @@ index 0000000000..91f5227bfe
 +}
 diff --git a/oracle_driver/oracle_driver.cc b/oracle_driver/oracle_driver.cc
 new file mode 100644
-index 0000000000..a6e519d52b
+index 0000000000..ebc01183a3
 --- /dev/null
 +++ b/oracle_driver/oracle_driver.cc
-@@ -0,0 +1,2320 @@
+@@ -0,0 +1,2551 @@
 +// mojo_rs_oracle_driver — the oracle-side harness.
 +//
 +// Executes casefiles against the OFFICIAL pinned Mojo C API and emits events
@@ -2106,6 +2106,218 @@ index 0000000000..a6e519d52b
 +  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
 +}
 +
++// The Phase 5 block-capacity exhaustion scenario (official broker and
++// acceptor sides):
++//
++//   invite-broker-exhaust  <socket-fd> <events.jsonl>
++//   invite-acceptor-exhaust <socket-fd> <events.jsonl>
++//
++// The primary buffer's 64-byte block pool (RouterLinkState) holds 1483
++// allocable blocks. Each portal transfer through the bootstrap pipe consumes
++// one RouterLinkState on the broker (never freed while the pair is held), so
++// after 1481 transfers the pool is exhausted. The 1482nd transfer's
++// `TryAllocateRouterLinkState` fails:
++//   - the transfer falls back to the plain proxy path
++//     (`SerializeNewRouterAndConfigureProxy` with no proxy-bypass fields,
++//     because the transferred router's outward peer is local);
++//   - the broker lobbies `RequestBlockCapacity(64)` (the unconditional
++//     `TryAllocateRouterLinkState` lobby), allocates a 64 KiB buffer locally
++//     (it is not an allocation delegate), initializes it as a 64-byte block
++//     allocator, and shares it with the acceptor via `AddBlockBuffer{id=1,
++//     64}`;
++//   - the acceptor adopts the new buffer; subsequent transfers' RouterLinkStates
++//     come from buffer 1 (cross-buffer fragment resolution);
++//   - the broker's proxy for the 1482nd transfer runs `MaybeStartSelfBypass`
++//     and, because its outward peer is local, `StartSelfBypassToLocalPeer`:
++//     it allocates a link state from the new buffer and sends
++//     `BypassPeerWithLink` to the acceptor, which adopts the bypass (the
++//     sealed routing-court machinery).
++//
++// The court seals the RECEIVE side of the block-capacity expansion
++// (AddBlockBuffer adoption + cross-buffer fragment resolution) and the
++// exhausted-pool proxy transfer. The `RequestMemory`/`ProvideMemory` SEND
++// round trip (the acceptor as allocation delegate) is not reachable in this
++// epoch's two-node topology (see STATUS.md).
++// ---------------------------------------------------------------------------
++
++// The number of portal transfers: 1 (transfer-b1) + 1485. The 64-byte pool
++// (1483 allocable blocks) is consumed by transfer-b1, the two bridge-bypass
++// states, and transfers 2..1481; the 1482nd transfer triggers the expansion;
++// transfers 1483..1486 come from the new buffer.
++constexpr int kExhaustTransfers = 1486;
++
++std::string TransferPayload(int i) {
++  return "transfer-" + std::to_string(i);
++}
++
++int RunExhaustBroker(int socket_fd, const char* events_path) {
++  mojo::core::Configuration config;
++  config.is_broker_process = true;
++  config.force_direct_shared_memory_allocation = true;
++  mojo::core::Init(config);
++
++  EventWriter writer(events_path);
++  uint64_t op = 0;
++  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  base::DictValue extra;
++
++  MojoHandle invitation;
++  MojoResult r = MojoCreateInvitation(nullptr, &invitation);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  MojoHandle pipe;
++  r = MojoAttachMessagePipeToInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
++  r = MojoSendInvitation(invitation, nullptr, &endpoint, nullptr, 0, nullptr);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Transfer 1: B1 through the bootstrap pipe. The pair (A1, B1) is HELD on
++  // both ends for the rest of the run: the RouterLinkState stays allocated.
++  MojoHandle a, b;
++  r = MojoCreateMessagePipe(nullptr, &a, &b);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  r = SendMessageWithHandle(pipe, "transfer-b1", b);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // w1 on A (2 bytes; the acceptor verifies the transferred pipe works).
++  r = SendPayload(a, "w1");
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Transfers 2..kExhaustTransfers: fresh pairs, portal through the bootstrap.
++  // The A ends are HELD (never closed) so the RouterLinkStates stay allocated;
++  // the transferred B ends are held by the acceptor.
++  for (int i = 2; i <= kExhaustTransfers; ++i) {
++    MojoHandle ai, bi;
++    r = MojoCreateMessagePipe(nullptr, &ai, &bi);
++    writer.Emit(op++, "result", ResultName(r), extra);
++    if (r != MOJO_RESULT_OK) {
++      writer.WriteOut();
++      return 1;
++    }
++    r = SendMessageWithHandle(pipe, TransferPayload(i), bi);
++    writer.Emit(op++, "result", ResultName(r), extra);
++    if (r != MOJO_RESULT_OK) {
++      writer.WriteOut();
++      return 1;
++    }
++    (void)ai;  // held until process exit; closing would free the link state
++  }
++
++  // Close the bootstrap pipe; the acceptor observes peer closure.
++  MojoClose(pipe);
++  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
++  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return 0;
++}
++
++int RunExhaustAcceptor(int socket_fd, const char* events_path) {
++  mojo::core::Init();
++
++  EventWriter writer(events_path);
++  uint64_t op = 0;
++  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  base::DictValue extra;
++
++  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
++  MojoHandle invitation;
++  MojoResult r = MojoAcceptInvitation(&endpoint, nullptr, &invitation);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  MojoHandle pipe;
++  r = MojoExtractMessagePipeFromInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
++  writer.Emit(op++, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Receive transfer-b1 and w1.
++  std::string payload;
++  MojoHandle b1;
++  r = RecvMessageWithHandle(pipe, &payload, &b1);
++  base::DictValue t_extra;
++  t_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  t_extra.Set("handles", static_cast<int>(b1 != MOJO_HANDLE_INVALID ? 1 : 0));
++  writer.Emit(op++, "message", ResultName(r), t_extra);
++  if (r != MOJO_RESULT_OK || payload != "transfer-b1" ||
++      b1 == MOJO_HANDLE_INVALID) {
++    writer.WriteOut();
++    return 1;
++  }
++  r = RecvPayload(b1, &payload);
++  base::DictValue w1_extra;
++  w1_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  writer.Emit(op++, "message", ResultName(r), w1_extra);
++  if (r != MOJO_RESULT_OK || payload != "w1") {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Receive transfers 2..kExhaustTransfers, HOLDING each portal (never
++  // closed — closing would free the RouterLinkState). The broker's
++  // AddBlockBuffer (the exhausted-pool expansion) and its proxy self-bypass
++  // (BypassPeerWithLink) are ipcz-internal, handled by the IO thread.
++  for (int i = 2; i <= kExhaustTransfers; ++i) {
++    MojoHandle bi;
++    r = RecvMessageWithHandle(pipe, &payload, &bi);
++    base::DictValue tr_extra;
++    tr_extra.Set("payload_hex", HexEncode(
++        reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++    tr_extra.Set("handles", static_cast<int>(bi != MOJO_HANDLE_INVALID ? 1 : 0));
++    writer.Emit(op++, "message", ResultName(r), tr_extra);
++    if (r != MOJO_RESULT_OK || payload != TransferPayload(i) ||
++        bi == MOJO_HANDLE_INVALID) {
++      writer.WriteOut();
++      return 1;
++    }
++    (void)bi;  // held until process exit
++  }
++
++  // The broker closed the bootstrap pipe.
++  r = RecvPayload(pipe, &payload);
++  base::DictValue c_extra;
++  c_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  writer.Emit(op++, "message", ResultName(r), c_extra);
++
++  MojoClose(pipe);
++  MojoClose(invitation);
++  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
++  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
++}
++
 +}  // namespace invite
 +
 +}  // namespace
@@ -2149,7 +2361,8 @@ index 0000000000..a6e519d52b
 +
 +  if (command == "invite-broker" || command == "invite-acceptor" ||
 +      command == "invite-broker-routing" || command == "invite-acceptor-routing" ||
-+      command == "invite-broker-memory" || command == "invite-acceptor-memory") {
++      command == "invite-broker-memory" || command == "invite-acceptor-memory" ||
++      command == "invite-broker-exhaust" || command == "invite-acceptor-exhaust") {
 +    // The transport channel runs on a dedicated IO thread with an IO message
 +    // pump (the pump registers the IOWatcher the channel requires).
 +    base::Thread io_thread("mojo-rs-oracle-io");
@@ -2205,6 +2418,24 @@ index 0000000000..a6e519d52b
 +      }
 +      int socket_fd = atoi(pos_argv[2]);
 +      return invite::RunMemoryAcceptor(socket_fd, pos_argv[3]);
++    }
++    if (command == "invite-broker-exhaust") {
++      if (positional != 3) {
++        fprintf(stderr,
++                "usage: mojo_rs_oracle_driver invite-broker-exhaust <socket-fd> <events.jsonl>\n");
++        return 2;
++      }
++      int socket_fd = atoi(pos_argv[2]);
++      return invite::RunExhaustBroker(socket_fd, pos_argv[3]);
++    }
++    if (command == "invite-acceptor-exhaust") {
++      if (positional != 3) {
++        fprintf(stderr,
++                "usage: mojo_rs_oracle_driver invite-acceptor-exhaust <socket-fd> <events.jsonl>\n");
++        return 2;
++      }
++      int socket_fd = atoi(pos_argv[2]);
++      return invite::RunExhaustAcceptor(socket_fd, pos_argv[3]);
 +    }
 +    if (positional != 3) {
 +      fprintf(stderr,

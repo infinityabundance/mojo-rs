@@ -884,3 +884,123 @@ The proxy-bypass machinery (`BypassPeer` outbound / inbound `AcceptBypassLink`)
 — the prerequisite for the `RouterLinkState`-exhaustion court that seals the
 `RequestMemory`/`ProvideMemory` round trip differentially — then multi-node
 graphs.
+
+## Cycle 2026-08-05 — Phase 5 exhaustion court: AddBlockBuffer receive side + forensic fd-association fix
+
+### 1. What was actually implemented
+
+* **The exhaustion court** (`invite-broker-exhaust` / `invite-acceptor-exhaust`
+  oracle-driver modes, the native `exhaust-acceptor` binary
+  (`RoutingAcceptor::run_exhaust`), and `scripts/run_exhaust_court.sh`): 1486
+  portal transfers through the bootstrap pipe (all pairs held) exhaust the
+  primary buffer's 64-byte `RouterLinkState` pool mid-stream; the failing
+  transfer falls back to the plain proxy path; the broker lobbies
+  `RequestBlockCapacity(64)` (the unconditional `TryAllocateRouterLinkState`
+  lobby), allocates a 64 KiB buffer locally, and shares it via
+  `AddBlockBuffer`; the native adopts it and resolves the remaining transfers'
+  link states from the new buffer (cross-buffer fragment resolution). The
+  broker's IO thread flushes asynchronously, so the transfers arrive OUT OF
+  route-sequence order and migrate across sublinks; the native reorders via
+  its sequenced queue and verifies each payload against its route sequence
+  number (`rseq 0` → `transfer-b1`, `rseq k` → `transfer-{k+1}`).
+* **`router_deserialize` early-parcel fix**: parcels for the decaying sublink
+  of a not-yet-deserialized router (e.g. the w1 arriving before the
+  transfer-b1) were not drained; both the new and the decaying sublink's
+  early parcels are now accepted when the router is established.
+* **Forensic read-sizing fix** (`channel.rs`, `wire-relay.rs`): the native
+  channel and the wire relay read with large fixed buffers, so a single
+  `recvmsg` coalesced several messages and `SCM_RIGHTS` attached the
+  descriptors to the read's first byte — associating a message's fd with the
+  wrong message (observed as `BadDriverObjects` under the exhaustion court's
+  dense traffic). Both now read exactly the bytes needed to complete the
+  message at the front of the buffer, matching the official
+  `ChannelPosix::OnFdReadable`'s `next_read_size`. The relay additionally
+  forwards each complete message as one write. Covered by the new
+  `fd_association_survives_dense_stream` channel test.
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/{routing,channel}.rs`,
+`crates/mojo-rs-interop/src/bin/{wire-relay,exhaust-acceptor}.rs`
+(`exhaust-acceptor` new),
+`oracle/driver/oracle_driver.cc` + `oracle/patches/mojo-rs-oracle-driver.patch`
+(new exhaust modes), `scripts/run_exhaust_court.sh` (new),
+`courts/curated/phase5-exhaust-court.md` (new),
+`evidence/routing/WIRE-ANALYSIS.md`, `atlas/feature-matrix.json`,
+`STATUS.md`, this log.
+
+### 3. Compatibility claims now supported
+
+The `AddBlockBuffer` receive side of the block-capacity expansion is sealed
+against the official broker: the native adopts the broker's new 64-byte
+block buffers (id 1 and, in the interop run, id 2), registers them, and
+resolves the post-expansion transfers' `RouterLinkState` fragments from them
+(cross-buffer fragment resolution). The broker's event streams (2979 events)
+are byte-identical between the baseline and the interop run; both acceptors
+deliver the complete route sequence (rseq 0..1485) and exit 0.
+
+### 4. Which courts were run
+
+`scripts/run_exhaust_court.sh` (3 consecutive PASS), `run_memory_court.sh`
+(PASS, wire-identical), `run_routing_court.sh` (PASS),
+`run_interop_court.sh` (PASS), `run_invite_court.sh` (PASS),
+`run_court.sh system` (26/26), `verify_no_oracle_dependency.sh` (PASS).
+
+### 5. Exact pass/fail counts
+
+Exhaust court: 3/3 PASS. All other courts PASS. Workspace tests: 156 passed,
+0 failures (45 in mojo-rs-interop, including the new channel fd-association
+test). Clippy: 0 errors. fmt: clean.
+
+### 6. New residuals and evidence paths
+
+`evidence/exhaust/<stamp>/` (baseline + interop events and wire captures;
+byte-identical broker streams), `evidence/manifests/exhaust-<stamp>.json`.
+
+### 7. Every observed mismatch
+
+1. The native's first exhaustion run failed on a payload mismatch: the
+   transfers arrive out of route-sequence order (the broker's IO thread
+   flushes asynchronously), so the first portal-bearing parcel was not
+   transfer-b1.
+2. `BadDriverObjects` under dense traffic: a transfer inherited the
+   `AddBlockBuffer`'s memfd because the relay/channel reads coalesced several
+   messages and `SCM_RIGHTS` attaches the descriptors to the read's first
+   byte.
+3. The relay treated an incomplete frame as fatal (`TruncatedMessage`).
+4. Documented residual: the exhaustion point differs between the runs
+   (baseline ~transfer 1330 with one `AddBlockBuffer`; interop ~transfer 750
+   with two) — the native retains decayed `RouterLinkState` blocks (the
+   free-timing boundary shared with the routing court's fragment-offset
+   normalization).
+
+### 8. Root cause of each fixed mismatch
+
+1. Verification by arrival order is wrong; the native now verifies each
+   payload against its route sequence number and lets the sequenced queue
+   reorder.
+2. Read-sizing (matching the official channel) fixes the fd-to-message
+   association on both the relay and the native channel.
+3. An incomplete frame is a deferral, not an error.
+4. The native does not free a link's `RouterLinkState` when its decay
+   completes; sealing that (a `RefCountedFragment` refcount model) is the
+   next gate.
+
+### 9. Remaining unsupported behavior
+
+The `RequestMemory`/`ProvideMemory` send round trip (the acceptor as
+allocation delegate) remains implemented-but-not-differentially-sealed: its
+only reachable trigger in this epoch is `RouterLinkState` pool exhaustion on
+the ACCEPTOR side, which requires the link-state free/refcount model and the
+proxy-bypass machinery. Also remaining per `STATUS.md`: the link-state free
+on decay, `BypassPeer`/`AcceptBypassLink` outbound, multi-subparcel and split
+parcels, multi-node graphs, node loss beyond the single link; Phase 6 C ABI
+export, Phase 7 mojom/bindings, concurrency/stress/fuzz sealing, other
+platforms.
+
+### 10. Next highest-value parity gate
+
+The link-state free on decay (the `RefCountedFragment` refcount model for
+`RouterLinkState` fragments) — closing the free-timing residual shared by the
+routing and exhaustion courts — then the proxy-bypass machinery and multi-node
+graphs.

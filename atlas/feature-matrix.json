@@ -125,6 +125,21 @@
    "status": "Oracle-compared"
   },
   {
+   "evidence": [
+    "evidence/exhaust/<stamp>/baseline/broker.events",
+    "evidence/exhaust/<stamp>/interop/broker.events",
+    "evidence/exhaust/<stamp>/interop/acceptor.events",
+    "evidence/exhaust/<stamp>/interop/wire/broker-to-acceptor.bin",
+    "evidence/exhaust/<stamp>/interop/wire/acceptor-to-broker.bin",
+    "evidence/manifests/exhaust-<stamp>.json",
+    "courts/curated/phase5-exhaust-court.md"
+   ],
+   "id": "routing.block-exhaustion",
+   "name": "Block-capacity exhaustion: AddBlockBuffer receive side (exhaustion court)",
+   "note": "Phase 5 exhaustion court: 1486 held portal transfers exhaust the primary buffer's 64-byte RouterLinkState pool; the broker shares a new 64 KiB block buffer via AddBlockBuffer; the native exhaust-acceptor adopts it and resolves the remaining transfers' link states from it (cross-buffer fragment resolution), handles the exhausted-pool proxy transfer and the route migrations, and delivers the complete route sequence (rseq 0..1485); the broker's event streams are byte-identical. Documented residual: the exhaustion point differs between the runs (the native retains decayed RouterLinkState blocks - the free-timing boundary shared with the routing court). Reproduce: scripts/run_exhaust_court.sh",
+   "status": "Oracle-compared"
+  },
+  {
    "evidence": null,
    "id": "mojom.toolchain",
    "name": "Mojom lexer/parser/codegen",

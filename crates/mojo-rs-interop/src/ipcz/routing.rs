@@ -605,6 +605,136 @@ impl RoutingAcceptor {
         Ok(())
     }
 
+    /// The block-capacity exhaustion scenario (`invite-broker-exhaust` /
+    /// `invite-acceptor-exhaust`): seals the RECEIVE side of the
+    /// `RequestBlockCapacity` expansion against the official broker.
+    ///
+    /// Each portal transfer through the bootstrap pipe consumes one 64-byte
+    /// `RouterLinkState` block on the broker (both ends hold their pairs, so
+    /// nothing is freed). The primary buffer's 64-byte pool holds 1483
+    /// allocable blocks; at the 1482nd transfer the broker's
+    /// `TryAllocateRouterLinkState` fails, so:
+    ///
+    /// * that transfer falls back to the plain proxy path
+    ///   (`SerializeNewRouterAndConfigureProxy`, no proxy-bypass fields — the
+    ///   transferred router's outward peer is local);
+    /// * the broker lobbies `RequestBlockCapacity(64)` (unconditional lobby),
+    ///   allocates a 64 KiB buffer locally, and shares it via
+    ///   `AddBlockBuffer{id=1, 64}` — this acceptor adopts it
+    ///   (`OnAddBlockBuffer`) and resolves the later transfers' `RouterLinkState`
+    ///   fragments from buffer 1 (cross-buffer fragment resolution);
+    /// * the broker's proxy for the 1482nd transfer runs
+    ///   `StartSelfBypassToLocalPeer` (its outward peer is local) and sends
+    ///   `BypassPeerWithLink` with a state from the new buffer — this
+    ///   acceptor adopts the bypass with the sealed routing-court machinery.
+    ///
+    /// The acceptor's own `RequestMemory` send path is not exercised: the
+    /// acceptor never exhausts its own pool in this scenario, and the epoch's
+    /// mojo embedder disables parcel-data expansion (see STATUS.md).
+    ///
+    /// Event sequence mirrors the oracle acceptor driver: 0 lifecycle, 1-2
+    /// result (connect), 3 message (transfer-b1), 4 message (w1), 5..1489
+    /// messages (transfer-2..1486), 1490 message (peer closed), 1491 result
+    /// (close), 1492 lifecycle.
+    pub fn run_exhaust(&mut self) -> Result<(), RoutingError> {
+        const EXHAUST_TRANSFERS: u32 = 1486;
+        self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        self.connect()?;
+        self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
+
+        // The broker's IO thread flushes asynchronously, so the transfers
+        // arrive out of route-sequence order (and the w1 may arrive before the
+        // transfer-b1). Each portal-bearing parcel is therefore verified
+        // against its route sequence number (`rseq 0` is transfer-b1, `rseq k`
+        // is transfer-{k+1}); the routed delivery reorders via the sequenced
+        // queue; parcels for not-yet-established sublinks (the w1) are
+        // deferred in `early_parcels`.
+        let mut b1_identity: Option<u64> = None;
+        let mut transfer_count = 0u32;
+        let mut w1_seen = false;
+        while transfer_count < EXHAUST_TRANSFERS || !w1_seen {
+            // Every AcceptParcel from the broker is either a portal transfer
+            // or the w1; the routing messages are dispatched by `recv_until`.
+            let (msg, fds) = self.recv_until(|d| matches!(d, DecodedMessage::AcceptParcel(_)))?;
+            match msg {
+                DecodedMessage::AcceptParcel(p)
+                    if p.handle_types.contains(&handle_type::PORTAL) =>
+                {
+                    let rseq = p.sequence_number;
+                    let processed_parcel = self.process_accept_parcel(p, fds)?;
+                    let expected = if rseq == 0 {
+                        b"transfer-b1".to_vec()
+                    } else {
+                        format!("transfer-{}", rseq + 1).into_bytes()
+                    };
+                    if processed_parcel.payload != expected {
+                        return Err(RoutingError::BadParcel("unexpected transfer payload"));
+                    }
+                    if rseq == 0 {
+                        if processed_parcel.identities.len() != 1 {
+                            return Err(RoutingError::BadParcel(
+                                "expected exactly one transferred portal",
+                            ));
+                        }
+                        b1_identity = Some(processed_parcel.identities[0]);
+                    }
+                    // The first portal parcel marks the point where the
+                    // oracle's side-B stable marks become observable.
+                    if transfer_count == 0 {
+                        self.mark_initial_links_stable()?;
+                    }
+                    self.emit_message(3 + transfer_count as u64, &processed_parcel.payload, 1);
+                    transfer_count += 1;
+                }
+                DecodedMessage::AcceptParcel(p) => {
+                    // The only no-handle parcel from the broker is w1 (on the
+                    // transferred pipe's route; it may be deferred in
+                    // `early_parcels` until the transfer-b1's router exists).
+                    let payload = self.process_accept_parcel(p, fds)?.payload;
+                    if payload != b"w1" {
+                        return Err(RoutingError::BadParcel("unexpected w1 payload"));
+                    }
+                    w1_seen = true;
+                    self.emit_message(4, &payload, 0);
+                }
+                _ => return Err(RoutingError::Unexpected("exhaust predicate misrouted")),
+            }
+        }
+
+        // Step 4: the broker closed its bootstrap end; RouteClosed arrives on
+        // the bootstrap route's current primary sublink.
+        let bootstrap_now = self.bootstrap_sublink()?;
+        let (rc, rc_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::RouteClosed(r) if r.sublink == bootstrap_now
+            )
+        })?;
+        if let DecodedMessage::RouteClosed(r) = rc {
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds)?;
+        }
+        self.emit(
+            3 + (EXHAUST_TRANSFERS as u64 - 1) * 2 + 1,
+            EventKind::Message,
+            "MOJO_RESULT_FAILED_PRECONDITION",
+        );
+
+        // Step 5: close the bootstrap portal locally.
+        self.close_route(self.bootstrap_rid)?;
+        self.emit(
+            3 + (EXHAUST_TRANSFERS as u64 - 1) * 2 + 2,
+            EventKind::Result,
+            "MOJO_RESULT_OK",
+        );
+        self.emit(
+            3 + (EXHAUST_TRANSFERS as u64 - 1) * 2 + 3,
+            EventKind::Lifecycle,
+            "MOJO_RESULT_OK",
+        );
+        Ok(())
+    }
+
     /// A deterministic 200-byte memory-court payload: `m{NN}` plus padding.
     fn memory_payload(i: u32) -> Vec<u8> {
         let mut p = format!("m{i:02}").into_bytes();
@@ -1196,11 +1326,20 @@ impl RoutingAcceptor {
         }
         self.routers.insert(d.new_sublink, router);
 
-        // Accept early parcels for the new sublink.
-        if let Some(queued) = self.early_parcels.remove(&d.new_sublink) {
-            for p in queued {
-                self.process_accept_parcel(p, Vec::new())?;
+        // Accept early parcels for the new sublink AND its decaying sublink
+        // (parcels for the decaying route can arrive before the descriptor is
+        // processed, e.g. when the sender's IO thread flushes asynchronously).
+        let mut early: Vec<AcceptParcel> = match self.early_parcels.remove(&d.new_sublink) {
+            Some(q) => q.into_iter().collect(),
+            None => Vec::new(),
+        };
+        if let Some(decaying) = new_decaying_sublink {
+            if let Some(q) = self.early_parcels.remove(&decaying) {
+                early.extend(q.into_iter());
             }
+        }
+        for p in early {
+            self.process_accept_parcel(p, Vec::new())?;
         }
 
         // If the source router rolled peer-bypass details into the descriptor,

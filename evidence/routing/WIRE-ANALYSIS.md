@@ -123,9 +123,13 @@ The failed interop runs are retained under `evidence/routing/` as forensic
 receipts: `20260805T054918Z` and `20260805T055902Z` (w1 misrouting — the
 parcel arrives on the decaying sublink), `20260805T060330Z` /
 `20260805T062712Z` (non-null `new_link_state_fragment` in the peripheral
-descriptor), and `20260805T094216Z` (the pre-ordering-fix run in which the
+descriptor), `20260805T094216Z` (the pre-ordering-fix run in which the
 transfer-back rode on the native's own bypass sublink 14 because the
-broker's `BypassPeerWithLink(14→15)` had not yet been processed).
+broker's `BypassPeerWithLink(14→15)` had not yet been processed), and
+`20260805T121115Z` (the first fragment-transmit run: the transfer-back was
+malformed because the inline data array was still appended when a fragment
+was present, shifting the handle-types/new-routers array offsets — fixed by
+gating the inline append on the fragment being absent).
 
 ## Forensic tooling
 
@@ -133,3 +137,78 @@ broker's `BypassPeerWithLink(14→15)` had not yet been processed).
 wire capture into a human-readable message inventory (message ids, sequence
 numbers, sublinks, fragment descriptors, parcel payloads, and `RouterDescriptor`
 fields). It is the decoding side of this analysis and of the casefiles.
+
+## The memory court (fragment allocator seal, `scripts/run_memory_court.sh`)
+
+### Epoch discovery: parcel-data expansion is disabled
+
+The pinned mojo embedder sets `IPCZ_MEMORY_FIXED_PARCEL_CAPACITY`
+(`mojo/core/ipcz_api.cc`, TODO crbug.com/40876289), so
+`allow_memory_expansion_for_parcel_data_` is false: `AllocateFragment` does
+NOT lobby for parcel data. The baseline confirms: sending 9 x 200-byte
+parcels through the 8-block primary 256-byte pool produces NO
+`RequestMemory`/`ProvideMemory`/`AddBlockBuffer` traffic — the 9th parcel
+(m8) falls back to inline data, and later parcels (m9/m10) reuse the freed
+primary blocks (LIFO free-list: block 8 at offset 98048, then block 7 at
+97792). The only reachable expansion trigger in this epoch is
+`RouterLinkState` pool exhaustion (the unconditional lobby in
+`TryAllocateRouterLinkState`).
+
+### The native matches the baseline byte-for-byte on the wire
+
+The native `memory-acceptor` now allocates parcel data into shared-memory
+fragments at put time (remote primary link), exactly like the oracle. The
+acceptor→broker wire of the interop run is IDENTICAL to the baseline after
+normalizing node names and per-link sequence numbers — including the fragment
+offsets: m0..m7 at 96256..98048 (blocks 1..8), m8 inline, sync at 1152,
+transfer-back at 1280, m9 at 98048 and m10 at 97792 (the freed-block reuse).
+The shared free-list state, the put-time allocation order, and the LIFO reuse
+are all reproduced exactly.
+
+### Normalization update for the routing court
+
+The earlier routing-court normalization "parcel data transport — the oracle
+writes parcel data into fragments, the native inlines it" is now obsolete
+for the ACCEPTOR's parcels: the native fragments its parcels exactly like the
+oracle. One residual remains: the 64-byte free-list interleaving can differ
+by one block (e.g. baseline r1 at 1152 vs interop r1 at 1280 in the routing
+court) because the native does not free a bypassed link's `RouterLinkState`
+when the decay completes (the official frees it; the native retains it). The
+offset difference is allocation-order dependent and normalized; the memory
+court's 64-block allocations (sync at 1152, transfer-back at 1280) matched
+exactly because the preceding allocation order coincided.
+
+## The exhaustion court (`scripts/run_exhaust_court.sh`)
+
+The broker transfers 1486 portals through the bootstrap (all pairs held);
+the primary buffer's 64-byte `RouterLinkState` pool (1483 allocable blocks)
+exhausts mid-stream. The failing transfer falls back to the plain proxy
+path; the broker lobbies `RequestBlockCapacity(64)` (the unconditional
+`TryAllocateRouterLinkState` lobby), allocates a 64 KiB buffer locally, and
+shares it via `AddBlockBuffer`; the acceptor adopts it and resolves the
+remaining transfers' link states from the new buffer (cross-buffer fragment
+resolution). The transfers arrive OUT OF route-sequence order (the broker's
+IO thread flushes asynchronously) and migrate across sublinks (route
+bypasses); the receivers reorder via their sequenced queues.
+
+The broker's event streams are byte-identical between the baseline and the
+interop run, and both acceptors deliver the complete route sequence
+(rseq 0..1485) and exit 0.
+
+Documented residual: the exhaustion point differs (baseline ~transfer 1330
+with one `AddBlockBuffer`; interop ~transfer 750 with two) because the
+native retains decayed `RouterLinkState` blocks — the same free-timing
+boundary as the routing court's offset normalization. Sealing the link-state
+free (a `RefCountedFragment` refcount model) is the next gate.
+
+### Forensic fix: read-sizing the relay and the channel
+
+The dense traffic exposed a real bug in the forensic tooling: the wire relay
+and the native channel read with large fixed buffers, so a single `recvmsg`
+coalesced several messages, and `SCM_RIGHTS` attaches the descriptors to the
+READ's first byte — associating a message's fd with the wrong message
+(observable as `BadDriverObjects` on a transfer that inherited the
+`AddBlockBuffer`'s memfd). Both now read exactly the bytes needed to complete
+the message at the front of the buffer, matching the official
+`ChannelPosix::OnFdReadable`'s `next_read_size`; covered by the
+`fd_association_survives_dense_stream` channel test.

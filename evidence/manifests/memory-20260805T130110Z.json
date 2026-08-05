@@ -11,11 +11,11 @@
     },
     "baseline/wire/acceptor-to-broker.bin": {
       "bytes": 2304,
-      "sha256": "a30a86b65f618473ad0f0b9dfc47e6d1cd8ecd978ee7554ae978f50c562ed6d6"
+      "sha256": "b019a4575f249d5486b0f74972b13695cd75c8695d037ffb0729f23ee7d3fd49"
     },
     "baseline/wire/broker-to-acceptor.bin": {
       "bytes": 968,
-      "sha256": "1223c2d281d95614bcd43a6086f17378795eb4c9032faa3595b7443051b1c56e"
+      "sha256": "6e9f54a370cc8c516fd723eacae1811422cd67b2999cfb39db8e2d827788665b"
     },
     "interop/acceptor.events": {
       "bytes": 1562,
@@ -27,11 +27,11 @@
     },
     "interop/wire/acceptor-to-broker.bin": {
       "bytes": 2304,
-      "sha256": "a2141e6beea4329bb3294e3dc4af137371fc61de4af759e7f37477f5fd0c6c3e"
+      "sha256": "179698fb54bb9da6c2a5c788f0164bc58ca61bc054a544f0cc8a6f4503fd6803"
     },
     "interop/wire/broker-to-acceptor.bin": {
       "bytes": 1032,
-      "sha256": "e2e81d333cad942426236920504a3ebad6145d117104addde63d1768797457d3"
+      "sha256": "bd6df39ded1366282a1ad9b21848b648464c7d47d43c09d3f8ef3d70610585f9"
     }
   },
   "baseline": {
@@ -41,11 +41,11 @@
   },
   "broker_events_identical": true,
   "court": "memory",
-  "generated_at_utc": "20260805T123549Z",
+  "generated_at_utc": "20260805T130110Z",
   "inputs": {
-    "native_memory_acceptor_binary": "567a384a4dcda6da507666607e12640cf6502f1ef7abda7960567c252f175da9",
-    "oracle_driver_binary": "973ea9b6fda54493518bc28dc4073f6f67af46085631986ddbfb6d25cdb857a6",
-    "wire_relay_binary": "8cc6c83b8a64fbcf59537a738670f301044950d35e1911be60833c430aa6cf2e"
+    "native_memory_acceptor_binary": "018611b6d0f36ad086ad1843d267b5a18628995da3b51f0a044c11140c0c816c",
+    "oracle_driver_binary": "4415d287b92dbc011338bfdccaee2a6d2658e526c60ca0e39779a3d9ee8d1eac",
+    "wire_relay_binary": "4855d3247740b2c2b2fd823f25619689443d6965623c9bd1fa07dd54b913eef6"
   },
   "interop": {
     "acceptor_exit": 0,

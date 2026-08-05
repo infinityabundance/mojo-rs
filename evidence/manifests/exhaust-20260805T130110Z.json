@@ -1,0 +1,60 @@
+{
+  "artifacts": {
+    "baseline/acceptor.events": {
+      "bytes": 181893,
+      "sha256": "0b3901ff41b8ace0ed0e5d239b996551bbb8f302d03caf91fc23984a6c0f2039"
+    },
+    "baseline/broker.events": {
+      "bytes": 203340,
+      "sha256": "eb1b6ef62e7a33b4271f6bc6dbfe9d95fe8d26dceeddfcb5d7528bb01b80e2e4"
+    },
+    "baseline/wire/acceptor-to-broker.bin": {
+      "bytes": 584,
+      "sha256": "d108755b952529a60afeda99750cad555be7fdcd1713d62bb96381c9dbe394ab"
+    },
+    "baseline/wire/broker-to-acceptor.bin": {
+      "bytes": 345880,
+      "sha256": "3268435a5795809e1605ab9a9acf4ada2ac68fe4412ffcf9e6349449dd2f3ecf"
+    },
+    "interop/acceptor.events": {
+      "bytes": 189290,
+      "sha256": "91e0757d97c359f6dd91d1fcab2273407e4899cde32762947b2e4baab5c00831"
+    },
+    "interop/broker.events": {
+      "bytes": 203340,
+      "sha256": "eb1b6ef62e7a33b4271f6bc6dbfe9d95fe8d26dceeddfcb5d7528bb01b80e2e4"
+    },
+    "interop/wire/acceptor-to-broker.bin": {
+      "bytes": 592,
+      "sha256": "bcf5ab947b88c12f886537cab49c54fe96893dac3aed73a8af343e3b30d883bc"
+    },
+    "interop/wire/broker-to-acceptor.bin": {
+      "bytes": 346232,
+      "sha256": "f75ae5db5752fd913e9bc1809c5ee9e6f628115f14e52cf4a192627d4f6fa979"
+    }
+  },
+  "baseline": {
+    "acceptor_exit": 0,
+    "add_block_buffers": 1,
+    "broker_exit": 0,
+    "relay_exit": 0
+  },
+  "broker_events_identical": true,
+  "court": "exhaust",
+  "expansion_occurred": true,
+  "generated_at_utc": "20260805T130110Z",
+  "inputs": {
+    "native_exhaust_acceptor_binary": "054ba996d81f6403ba21fb4017a43874c1c30f16d9499e9220cb1bc6374a4dcc",
+    "oracle_driver_binary": "4415d287b92dbc011338bfdccaee2a6d2658e526c60ca0e39779a3d9ee8d1eac",
+    "wire_relay_binary": "4855d3247740b2c2b2fd823f25619689443d6965623c9bd1fa07dd54b913eef6"
+  },
+  "interop": {
+    "acceptor_exit": 0,
+    "add_block_buffers": 2,
+    "broker_exit": 0,
+    "relay_exit": 0
+  },
+  "schema_version": 1,
+  "status": "pass",
+  "transfers_delivered_in_order": true
+}

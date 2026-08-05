@@ -257,6 +257,48 @@ Evidence: `evidence/memory/<stamp>/` (events, wire captures, byte-identical
 broker streams), `evidence/manifests/memory-<stamp>.json`, and the casefile
 `courts/curated/phase5-memory-court.md`.
 
+### Phase 5 block-capacity exhaustion court — AddBlockBuffer receive side
+
+The exhaustion court (`scripts/run_exhaust_court.sh`) runs the official
+broker (`invite-broker-exhaust`) against the official oracle acceptor
+(baseline) and the native Rust `exhaust-acceptor` (interop), both through the
+wire-relay man-in-the-middle: the broker transfers 1486 portals through the
+bootstrap pipe (all pairs held, so the `RouterLinkState` blocks stay
+allocated); the primary buffer's 64-byte pool (1483 allocable blocks)
+exhausts mid-stream; the failing transfer falls back to the plain proxy path;
+the broker lobbies `RequestBlockCapacity(64)` (the unconditional
+`TryAllocateRouterLinkState` lobby), allocates a 64 KiB buffer locally, and
+shares it via `AddBlockBuffer`; the native adopts it and resolves the
+remaining transfers' link states from the new buffer (cross-buffer fragment
+resolution). The broker's IO thread flushes asynchronously, so the transfers
+arrive OUT OF route-sequence order and migrate across sublinks; both
+acceptors reorder via their sequenced queues.
+
+Equivalence: the broker's event stream (2979 events) is BYTE-IDENTICAL
+between the runs; both acceptors deliver the complete route sequence
+(rseq 0..1485) and exit 0; the expansion occurred in both runs. The court has
+passed repeatedly (3+ consecutive runs).
+
+Documented residual (the free-timing boundary): the exhaustion point differs
+(baseline ~transfer 1330 with one `AddBlockBuffer`; interop ~transfer 750
+with two) because the native retains decayed `RouterLinkState` blocks — the
+same root cause as the routing court's fragment-offset normalization. The
+broker's event stream — the primary equivalence — is unaffected. Sealing the
+link-state free (a `RefCountedFragment` refcount model) is the next gate.
+
+This court also exposed and fixed a real forensic-tooling bug: the wire
+relay and the native channel read with large fixed buffers, so a single
+`recvmsg` coalesced several messages and `SCM_RIGHTS` attached the
+descriptors to the read's first byte — associating a message's fd with the
+wrong message. Both now read exactly the bytes needed to complete the
+message at the front of the buffer (matching the official
+`ChannelPosix::OnFdReadable`'s `next_read_size`); covered by the
+`fd_association_survives_dense_stream` channel test.
+
+Evidence: `evidence/exhaust/<stamp>/` (events, wire captures, byte-identical
+broker streams), `evidence/manifests/exhaust-<stamp>.json`, and the casefile
+`courts/curated/phase5-exhaust-court.md`.
+
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
 streams for every case in `courts/system/`:
@@ -319,14 +361,18 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 
 - Routing / port transfer (Phase 5): the remaining portal state machines —
   `BypassPeer`/`AcceptBypassLink` outbound, node loss (`RouteDisconnected`)
-  beyond the single-link case, the `RequestMemory`/`ProvideMemory` round trip
-  (implemented and unit-tested; its only reachable trigger in this epoch is
-  `RouterLinkState` pool exhaustion, which requires the proxy-bypass
-  machinery), multi-node graphs, and portal transfer under load. The native
-  routing acceptor currently seals the WithLocalPeer transfer, the proxy
-  serialization path, the acceptor-initiated bridge bypass (both directions),
-  `StopProxying` teardown, closure propagation over a single NodeLink, and
-  the parcel-fragment allocator (memory court).
+  beyond the single-link case, the `RequestMemory`/`ProvideMemory` send round
+  trip (implemented and unit-tested; its only reachable trigger in this epoch
+  is `RouterLinkState` pool exhaustion on the ACCEPTOR side, which requires
+  the link-state free/refcount model + the proxy-bypass machinery), the
+  link-state free on decay (the free-timing residual shared by the routing
+  and exhaustion courts), multi-node graphs, and portal transfer under load.
+  The native routing acceptor currently seals the WithLocalPeer transfer, the
+  proxy serialization path, the acceptor-initiated bridge bypass (both
+  directions), `StopProxying` teardown, closure propagation over a single
+  NodeLink, the parcel-fragment allocator (memory court), and the
+  `AddBlockBuffer` receive side + cross-buffer fragment resolution (exhaustion
+  court).
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 
@@ -349,6 +395,10 @@ written reason here.
   native memory acceptor; parcel-fragment allocation, pool exhaustion,
   free-list reuse; byte-identical broker events + wire-identical
   acceptor→broker captures).
+- `scripts/run_exhaust_court.sh` — Phase 5 block-capacity exhaustion court
+  (official broker ⇄ native exhaust acceptor; 1486 held portal transfers,
+  `RouterLinkState` pool exhaustion, `AddBlockBuffer` adoption and
+  cross-buffer fragment resolution; byte-identical broker events).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

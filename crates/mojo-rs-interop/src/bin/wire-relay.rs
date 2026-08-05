@@ -12,8 +12,16 @@
 //!
 //! Bytes received on fd-a are appended to capture-a and forwarded to fd-b;
 //! bytes received on fd-b are appended to capture-b and forwarded to fd-a.
-//! Descriptors attached via SCM_RIGHTS are forwarded with the first chunk that
-//! carries them (the kernel delivers them at the start of a message).
+//!
+//! IMPORTANT: the relay preserves MESSAGE BOUNDARIES. Descriptors arrive via
+//! `SCM_RIGHTS` attached to the first byte of the message that carried them.
+//! If the relay re-chunked the stream (forwarding several messages as one
+//! write), the descriptors would be attached to the wrong message on the
+//! receiving socket and the fd-to-message association would be corrupted
+//! (observable under dense traffic, e.g. the exhaustion court's 1486 portal
+//! transfers). The relay therefore reassembles the framed messages and
+//! forwards each complete message — and only that message's bytes — in a
+//! single write with its descriptors.
 //!
 //! Ownership: the fds are shared (Arc) and owned by the main thread, so a
 //! thread finishing its direction never closes an fd the other thread is
@@ -24,41 +32,135 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use mojo_rs_interop::ipcz::wire::{IPCZ_HEADER_SIZE, parse_channel_message};
 use mojo_rs_platform::fd::OwnedFd;
 use mojo_rs_platform::socket;
 
-fn forward(from: &OwnedFd, to: &OwnedFd, capture_path: &str) -> std::io::Result<()> {
-    let mut capture = std::fs::File::create(capture_path)?;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        match socket::recv_with_fds(from, &mut buf, 32)? {
-            None => break, // peer closed
-            Some(msg) => {
-                use std::io::Write;
-                capture.write_all(&msg.data)?;
-                let raw_fds: Vec<RawFd> = msg.fds.iter().map(|f| f.as_raw_fd()).collect();
-                // Forward the whole chunk (with any attached descriptors),
-                // retrying on EAGAIN and partial sends.
-                let mut sent = 0usize;
-                while sent < msg.data.len() {
-                    match if raw_fds.is_empty() {
-                        socket::send(to, &msg.data[sent..])
-                    } else if sent == 0 {
-                        socket::send_with_fds(to, &msg.data, &raw_fds)
-                    } else {
-                        socket::send(to, &msg.data[sent..])
-                    } {
-                        Ok(n) => sent += n,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        }
-                        Err(e) => return Err(e),
+/// The receive direction of one socket: reassemble framed messages, capture
+/// them, and forward each complete message with its descriptors.
+struct Forwarder {
+    from: Arc<OwnedFd>,
+    to: Arc<OwnedFd>,
+    capture: std::fs::File,
+    /// Accumulated receive bytes not yet consumed by a complete message.
+    buf: Vec<u8>,
+    /// Descriptors delivered at a byte offset within `buf` (the offset of the
+    /// byte that carried them — per `SCM_RIGHTS`, the first byte of the
+    /// message they belong to).
+    marks: Vec<(usize, Vec<OwnedFd>)>,
+}
+
+impl Forwarder {
+    fn new(from: Arc<OwnedFd>, to: Arc<OwnedFd>, capture_path: &str) -> std::io::Result<Forwarder> {
+        Ok(Forwarder {
+            from,
+            to,
+            capture: std::fs::File::create(capture_path)?,
+            buf: Vec::with_capacity(64 * 1024),
+            marks: Vec::new(),
+        })
+    }
+
+    /// Forward one complete message (a byte span `[start, end)` of `buf`),
+    /// attaching the descriptors whose mark covers its first byte.
+    fn forward_message(&mut self, start: usize, end: usize) -> std::io::Result<()> {
+        use std::io::Write;
+        let data = &self.buf[start..end];
+        self.capture.write_all(data)?;
+        let mut fds: Vec<OwnedFd> = Vec::new();
+        // The message's descriptors are the ones marked at its first byte.
+        let mut i = 0;
+        while i < self.marks.len() {
+            if self.marks[i].0 == start {
+                fds.append(&mut self.marks[i].1);
+                self.marks.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        let raw: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
+        // One write per message; the descriptors attach to its first byte.
+        let mut sent = 0usize;
+        while sent < data.len() {
+            let n = if sent == 0 && !raw.is_empty() {
+                socket::send_with_fds(&self.to, data, &raw)?
+            } else {
+                socket::send(&self.to, &data[sent..])?
+            };
+            sent += n;
+        }
+        Ok(())
+    }
+
+    /// Forward everything until the peer closes. Returns an error if a
+    /// malformed frame is encountered.
+    fn run(mut self) -> std::io::Result<()> {
+        let mut scratch = vec![0u8; 64 * 1024];
+        loop {
+            // Forward every complete message currently buffered.
+            while let Some((_, consumed)) = self.try_split()? {
+                self.forward_message(0, consumed)?;
+                self.buf.drain(..consumed);
+                // Shift the marks for the consumed span.
+                for m in &mut self.marks {
+                    m.0 = m.0.saturating_sub(consumed);
+                }
+            }
+            // READ-SIZING: read exactly the bytes needed to complete the
+            // message at the front of the buffer (the header first, then the
+            // remainder), so a single `recvmsg` never spans two messages and
+            // any descriptors it carries belong to the message it begins.
+            // (A large fixed read would coalesce several messages, and
+            // `SCM_RIGHTS` attaches the descriptors to the read's first byte
+            // — the wrong message.)
+            let needed = if self.buf.len() < IPCZ_HEADER_SIZE {
+                IPCZ_HEADER_SIZE - self.buf.len()
+            } else {
+                let num_bytes =
+                    u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+                        as usize;
+                num_bytes.saturating_sub(self.buf.len())
+            };
+            if scratch.len() < needed {
+                scratch.resize(needed, 0);
+            }
+            let mark_offset = self.buf.len();
+            match socket::recv_with_fds(&self.from, &mut scratch[..needed], 32)? {
+                None => break, // peer closed
+                Some(sm) => {
+                    self.buf.extend_from_slice(&sm.data);
+                    if !sm.fds.is_empty() {
+                        self.marks.push((mark_offset, sm.fds));
                     }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
+
+    /// Try to split one complete framed message from the front of the buffer.
+    /// Returns `(message, consumed)` or `None` when the buffer holds only a
+    /// partial message (an incomplete frame is not an error).
+    fn try_split(&self) -> std::io::Result<Option<((), usize)>> {
+        if self.buf.len() < IPCZ_HEADER_SIZE {
+            return Ok(None);
+        }
+        match parse_channel_message(&self.buf) {
+            Ok((msg, consumed)) => {
+                let _ = msg;
+                Ok(Some(((), consumed)))
+            }
+            Err(mojo_rs_interop::ipcz::wire::WireError::TruncatedMessage) => Ok(None),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{e:?}"),
+            )),
+        }
+    }
+}
+
+fn forward(from: Arc<OwnedFd>, to: Arc<OwnedFd>, capture_path: &str) -> std::io::Result<()> {
+    Forwarder::new(from, to, capture_path)?.run()
 }
 
 fn main() -> ExitCode {
@@ -86,11 +188,17 @@ fn main() -> ExitCode {
     let b1 = Arc::clone(&fd_b);
     let cap_a = args[3].clone();
     let cap_b = args[4].clone();
-    let t1 = std::thread::spawn(move || forward(&a1, &b1, &cap_a));
+    let t1 = std::thread::spawn(move || forward(a1, b1, cap_a.as_str()));
     let a2 = Arc::clone(&fd_a);
     let b2 = Arc::clone(&fd_b);
-    let t2 = std::thread::spawn(move || forward(&b2, &a2, &cap_b));
-    let _ = t1.join();
-    let _ = t2.join();
-    ExitCode::SUCCESS
+    let t2 = std::thread::spawn(move || forward(b2, a2, cap_b.as_str()));
+    let r1 = t1.join();
+    let r2 = t2.join();
+    match (r1, r2) {
+        (Ok(Ok(())), Ok(Ok(()))) => ExitCode::SUCCESS,
+        (r1, r2) => {
+            eprintln!("wire relay failed: {r1:?} {r2:?}");
+            ExitCode::FAILURE
+        }
+    }
 }

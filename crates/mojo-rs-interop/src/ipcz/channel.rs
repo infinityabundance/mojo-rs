@@ -183,8 +183,43 @@ impl Channel {
             if let Some(msg) = self.try_assemble()? {
                 return Ok(RecvResult::Message(msg));
             }
+            // READ-SIZING: read exactly the bytes needed to complete the
+            // message at the front of the buffer (the header first, then the
+            // remainder). A single `recvmsg` therefore never spans two
+            // messages, and any descriptors it carries belong to the message
+            // it begins — matching the official `ChannelPosix::OnFdReadable`,
+            // whose `next_read_size` drives the read buffer. (A large fixed
+            // read would coalesce several messages, and `SCM_RIGHTS` attaches
+            // the descriptors to the read's first byte — the wrong message.)
+            let needed = if self.recv_buf.len() < wire::IPCZ_HEADER_SIZE {
+                wire::IPCZ_HEADER_SIZE - self.recv_buf.len()
+            } else {
+                let num_bytes = u32::from_le_bytes([
+                    self.recv_buf[4],
+                    self.recv_buf[5],
+                    self.recv_buf[6],
+                    self.recv_buf[7],
+                ]) as usize;
+                if num_bytes < wire::IPCZ_HEADER_SIZE {
+                    return Err(ChannelError::Wire(WireError::BadChannelMessageSize(
+                        num_bytes as u32,
+                    )));
+                }
+                // Guard against absurd sizes so a malformed header cannot
+                // trigger unbounded buffering.
+                if num_bytes > 256 * 1024 * 1024 {
+                    return Err(ChannelError::Wire(WireError::BadChannelMessageSize(
+                        num_bytes as u32,
+                    )));
+                }
+                num_bytes - self.recv_buf.len()
+            };
             let mark_offset = self.recv_buf.len();
-            match socket::recv_with_fds(&self.fd, &mut self.scratch, self.max_fds_per_recv) {
+            if self.scratch.len() < needed {
+                self.scratch.resize(needed, 0);
+            }
+            let scratch = &mut self.scratch[..needed];
+            match socket::recv_with_fds(&self.fd, scratch, self.max_fds_per_recv) {
                 Ok(Some(sm)) => {
                     self.recv_buf.extend_from_slice(&sm.data);
                     if !sm.fds.is_empty() {
@@ -352,6 +387,41 @@ mod tests {
         let mut a = Channel::adopt(a.into_raw_fd()).unwrap();
         drop(b);
         assert!(a.recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn fd_association_survives_dense_stream() {
+        // The exhaustion court's failure mode: a burst of messages where the
+        // fd-bearing message is NOT first. With read-sizing, each recvmsg
+        // spans one message, so the fd stays attached to its message even
+        // when the socket coalesces the sender's writes.
+        let pair = socketpair().unwrap();
+        let SocketPair { a, b } = pair;
+        let mut recv = Channel::adopt(a.into_raw_fd()).unwrap();
+        let send = Channel::adopt(b.into_raw_fd()).unwrap();
+        let mem = SharedMemory::create("chan-fd-stream", 4096).unwrap();
+        let raw = mem.as_raw_fd();
+        // SAFETY: dup is a plain syscall on a valid owned descriptor.
+        let fd = unsafe { libc::dup(raw) };
+        assert!(fd >= 0);
+        // Send [m0 (no fd), m1 (fd), m2 (no fd)] back to back.
+        send.send(b"m0", &[]).unwrap();
+        send.send(b"m1", &[fd]).unwrap();
+        send.send(b"m2", &[]).unwrap();
+        let m0 = recv.recv().unwrap().expect("m0");
+        assert_eq!(m0.payload, b"m0");
+        assert!(m0.fds.is_empty());
+        let m1 = recv.recv().unwrap().expect("m1");
+        assert_eq!(m1.payload, b"m1");
+        assert_eq!(m1.fds.len(), 1);
+        let m2 = recv.recv().unwrap().expect("m2");
+        assert_eq!(m2.payload, b"m2");
+        assert!(m2.fds.is_empty());
+        drop(recv);
+        drop(send);
+        // SAFETY: fd is the test's own duplicate; closing it is correct.
+        unsafe { libc::close(fd) };
+        drop(mem);
     }
 
     #[test]

@@ -1,0 +1,66 @@
+{
+  "artifacts": {
+    "baseline/acceptor.events": {
+      "bytes": 103403,
+      "sha256": "8bafbd743acc8645b7f107f10e002ac3ff01ebe5435636b55b706065844b83bd"
+    },
+    "baseline/broker.events": {
+      "bytes": 186285,
+      "sha256": "68c76eb0151f07d9d4bcfe7435ab23d30d0191537e49a523c9ad6c5b78f32ae6"
+    },
+    "baseline/wire/acceptor-to-broker.bin": {
+      "bytes": 354688,
+      "sha256": "ecbb2342f3ebb434c714d7f1be100d5bf269323bfc0222ad78af7ff207f79e43"
+    },
+    "baseline/wire/broker-to-acceptor.bin": {
+      "bytes": 1800,
+      "sha256": "649d19855f0bbfd06a32fc3c164a7b7ef10c15a5251944d3352e8c19751fa05b"
+    },
+    "interop/acceptor.events": {
+      "bytes": 103394,
+      "sha256": "b53a454be2f1e0214a910978f32b6565dc1b847e3c3bb136f9ead3f885851f2b"
+    },
+    "interop/broker.events": {
+      "bytes": 186285,
+      "sha256": "68c76eb0151f07d9d4bcfe7435ab23d30d0191537e49a523c9ad6c5b78f32ae6"
+    },
+    "interop/wire/acceptor-to-broker.bin": {
+      "bytes": 353600,
+      "sha256": "60b918094d1b10d506d24eacceb172e85bc9117311a95d63b24f43844c7171f5"
+    },
+    "interop/wire/broker-to-acceptor.bin": {
+      "bytes": 968,
+      "sha256": "e91f4068e190b608648863e253b8981a7f4b701fbd94fa10d3d272d214eab5c1"
+    }
+  },
+  "baseline": {
+    "acceptor_exit": 0,
+    "add_block_buffers": 1,
+    "broker_exit": 0,
+    "provide_memory": 0,
+    "relay_exit": 0,
+    "request_memory": 1,
+    "transfers": 1520
+  },
+  "broker_events_identical": true,
+  "court": "bypass",
+  "expansion_send_side_seen": true,
+  "generated_at_utc": "20260805T205428105Z",
+  "inputs": {
+    "native_bypass_acceptor_binary": "e613bf5b97951977dd9937fda5405d297adaea705b8a402d4f6544c694813fbc",
+    "oracle_driver_binary": "bbae6e63b1521f387c740c119a011206d682fdbe7a77002de8d66bc8b8710f11",
+    "wire_relay_binary": "5bbb85ad4248c10d77f5dcc6519d9452c7456b1b5789936cbdd938838807c953"
+  },
+  "interop": {
+    "acceptor_exit": 0,
+    "add_block_buffers": 1,
+    "broker_exit": 0,
+    "provide_memory": 0,
+    "relay_exit": 0,
+    "request_memory": 1,
+    "transfers": 1520
+  },
+  "schema_version": 1,
+  "status": "pass",
+  "transfers_on_wire": true
+}

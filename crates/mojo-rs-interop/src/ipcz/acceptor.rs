@@ -438,6 +438,46 @@ impl Acceptor {
             DecodedMessage::ConnectFromNonBrokerToBroker(_) => Err(AcceptorError::Unexpected(
                 "Connect reply received from broker",
             )),
+            DecodedMessage::ReferNonBroker(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_REFER_NON_BROKER,
+                "referral not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::ConnectToReferredBroker(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_CONNECT_TO_REFERRED_BROKER,
+                "referred-node connect not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::ConnectToReferredNonBroker(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_CONNECT_TO_REFERRED_NON_BROKER,
+                "referral acceptance not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::NonBrokerReferralAccepted(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_NON_BROKER_REFERRAL_ACCEPTED,
+                "referral acceptance not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::NonBrokerReferralRejected(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_NON_BROKER_REFERRAL_REJECTED,
+                "referral rejection not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::ConnectFromBrokerToBroker(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_CONNECT_FROM_BROKER_TO_BROKER,
+                "broker-to-broker connect not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::RequestIntroduction(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_REQUEST_INTRODUCTION,
+                "introduction request not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::AcceptIntroduction(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_ACCEPT_INTRODUCTION,
+                "introduction not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::RejectIntroduction(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_REJECT_INTRODUCTION,
+                "introduction rejection not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::RequestIndirectIntroduction(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_REQUEST_INDIRECT_INTRODUCTION,
+                "indirect introduction not supported by the Phase 3 acceptor",
+            )),
             DecodedMessage::AddBlockBuffer(b) => {
                 // Adopt the new buffer (buffer_index into the driver array).
                 if b.buffer_index as usize >= msg.fds.len() {

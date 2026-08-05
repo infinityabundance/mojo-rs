@@ -102,6 +102,142 @@ pub struct ConnectFromNonBrokerToBroker {
     pub num_initial_portals: u32,
 }
 
+/// `ReferNonBroker` (id 2): a non-broker asks its broker to accept a new node
+/// whose transport endpoint was created with `IPCZ_CONNECT_NODE_SHARE_BROKER`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferNonBroker {
+    /// A unique (for the transmitting NodeLink) referral id.
+    pub referral_id: u64,
+    /// The number of initial portals the referrer assumes on the direct link.
+    pub num_initial_portals: u32,
+    /// Index of the transport driver object in the message.
+    pub transport_index: u32,
+}
+
+/// `ConnectToReferredBroker` (id 3): a referred node's first message to the
+/// broker over the transport provided by its referrer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectToReferredBroker {
+    /// The highest protocol version known to the sender.
+    pub protocol_version: u32,
+    /// The number of initial portals assumed on the transport.
+    pub num_initial_portals: u32,
+}
+
+/// `ConnectToReferredNonBroker` (id 4): the broker's acceptance reply to the
+/// referred node, carrying the broker link's primary buffer and the transport
+/// + buffer for the direct link to the referrer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectToReferredNonBroker {
+    /// The newly assigned name of the receiving node.
+    pub name: NodeName,
+    /// The name of the broker.
+    pub broker_name: NodeName,
+    /// The name of the referring node.
+    pub referrer_name: NodeName,
+    /// The broker's highest protocol version.
+    pub broker_protocol_version: u32,
+    /// The referrer's highest protocol version.
+    pub referrer_protocol_version: u32,
+    /// The number of initial portals assumed on the broker link.
+    pub num_initial_portals: u32,
+    /// Index of the broker-link primary buffer driver object.
+    pub broker_link_buffer_index: u32,
+    /// Index of the referrer-link transport driver object.
+    pub referrer_link_transport_index: u32,
+    /// Index of the referrer-link primary buffer driver object.
+    pub referrer_link_buffer_index: u32,
+    /// The driver objects carried by the message.
+    pub driver_objects: Vec<DriverObjectRef>,
+}
+
+/// `NonBrokerReferralAccepted` (id 5): the broker tells the referrer its
+/// referral was accepted, providing the transport + buffer for a direct link
+/// to the referred node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonBrokerReferralAccepted {
+    /// The referral id from the original `ReferNonBroker`.
+    pub referral_id: u64,
+    /// The referred node's highest protocol version.
+    pub protocol_version: u32,
+    /// The number of initial portals the referred node assumes.
+    pub num_initial_portals: u32,
+    /// The referred node's assigned name.
+    pub name: NodeName,
+    /// Index of the transport driver object.
+    pub transport_index: u32,
+    /// Index of the primary buffer driver object.
+    pub buffer_index: u32,
+    /// The driver objects carried by the message.
+    pub driver_objects: Vec<DriverObjectRef>,
+}
+
+/// `NonBrokerReferralRejected` (id 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonBrokerReferralRejected {
+    /// The referral id from the original `ReferNonBroker`.
+    pub referral_id: u64,
+}
+
+/// `ConnectFromBrokerToBroker` (id 7): one broker greets another broker to
+/// merge two node networks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectFromBrokerToBroker {
+    /// The sending broker's name.
+    pub name: NodeName,
+    /// The sending broker's highest protocol version.
+    pub protocol_version: u32,
+    /// The number of initial portals assumed.
+    pub num_initial_portals: u32,
+    /// Index of the primary buffer driver object.
+    pub buffer_index: u32,
+}
+
+/// `RequestIntroduction` (id 10): a node asks its broker to introduce it to
+/// the named node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestIntroduction {
+    /// The name of the node to be introduced.
+    pub name: NodeName,
+}
+
+/// `AcceptIntroduction` (id 11): the broker introduces one node to another,
+/// providing a transport + buffer for a direct NodeLink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptIntroduction {
+    /// The name of the node being introduced.
+    pub name: NodeName,
+    /// The side (A or B) the recipient must assume on the new link.
+    pub link_side: u32,
+    /// The remote node's type (kBroker=0 / kNormal=1).
+    pub remote_node_type: u32,
+    /// The remote side's highest protocol version.
+    pub remote_protocol_version: u32,
+    /// Index of the transport driver object.
+    pub transport_index: u32,
+    /// Index of the primary buffer driver object.
+    pub memory_index: u32,
+    /// The driver objects carried by the message.
+    pub driver_objects: Vec<DriverObjectRef>,
+}
+
+/// `RejectIntroduction` (id 12): the broker could not introduce the named node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RejectIntroduction {
+    /// The name of the node whose introduction cannot be fulfilled.
+    pub name: NodeName,
+}
+
+/// `RequestIndirectIntroduction` (id 13): a broker asks another broker to
+/// introduce a node in its own network to a node in the sender's network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestIndirectIntroduction {
+    /// The name of the node on the sender's own network.
+    pub source_node: NodeName,
+    /// The name of the node on the recipient's own network.
+    pub target_node: NodeName,
+}
+
 /// `AcceptParcel` (id 20): a parcel (portal message) delivered over a link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptParcel {
@@ -377,6 +513,26 @@ pub enum DecodedMessage {
     ConnectFromBrokerToNonBroker(ConnectFromBrokerToNonBroker),
     /// `ConnectFromNonBrokerToBroker` (id 1).
     ConnectFromNonBrokerToBroker(ConnectFromNonBrokerToBroker),
+    /// `ReferNonBroker` (id 2).
+    ReferNonBroker(ReferNonBroker),
+    /// `ConnectToReferredBroker` (id 3).
+    ConnectToReferredBroker(ConnectToReferredBroker),
+    /// `ConnectToReferredNonBroker` (id 4).
+    ConnectToReferredNonBroker(ConnectToReferredNonBroker),
+    /// `NonBrokerReferralAccepted` (id 5).
+    NonBrokerReferralAccepted(NonBrokerReferralAccepted),
+    /// `NonBrokerReferralRejected` (id 6).
+    NonBrokerReferralRejected(NonBrokerReferralRejected),
+    /// `ConnectFromBrokerToBroker` (id 7).
+    ConnectFromBrokerToBroker(ConnectFromBrokerToBroker),
+    /// `RequestIntroduction` (id 10).
+    RequestIntroduction(RequestIntroduction),
+    /// `AcceptIntroduction` (id 11).
+    AcceptIntroduction(AcceptIntroduction),
+    /// `RejectIntroduction` (id 12).
+    RejectIntroduction(RejectIntroduction),
+    /// `RequestIndirectIntroduction` (id 13).
+    RequestIndirectIntroduction(RequestIndirectIntroduction),
     /// `AddBlockBuffer` (id 14).
     AddBlockBuffer(AddBlockBuffer),
     /// `AcceptParcel` (id 20).
@@ -413,6 +569,26 @@ pub enum DecodedMessage {
 pub const MSG_ID_CONNECT_FROM_BROKER_TO_NON_BROKER: u8 = 0;
 /// The message id for `ConnectFromNonBrokerToBroker`.
 pub const MSG_ID_CONNECT_FROM_NON_BROKER_TO_BROKER: u8 = 1;
+/// `ReferNonBroker` — a non-broker refers a new node to its broker.
+pub const MSG_ID_REFER_NON_BROKER: u8 = 2;
+/// `ConnectToReferredBroker` — a referred node's greeting to the broker.
+pub const MSG_ID_CONNECT_TO_REFERRED_BROKER: u8 = 3;
+/// `ConnectToReferredNonBroker` — the broker's acceptance of a referral.
+pub const MSG_ID_CONNECT_TO_REFERRED_NON_BROKER: u8 = 4;
+/// `NonBrokerReferralAccepted` — the referrer learns its referral succeeded.
+pub const MSG_ID_NON_BROKER_REFERRAL_ACCEPTED: u8 = 5;
+/// `NonBrokerReferralRejected` — the referrer learns its referral failed.
+pub const MSG_ID_NON_BROKER_REFERRAL_REJECTED: u8 = 6;
+/// `ConnectFromBrokerToBroker` — one broker greets another broker.
+pub const MSG_ID_CONNECT_FROM_BROKER_TO_BROKER: u8 = 7;
+/// `RequestIntroduction` — ask the broker to introduce a named node.
+pub const MSG_ID_REQUEST_INTRODUCTION: u8 = 10;
+/// `AcceptIntroduction` — the broker introduces one node to another.
+pub const MSG_ID_ACCEPT_INTRODUCTION: u8 = 11;
+/// `RejectIntroduction` — the broker cannot fulfill an introduction request.
+pub const MSG_ID_REJECT_INTRODUCTION: u8 = 12;
+/// `RequestIndirectIntroduction` — a broker asks another broker to introduce.
+pub const MSG_ID_REQUEST_INDIRECT_INTRODUCTION: u8 = 13;
 /// `AddBlockBuffer` — a new block buffer added to the link.
 pub const MSG_ID_ADD_BLOCK_BUFFER: u8 = 14;
 /// `AcceptParcel` — a parcel (portal message) delivered over a NodeLink.
@@ -691,6 +867,126 @@ pub fn decode_message(payload: &[u8], num_fds: usize) -> Result<DecodedMessage, 
                 num_initial_portals: f_u32(4)?,
             })
         }
+        MSG_ID_REFER_NON_BROKER => {
+            if fields_end < fields + 16 {
+                return Err(WireError::ShortParams);
+            }
+            let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            DecodedMessage::ReferNonBroker(ReferNonBroker {
+                referral_id: f_u64(0)?,
+                num_initial_portals: f_u32(8)?,
+                transport_index: f_u32(12)?,
+            })
+            .with_objects_check(driver_objects.len() == 1)
+        }
+        MSG_ID_CONNECT_TO_REFERRED_BROKER => {
+            // V0 (8 bytes) + optional V1 features offset (4 bytes).
+            if fields_end < fields + 8 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::ConnectToReferredBroker(ConnectToReferredBroker {
+                protocol_version: f_u32(0)?,
+                num_initial_portals: f_u32(4)?,
+            })
+        }
+        MSG_ID_CONNECT_TO_REFERRED_NON_BROKER => {
+            // V0: name(16) + broker_name(16) + referrer_name(16) + 5*u32.
+            if fields_end < fields + 72 {
+                return Err(WireError::ShortParams);
+            }
+            let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            DecodedMessage::ConnectToReferredNonBroker(ConnectToReferredNonBroker {
+                name: f_node(0)?,
+                broker_name: f_node(16)?,
+                referrer_name: f_node(32)?,
+                broker_protocol_version: f_u32(48)?,
+                referrer_protocol_version: f_u32(52)?,
+                num_initial_portals: f_u32(56)?,
+                broker_link_buffer_index: f_u32(60)?,
+                referrer_link_transport_index: f_u32(64)?,
+                referrer_link_buffer_index: f_u32(68)?,
+                driver_objects,
+            })
+        }
+        MSG_ID_NON_BROKER_REFERRAL_ACCEPTED => {
+            // V0: referral_id(8) + protocol_version(4) + num_initial_portals(4)
+            // + name(16) + transport(4) + buffer(4).
+            if fields_end < fields + 40 {
+                return Err(WireError::ShortParams);
+            }
+            let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            DecodedMessage::NonBrokerReferralAccepted(NonBrokerReferralAccepted {
+                referral_id: f_u64(0)?,
+                protocol_version: f_u32(8)?,
+                num_initial_portals: f_u32(12)?,
+                name: f_node(16)?,
+                transport_index: f_u32(32)?,
+                buffer_index: f_u32(36)?,
+                driver_objects,
+            })
+        }
+        MSG_ID_NON_BROKER_REFERRAL_REJECTED => {
+            if fields_end < fields + 8 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::NonBrokerReferralRejected(NonBrokerReferralRejected {
+                referral_id: f_u64(0)?,
+            })
+        }
+        MSG_ID_CONNECT_FROM_BROKER_TO_BROKER => {
+            // V0: name(16) + protocol_version(4) + num_initial_portals(4) +
+            // buffer(4) + padding(4).
+            if fields_end < fields + 32 {
+                return Err(WireError::ShortParams);
+            }
+            let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            DecodedMessage::ConnectFromBrokerToBroker(ConnectFromBrokerToBroker {
+                name: f_node(0)?,
+                protocol_version: f_u32(16)?,
+                num_initial_portals: f_u32(20)?,
+                buffer_index: f_u32(24)?,
+            })
+            .with_objects_check(driver_objects.len() == 1)
+        }
+        MSG_ID_REQUEST_INTRODUCTION => {
+            if fields_end < fields + 16 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::RequestIntroduction(RequestIntroduction { name: f_node(0)? })
+        }
+        MSG_ID_ACCEPT_INTRODUCTION => {
+            // V0: name(16) + link_side(4) + remote_node_type(4) + padding(2)
+            // + 2 implicit + remote_protocol_version(4) + transport(4) +
+            // memory(4).
+            if fields_end < fields + 40 {
+                return Err(WireError::ShortParams);
+            }
+            let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            DecodedMessage::AcceptIntroduction(AcceptIntroduction {
+                name: f_node(0)?,
+                link_side: f_u32(16)?,
+                remote_node_type: f_u32(20)?,
+                remote_protocol_version: f_u32(28)?,
+                transport_index: f_u32(32)?,
+                memory_index: f_u32(36)?,
+                driver_objects,
+            })
+        }
+        MSG_ID_REJECT_INTRODUCTION => {
+            if fields_end < fields + 16 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::RejectIntroduction(RejectIntroduction { name: f_node(0)? })
+        }
+        MSG_ID_REQUEST_INDIRECT_INTRODUCTION => {
+            if fields_end < fields + 32 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::RequestIndirectIntroduction(RequestIndirectIntroduction {
+                source_node: f_node(0)?,
+                target_node: f_node(16)?,
+            })
+        }
         MSG_ID_ADD_BLOCK_BUFFER => {
             if fields_end < fields + 16 {
                 return Err(WireError::ShortParams);
@@ -904,6 +1200,70 @@ pub fn encode_connect_from_non_broker_to_broker(
     fields.extend_from_slice(&features_off.to_le_bytes());
     b.append_params(&fields);
     b.append_array(&features.to_le_bytes(), 1);
+    b.build()
+}
+
+/// The mojo driver's `ObjectHeader.type` for an ipcz transport endpoint
+/// (`ObjectBase::Type::kTransport`, `mojo/core/ipcz_driver/object.h`).
+const MOJO_OBJECT_TYPE_TRANSPORT: u32 = 0;
+
+/// Serialize a mojo-driver transport endpoint as its wire driver-object
+/// bytes: `ObjectHeader{size=8, type=kTransport}` + `TransportHeader{size=8,
+/// destination_type, is_same_remote_process, is_peer_trusted,
+/// is_trusted_by_peer, reserved}` (16 bytes), matching
+/// `Transport::Serialize` (`mojo/core/ipcz_driver/transport.cc`). The
+/// endpoint's socket descriptor travels with the message.
+pub fn encode_transport_object(destination_type: u32) -> Vec<u8> {
+    let mut obj = Vec::with_capacity(16);
+    obj.extend_from_slice(&8u32.to_le_bytes()); // ObjectHeader.size
+    obj.extend_from_slice(&MOJO_OBJECT_TYPE_TRANSPORT.to_le_bytes());
+    obj.extend_from_slice(&8u32.to_le_bytes()); // TransportHeader.size
+    obj.extend_from_slice(&destination_type.to_le_bytes());
+    obj.extend_from_slice(&[0u8; 4]); // same_remote, peer_trusted, trusted_by_peer, reserved
+    obj
+}
+
+/// Encode `ReferNonBroker` (id 2): V0 `{referral_id u64, num_initial_portals
+/// u32, transport u32}` with the referrer-link transport as driver object 0.
+pub fn encode_refer_non_broker(
+    referral_id: u64,
+    num_initial_portals: u32,
+    transport_object: Vec<u8>,
+) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_REFER_NON_BROKER);
+    let mut fields = Vec::with_capacity(16);
+    fields.extend_from_slice(&referral_id.to_le_bytes());
+    fields.extend_from_slice(&num_initial_portals.to_le_bytes());
+    fields.extend_from_slice(&0u32.to_le_bytes()); // transport object index
+    b.append_params(&fields);
+    b.append_driver_objects(&[transport_object]);
+    b.build()
+}
+
+/// Encode `ConnectToReferredBroker` (id 3): V0 `{protocol_version u32,
+/// num_initial_portals u32}` + V1 features array, mirroring the Connect reply.
+pub fn encode_connect_to_referred_broker(num_initial_portals: u32, features: u64) -> Vec<u8> {
+    use crate::ipcz::wire::MESSAGE_HEADER_SIZE;
+    use crate::ipcz::wire::align8;
+    let params_size = align8(8 + 12);
+    let features_off = align8(MESSAGE_HEADER_SIZE + params_size) as u32;
+    let mut b = MessageBuilder::new(MSG_ID_CONNECT_TO_REFERRED_BROKER);
+    let mut fields = Vec::with_capacity(12);
+    fields.extend_from_slice(&0u32.to_le_bytes()); // protocol_version
+    fields.extend_from_slice(&num_initial_portals.to_le_bytes());
+    fields.extend_from_slice(&features_off.to_le_bytes());
+    b.append_params(&fields);
+    b.append_array(&features.to_le_bytes(), 1);
+    b.build()
+}
+
+/// Encode `RequestIntroduction` (id 10): V0 `{name NodeName}`.
+pub fn encode_request_introduction(name: NodeName) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_REQUEST_INTRODUCTION);
+    let mut fields = Vec::with_capacity(16);
+    fields.extend_from_slice(&name.high.to_le_bytes());
+    fields.extend_from_slice(&name.low.to_le_bytes());
+    b.append_params(&fields);
     b.build()
 }
 

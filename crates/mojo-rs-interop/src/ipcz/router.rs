@@ -204,6 +204,9 @@ impl LocalLinkState {
 /// its local peer router for local links (`LocalRouterLink`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
+    /// The NodeLink this link belongs to (0 = the broker link; the direct
+    /// peer link in the multi-node courts = 1). Local links carry 0.
+    pub link_id: u64,
     /// The sublink id on the NodeLink (meaningless for local links).
     pub sublink: u64,
     /// The link's role.
@@ -226,14 +229,16 @@ impl Link {
         self.local_peer.is_some()
     }
 
-    /// A remote (sublink-based) link.
+    /// A remote (sublink-based) link on the given NodeLink.
     pub fn remote(
+        link_id: u64,
         sublink: u64,
         kind: LinkKind,
         side: LinkSide,
         link_state: Option<FragmentDescriptor>,
     ) -> Link {
         Link {
+            link_id,
             sublink,
             kind,
             side,
@@ -257,6 +262,7 @@ impl Link {
     ) -> (Link, Link) {
         let state = Rc::new(RefCell::new(LocalLinkState::new(initial_stable)));
         let first = Link {
+            link_id: 0,
             sublink: 0,
             kind,
             side: side_for_first,
@@ -265,6 +271,7 @@ impl Link {
             local_state: Some(Rc::clone(&state)),
         };
         let second = Link {
+            link_id: 0,
             sublink: 0,
             kind,
             side: side_for_first.opposite(),
@@ -958,7 +965,7 @@ mod tests {
         assert_eq!(edge.get_decaying_local_peer(), Some(2));
         assert_eq!(edge.get_local_peer(), None);
         // A remote link has no local peer.
-        edge.set_primary_link(Link::remote(5, LinkKind::Central, LinkSide::B, None));
+        edge.set_primary_link(Link::remote(0, 5, LinkKind::Central, LinkSide::B, None));
         assert_eq!(edge.get_local_peer(), None);
         // Sanity: local_b peers back to 1.
         assert_eq!(local_b.local_peer, Some(1));
@@ -1027,7 +1034,7 @@ mod tests {
         let mut router = Router::bare();
         router
             .outward
-            .set_primary_link(Link::remote(1, LinkKind::Central, LinkSide::B, None));
+            .set_primary_link(Link::remote(0, 1, LinkKind::Central, LinkSide::B, None));
         assert!(router.outward.begin_primary_link_decay());
         router.outward.set_length_to_decaying_link(0);
         router.outward.set_length_from_decaying_link(0);

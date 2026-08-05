@@ -124,6 +124,65 @@ fn describe(d: &DecodedMessage) -> String {
             "protocol={} num_initial_portals={}",
             c.protocol_version, c.num_initial_portals
         ),
+        DecodedMessage::ReferNonBroker(r) => format!(
+            "referral_id={} num_initial_portals={} transport={} driver_objects={}",
+            r.referral_id, r.num_initial_portals, r.transport_index, "[1]",
+        ),
+        DecodedMessage::ConnectToReferredBroker(c) => format!(
+            "protocol={} num_initial_portals={}",
+            c.protocol_version, c.num_initial_portals
+        ),
+        DecodedMessage::ConnectToReferredNonBroker(c) => format!(
+            "name={} broker={} referrer={} broker_ver={} referrer_ver={} portals={} \
+             broker_buf={} referrer_transport={} referrer_buf={} driver_objects={}",
+            nn(&c.name),
+            nn(&c.broker_name),
+            nn(&c.referrer_name),
+            c.broker_protocol_version,
+            c.referrer_protocol_version,
+            c.num_initial_portals,
+            c.broker_link_buffer_index,
+            c.referrer_link_transport_index,
+            c.referrer_link_buffer_index,
+            c.driver_objects.len(),
+        ),
+        DecodedMessage::NonBrokerReferralAccepted(a) => format!(
+            "referral_id={} protocol={} portals={} name={} transport={} buffer={} driver_objects={}",
+            a.referral_id,
+            a.protocol_version,
+            a.num_initial_portals,
+            nn(&a.name),
+            a.transport_index,
+            a.buffer_index,
+            a.driver_objects.len(),
+        ),
+        DecodedMessage::NonBrokerReferralRejected(r) => {
+            format!("referral_id={}", r.referral_id)
+        }
+        DecodedMessage::ConnectFromBrokerToBroker(c) => format!(
+            "name={} protocol={} portals={} buffer={}",
+            nn(&c.name),
+            c.protocol_version,
+            c.num_initial_portals,
+            c.buffer_index,
+        ),
+        DecodedMessage::RequestIntroduction(r) => format!("name={}", nn(&r.name)),
+        DecodedMessage::AcceptIntroduction(a) => format!(
+            "name={} link_side={} remote_type={} protocol={} transport={} memory={} driver_objects={}",
+            nn(&a.name),
+            a.link_side,
+            a.remote_node_type,
+            a.remote_protocol_version,
+            a.transport_index,
+            a.memory_index,
+            a.driver_objects.len(),
+        ),
+        DecodedMessage::RejectIntroduction(r) => format!("name={}", nn(&r.name)),
+        DecodedMessage::RequestIndirectIntroduction(r) => format!(
+            "source={} target={}",
+            nn(&r.source_node),
+            nn(&r.target_node),
+        ),
         DecodedMessage::AddBlockBuffer(b) => format!(
             "buffer_id={} buffer_index={} block_size={}",
             b.buffer_id, b.buffer_index, b.block_size

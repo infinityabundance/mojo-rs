@@ -41,8 +41,12 @@ use crate::ipcz::link_memory::{
 };
 use crate::ipcz::messages::{
     self, AcceptParcel, DecodedMessage, FragmentDescriptor, MSG_ID_ACCEPT_BYPASS_LINK,
-    MSG_ID_ACCEPT_PARCEL, MSG_ID_BYPASS_PEER, MSG_ID_PROXY_WILL_STOP, MSG_ID_REQUEST_MEMORY,
-    NodeName, RouterDescriptor, handle_type,
+    MSG_ID_ACCEPT_INTRODUCTION, MSG_ID_ACCEPT_PARCEL, MSG_ID_BYPASS_PEER,
+    MSG_ID_CONNECT_FROM_BROKER_TO_BROKER, MSG_ID_CONNECT_TO_REFERRED_BROKER,
+    MSG_ID_CONNECT_TO_REFERRED_NON_BROKER, MSG_ID_NON_BROKER_REFERRAL_ACCEPTED,
+    MSG_ID_NON_BROKER_REFERRAL_REJECTED, MSG_ID_PROXY_WILL_STOP, MSG_ID_REFER_NON_BROKER,
+    MSG_ID_REJECT_INTRODUCTION, MSG_ID_REQUEST_INDIRECT_INTRODUCTION, MSG_ID_REQUEST_INTRODUCTION,
+    MSG_ID_REQUEST_MEMORY, NodeName, RouterDescriptor, handle_type,
 };
 use crate::ipcz::router::{Edge, Link, LinkKind, LinkSide, Object, Parcel, Router};
 use crate::ipcz::wire::{WireError, set_message_sequence_number};
@@ -125,20 +129,29 @@ struct ProcessedParcel {
 
 /// The Phase 5 routing acceptor state machine.
 pub struct RoutingAcceptor {
-    /// The channel to the broker.
+    /// The channel to the broker (NodeLink 0).
     channel: Channel,
-    /// The adopted link memory (set by the Connect handshake).
+    /// The adopted broker-link memory (set by the Connect handshake).
     link_memory: Option<LinkMemory>,
+    /// The direct peer link (NodeLink 1, the multi-node courts' referrer
+    /// link), established by the referral acceptance.
+    direct: Option<DirectLink>,
     /// Per-link outgoing message sequence number (after Connect).
     next_link_seq: u64,
     /// Routers by identity (their first primary sublink, or a local rid).
     routers: HashMap<u64, Router>,
-    /// Sublink -> owning router identity.
-    owners: HashMap<u64, u64>,
+    /// (NodeLink, sublink) -> owning router identity.
+    owners: HashMap<(u64, u64), u64>,
     /// Parcels for sublinks whose router is not yet established.
-    early_parcels: HashMap<u64, VecDeque<AcceptParcel>>,
+    early_parcels: HashMap<(u64, u64), VecDeque<AcceptParcel>>,
     /// The broker's node name (from the Connect greeting).
     broker_name: NodeName,
+    /// The referrer's node name (multi-node courts; from the referral
+    /// acceptance).
+    referrer_name: NodeName,
+    /// This node's own name (the Connect greeting's receiver name, or the
+    /// referral acceptance's assigned name).
+    local_name: NodeName,
     /// The app-facing bootstrap pipe router (the invitation attachment).
     bootstrap_rid: u64,
     /// The next identity for local-only routers.
@@ -160,6 +173,23 @@ pub struct RoutingAcceptor {
     event_seq: u64,
 }
 
+/// The direct peer NodeLink (link id 1) in the multi-node courts.
+pub struct DirectLink {
+    /// The channel to the referrer node.
+    channel: Channel,
+    /// The adopted link memory.
+    memory: LinkMemory,
+    /// The referrer's node name.
+    remote_name: NodeName,
+    /// Outgoing message sequence number.
+    next_link_seq: u64,
+}
+
+/// The NodeLink id of the broker link.
+pub const LINK_ID_BROKER: u64 = 0;
+/// The NodeLink id of the direct peer link (multi-node courts).
+pub const LINK_ID_DIRECT: u64 = 1;
+
 /// A pending `RequestMemory` (a `ProvideMemory` reply is expected): the
 /// completion carries the requested buffer size and the block size the
 /// caller's `RequestBlockCapacity` lobbied for.
@@ -177,11 +207,14 @@ impl RoutingAcceptor {
         Ok(RoutingAcceptor {
             channel,
             link_memory: None,
+            direct: None,
             next_link_seq: 0,
             routers: HashMap::new(),
             owners: HashMap::new(),
             early_parcels: HashMap::new(),
             broker_name: NodeName::invalid(),
+            referrer_name: NodeName::invalid(),
+            local_name: NodeName::invalid(),
             bootstrap_rid: 0,
             next_rid: LOCAL_RID_BASE,
             pending_memory_requests: HashMap::new(),
@@ -257,6 +290,54 @@ impl RoutingAcceptor {
             .ok_or(RoutingError::Unexpected("link memory not established"))
     }
 
+    /// The link memory of the NodeLink identified by `link_id`.
+    fn memory_for(&self, link_id: u64) -> Result<&LinkMemory, RoutingError> {
+        if link_id == LINK_ID_DIRECT {
+            return self
+                .direct
+                .as_ref()
+                .map(|d| &d.memory)
+                .ok_or(RoutingError::Unexpected("direct link not established"));
+        }
+        self.memory()
+    }
+
+    /// The link memory of the NodeLink identified by `link_id` (mutable).
+    fn memory_mut_for(&mut self, link_id: u64) -> Result<&mut LinkMemory, RoutingError> {
+        if link_id == LINK_ID_DIRECT {
+            return self
+                .direct
+                .as_mut()
+                .map(|d| &mut d.memory)
+                .ok_or(RoutingError::Unexpected("direct link not established"));
+        }
+        self.memory_mut()
+    }
+
+    /// The channel of the NodeLink identified by `link_id`.
+    fn channel_for(&mut self, link_id: u64) -> Result<&mut Channel, RoutingError> {
+        if link_id == LINK_ID_DIRECT {
+            return self
+                .direct
+                .as_mut()
+                .map(|d| &mut d.channel)
+                .ok_or(RoutingError::Unexpected("direct link not established"));
+        }
+        Ok(&mut self.channel)
+    }
+
+    /// The remote node name of the NodeLink identified by `link_id`.
+    fn remote_name_for(&self, link_id: u64) -> Result<NodeName, RoutingError> {
+        if link_id == LINK_ID_DIRECT {
+            return self
+                .direct
+                .as_ref()
+                .map(|d| d.remote_name)
+                .ok_or(RoutingError::Unexpected("direct link not established"));
+        }
+        Ok(self.broker_name)
+    }
+
     /// Run the full routing scenario.
     pub fn run(&mut self) -> Result<(), RoutingError> {
         self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
@@ -282,7 +363,7 @@ impl RoutingAcceptor {
         let b1_identity;
         match transfer {
             DecodedMessage::AcceptParcel(p) => {
-                let processed = self.process_accept_parcel(p, transfer_fds)?;
+                let processed = self.process_accept_parcel(p, transfer_fds, LINK_ID_BROKER)?;
                 if processed.identities.len() != 1 {
                     return Err(RoutingError::BadParcel(
                         "expected exactly one transferred portal",
@@ -327,7 +408,10 @@ impl RoutingAcceptor {
             )
         })?;
         let w1_payload = match w1 {
-            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, w1_fds)?.payload,
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, w1_fds, LINK_ID_BROKER)?
+                    .payload
+            }
             _ => return Err(RoutingError::Unexpected("w1 predicate misrouted")),
         };
         if w1_payload != b"w1" {
@@ -355,7 +439,11 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::BypassPeerWithLink(b) = bb {
-            self.dispatch(DecodedMessage::BypassPeerWithLink(b), bb_fds)?;
+            self.dispatch(
+                DecodedMessage::BypassPeerWithLink(b),
+                bb_fds,
+                LINK_ID_BROKER,
+            )?;
         }
 
         // Step 3: send r1 over the wire on the b1 route.
@@ -378,7 +466,7 @@ impl RoutingAcceptor {
             |d| matches!(d, DecodedMessage::StopProxying(s) if s.sublink == b1_identity),
         )?;
         if let DecodedMessage::StopProxying(s) = sp {
-            self.dispatch(DecodedMessage::StopProxying(s), Vec::new())?;
+            self.dispatch(DecodedMessage::StopProxying(s), Vec::new(), LINK_ID_BROKER)?;
         }
         self.emit(7, EventKind::Result, "MOJO_RESULT_OK");
 
@@ -392,7 +480,7 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::RouteClosed(r) = rc {
-            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds)?;
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, LINK_ID_BROKER)?;
         }
         self.emit(8, EventKind::Message, "MOJO_RESULT_FAILED_PRECONDITION");
 
@@ -443,7 +531,7 @@ impl RoutingAcceptor {
         let b1_identity;
         match transfer {
             DecodedMessage::AcceptParcel(p) => {
-                let processed = self.process_accept_parcel(p, transfer_fds)?;
+                let processed = self.process_accept_parcel(p, transfer_fds, LINK_ID_BROKER)?;
                 if processed.identities.len() != 1 {
                     return Err(RoutingError::BadParcel(
                         "expected exactly one transferred portal",
@@ -481,7 +569,10 @@ impl RoutingAcceptor {
             )
         })?;
         let w1_payload = match w1 {
-            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, w1_fds)?.payload,
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, w1_fds, LINK_ID_BROKER)?
+                    .payload
+            }
             _ => return Err(RoutingError::Unexpected("w1 predicate misrouted")),
         };
         if w1_payload != b"w1" {
@@ -499,7 +590,11 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::BypassPeerWithLink(b) = bb {
-            self.dispatch(DecodedMessage::BypassPeerWithLink(b), bb_fds)?;
+            self.dispatch(
+                DecodedMessage::BypassPeerWithLink(b),
+                bb_fds,
+                LINK_ID_BROKER,
+            )?;
         }
 
         // Step 3: m0..m8 on B'. The 8 primary 256-byte blocks are consumed by
@@ -555,7 +650,10 @@ impl RoutingAcceptor {
             )
         })?;
         let w3_payload = match w3 {
-            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, w3_fds)?.payload,
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, w3_fds, LINK_ID_BROKER)?
+                    .payload
+            }
             _ => return Err(RoutingError::Unexpected("w3 predicate misrouted")),
         };
         if w3_payload != b"w3" {
@@ -594,7 +692,7 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::RouteClosed(r) = rc {
-            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds)?;
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, LINK_ID_BROKER)?;
         }
         self.emit(19, EventKind::Message, "MOJO_RESULT_FAILED_PRECONDITION");
 
@@ -662,7 +760,7 @@ impl RoutingAcceptor {
                     if p.handle_types.contains(&handle_type::PORTAL) =>
                 {
                     let rseq = p.sequence_number;
-                    let processed_parcel = self.process_accept_parcel(p, fds)?;
+                    let processed_parcel = self.process_accept_parcel(p, fds, LINK_ID_BROKER)?;
                     let expected = if rseq == 0 {
                         b"transfer-b1".to_vec()
                     } else {
@@ -691,7 +789,7 @@ impl RoutingAcceptor {
                     // The only no-handle parcel from the broker is w1 (on the
                     // transferred pipe's route; it may be deferred in
                     // `early_parcels` until the transfer-b1's router exists).
-                    let payload = self.process_accept_parcel(p, fds)?.payload;
+                    let payload = self.process_accept_parcel(p, fds, LINK_ID_BROKER)?.payload;
                     if payload != b"w1" {
                         return Err(RoutingError::BadParcel("unexpected w1 payload"));
                     }
@@ -712,7 +810,7 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::RouteClosed(r) = rc {
-            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds)?;
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, LINK_ID_BROKER)?;
         }
         self.emit(
             3 + (EXHAUST_TRANSFERS as u64 - 1) * 2 + 1,
@@ -780,7 +878,7 @@ impl RoutingAcceptor {
         let b1_identity;
         match transfer {
             DecodedMessage::AcceptParcel(p) => {
-                let processed = self.process_accept_parcel(p, transfer_fds)?;
+                let processed = self.process_accept_parcel(p, transfer_fds, LINK_ID_BROKER)?;
                 if processed.identities.len() != 1 {
                     return Err(RoutingError::BadParcel(
                         "expected exactly one transferred portal",
@@ -820,7 +918,10 @@ impl RoutingAcceptor {
             )
         })?;
         let w1_payload = match w1 {
-            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, w1_fds)?.payload,
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, w1_fds, LINK_ID_BROKER)?
+                    .payload
+            }
             _ => return Err(RoutingError::Unexpected("w1 predicate misrouted")),
         };
         if w1_payload != b"w1" {
@@ -840,7 +941,11 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::BypassPeerWithLink(b) = bb {
-            self.dispatch(DecodedMessage::BypassPeerWithLink(b), bb_fds)?;
+            self.dispatch(
+                DecodedMessage::BypassPeerWithLink(b),
+                bb_fds,
+                LINK_ID_BROKER,
+            )?;
         }
         self.drain_available()?;
 
@@ -900,7 +1005,7 @@ impl RoutingAcceptor {
             )
         })?;
         if let DecodedMessage::RouteClosed(r) = rc {
-            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds)?;
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, LINK_ID_BROKER)?;
         }
         self.emit(
             4 + BYPASS_TRANSFERS as u64,
@@ -965,6 +1070,7 @@ impl RoutingAcceptor {
         let mem_fd = fds.remove(0).into_raw_fd();
         self.link_memory = Some(LinkMemory::adopt_primary(mem_fd)?);
         self.broker_name = connect.broker_name;
+        self.local_name = connect.receiver_name;
 
         let reply = messages::encode_connect_from_non_broker_to_broker(ACCEPTOR_INITIAL_PORTALS, 0);
         self.channel.send(&reply, &[])?;
@@ -977,7 +1083,7 @@ impl RoutingAcceptor {
                 offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(i) as u32,
                 size: ROUTER_LINK_STATE_SIZE as u32,
             };
-            let link = Link::remote(sublink, LinkKind::Central, LinkSide::B, Some(state));
+            let link = Link::remote(0, sublink, LinkKind::Central, LinkSide::B, Some(state));
             let router = if i == 1 {
                 // The bootstrap portal (side B of the initial central link).
                 Router::new_terminal(link)
@@ -986,7 +1092,7 @@ impl RoutingAcceptor {
                 r.outward.set_primary_link(link);
                 r
             };
-            self.owners.insert(sublink, sublink);
+            self.owners.insert((LINK_ID_BROKER, sublink), sublink);
             self.routers.insert(sublink, router);
         }
         // The internal portal 0 carries the shared-memory-service client
@@ -1138,27 +1244,84 @@ impl RoutingAcceptor {
         &mut self,
         pred: impl Fn(&DecodedMessage) -> bool,
     ) -> Result<(DecodedMessage, Vec<OwnedFd>), RoutingError> {
+        self.recv_until_on(LINK_ID_BROKER, pred)
+    }
+
+    /// Receive messages until `pred` matches on the given NodeLink; every
+    /// non-matching message is dispatched to the routers with the source link
+    /// id. Returns the matched message and its fds.
+    fn recv_until_on(
+        &mut self,
+        link_id: u64,
+        pred: impl Fn(&DecodedMessage) -> bool,
+    ) -> Result<(DecodedMessage, Vec<OwnedFd>), RoutingError> {
         loop {
             let msg = self
-                .channel
+                .channel_for(link_id)?
                 .recv()?
                 .ok_or(RoutingError::Unexpected("peer closed during exchange"))?;
             let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
             if pred(&decoded) {
                 return Ok((decoded, msg.fds));
             }
-            self.dispatch(decoded, msg.fds)?;
+            self.dispatch(decoded, msg.fds, link_id)?;
         }
     }
 
-    /// Dispatch one message to the routers.
-    fn dispatch(&mut self, decoded: DecodedMessage, fds: Vec<OwnedFd>) -> Result<(), RoutingError> {
+    /// Dispatch one message to the routers. `link_id` identifies the NodeLink
+    /// the message arrived on (its sublink ids are scoped to that link).
+    fn dispatch(
+        &mut self,
+        decoded: DecodedMessage,
+        fds: Vec<OwnedFd>,
+        link_id: u64,
+    ) -> Result<(), RoutingError> {
         match decoded {
             DecodedMessage::ConnectFromBrokerToNonBroker(_) => {
                 Err(RoutingError::Unexpected("Connect received after handshake"))
             }
             DecodedMessage::ConnectFromNonBrokerToBroker(_) => Err(RoutingError::Unexpected(
                 "Connect reply received from broker",
+            )),
+            DecodedMessage::ReferNonBroker(_) => Err(RoutingError::Unsupported(
+                MSG_ID_REFER_NON_BROKER,
+                "native broker role not exercised by a sealed court",
+            )),
+            DecodedMessage::ConnectToReferredBroker(_) => Err(RoutingError::Unsupported(
+                MSG_ID_CONNECT_TO_REFERRED_BROKER,
+                "referred-node connect not exercised by a sealed court",
+            )),
+            DecodedMessage::ConnectToReferredNonBroker(_) => Err(RoutingError::Unsupported(
+                MSG_ID_CONNECT_TO_REFERRED_NON_BROKER,
+                "referral acceptance not exercised by a sealed court",
+            )),
+            DecodedMessage::NonBrokerReferralAccepted(_) => Err(RoutingError::Unsupported(
+                MSG_ID_NON_BROKER_REFERRAL_ACCEPTED,
+                "referral acceptance not exercised by a sealed court",
+            )),
+            DecodedMessage::NonBrokerReferralRejected(_) => Err(RoutingError::Unsupported(
+                MSG_ID_NON_BROKER_REFERRAL_REJECTED,
+                "referral rejection not exercised by a sealed court",
+            )),
+            DecodedMessage::ConnectFromBrokerToBroker(_) => Err(RoutingError::Unsupported(
+                MSG_ID_CONNECT_FROM_BROKER_TO_BROKER,
+                "broker-to-broker connect not exercised by a sealed court",
+            )),
+            DecodedMessage::RequestIntroduction(_) => Err(RoutingError::Unsupported(
+                MSG_ID_REQUEST_INTRODUCTION,
+                "native broker role not exercised by a sealed court",
+            )),
+            DecodedMessage::AcceptIntroduction(_) => Err(RoutingError::Unsupported(
+                MSG_ID_ACCEPT_INTRODUCTION,
+                "introduction not exercised by a sealed court",
+            )),
+            DecodedMessage::RejectIntroduction(_) => Err(RoutingError::Unsupported(
+                MSG_ID_REJECT_INTRODUCTION,
+                "introduction rejection not exercised by a sealed court",
+            )),
+            DecodedMessage::RequestIndirectIntroduction(_) => Err(RoutingError::Unsupported(
+                MSG_ID_REQUEST_INDIRECT_INTRODUCTION,
+                "indirect introduction not exercised by a sealed court",
             )),
             DecodedMessage::AddBlockBuffer(b) => {
                 if b.buffer_index as usize >= fds.len() {
@@ -1172,18 +1335,20 @@ impl RoutingAcceptor {
                 // arrives).
                 if let Some(queued) = self.pending_fragments.remove(&b.buffer_id) {
                     for (p, p_fds) in queued {
-                        self.process_accept_parcel(p, p_fds)?;
+                        self.process_accept_parcel(p, p_fds, LINK_ID_BROKER)?;
                     }
                 }
                 Ok(())
             }
-            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, fds).map(|_| ()),
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, fds, link_id).map(|_| ())
+            }
             DecodedMessage::AcceptParcelDriverObjects(_) => Err(RoutingError::Unsupported(
                 MSG_ID_ACCEPT_PARCEL,
                 "split parcels not exercised by the routing court",
             )),
             DecodedMessage::RouteClosed(rc) => {
-                let Some(rid) = self.owners.get(&rc.sublink).copied() else {
+                let Some(rid) = self.owners.get(&(link_id, rc.sublink)).copied() else {
                     // Deactivated sublink: the official `GetRouter` returns
                     // null and the message is silently ignored.
                     return Ok(());
@@ -1191,14 +1356,14 @@ impl RoutingAcceptor {
                 self.router_route_closed(rid, rc.sublink, rc.sequence_length)
             }
             DecodedMessage::RouteDisconnected(rd) => {
-                let Some(rid) = self.owners.get(&rd.sublink).copied() else {
+                let Some(rid) = self.owners.get(&(link_id, rd.sublink)).copied() else {
                     return Ok(());
                 };
                 self.router_disconnected(rid)
             }
-            DecodedMessage::BypassPeerWithLink(b) => self.on_bypass_peer_with_link(b),
+            DecodedMessage::BypassPeerWithLink(b) => self.on_bypass_peer_with_link(b, link_id),
             DecodedMessage::StopProxying(s) => {
-                let Some(rid) = self.owners.get(&s.sublink).copied() else {
+                let Some(rid) = self.owners.get(&(link_id, s.sublink)).copied() else {
                     return Ok(());
                 };
                 self.router_stop_proxying(
@@ -1210,13 +1375,13 @@ impl RoutingAcceptor {
             DecodedMessage::StopProxyingToLocalPeer(s) => {
                 // Routed to the router owning the sublink, exactly like the
                 // official `NodeLink::OnStopProxyingToLocalPeer`.
-                let Some(rid) = self.owners.get(&s.sublink).copied() else {
+                let Some(rid) = self.owners.get(&(link_id, s.sublink)).copied() else {
                     return Ok(());
                 };
                 self.router_stop_proxying_to_local_peer(rid, s.outbound_sequence_length)
             }
             DecodedMessage::FlushRouter(f) => {
-                if let Some(&rid) = self.owners.get(&f.sublink) {
+                if let Some(&rid) = self.owners.get(&(link_id, f.sublink)) {
                     // The official `OnFlushRouter` forces a proxy-bypass
                     // attempt on the target router.
                     self.router_flush(rid, true)?;
@@ -1273,10 +1438,13 @@ impl RoutingAcceptor {
 
     /// Assemble an AcceptParcel (data + deserialized portals), route it to its
     /// router, and flush. Returns the payload and the new portal identities.
+    /// `link_id` is the NodeLink the parcel arrived on (its sublink ids are
+    /// scoped to that link).
     fn process_accept_parcel(
         &mut self,
         p: AcceptParcel,
         fds: Vec<OwnedFd>,
+        link_id: u64,
     ) -> Result<ProcessedParcel, RoutingError> {
         if p.num_subparcels == 0 || p.subparcel_index >= p.num_subparcels || p.num_subparcels > 16 {
             return Err(RoutingError::BadParcel("invalid subparcel bounds"));
@@ -1304,7 +1472,7 @@ impl RoutingAcceptor {
             }
             Err(e) => return Err(e),
         };
-        let identities = self.deserialize_portals(&p)?;
+        let identities = self.deserialize_portals(&p, link_id)?;
         let mut identities_iter = identities.iter();
         let mut objects: Vec<Object> = Vec::new();
         let mut driver_refs = p.driver_objects.iter();
@@ -1358,11 +1526,11 @@ impl RoutingAcceptor {
             ));
         }
 
-        let rid = match self.owners.get(&p.sublink) {
+        let rid = match self.owners.get(&(link_id, p.sublink)) {
             Some(&rid) => rid,
             None => {
                 self.early_parcels
-                    .entry(p.sublink)
+                    .entry((link_id, p.sublink))
                     .or_default()
                     .push_back(p);
                 return Ok(ProcessedParcel {
@@ -1380,15 +1548,18 @@ impl RoutingAcceptor {
                 .outward
                 .primary
                 .as_ref()
-                .is_some_and(|l| l.sublink == p.sublink)
+                .is_some_and(|l| l.link_id == link_id && l.sublink == p.sublink)
                 || router
                     .outward
                     .decaying_link()
-                    .is_some_and(|l| l.sublink == p.sublink);
+                    .is_some_and(|l| l.link_id == link_id && l.sublink == p.sublink);
             if !on_outward {
                 let on_inward = router.inward.as_ref().is_some_and(|e| {
-                    e.primary.as_ref().is_some_and(|l| l.sublink == p.sublink)
-                        || e.decaying_link().is_some_and(|l| l.sublink == p.sublink)
+                    e.primary
+                        .as_ref()
+                        .is_some_and(|l| l.link_id == link_id && l.sublink == p.sublink)
+                        || e.decaying_link()
+                            .is_some_and(|l| l.link_id == link_id && l.sublink == p.sublink)
                 });
                 if !on_inward {
                     return Err(RoutingError::BadParcel("parcel for unbound sublink"));
@@ -1427,8 +1598,13 @@ impl RoutingAcceptor {
     }
 
     /// `Router::Deserialize`: create a new router from a descriptor received
-    /// over the NodeLink. Returns the new router's identity sublink.
-    fn router_deserialize(&mut self, d: RouterDescriptor) -> Result<u64, RoutingError> {
+    /// over the NodeLink identified by `link_id`. Returns the new router's
+    /// identity sublink (scoped to that link).
+    fn router_deserialize(
+        &mut self,
+        d: RouterDescriptor,
+        link_id: u64,
+    ) -> Result<u64, RoutingError> {
         let new_decaying_sublink = if d.proxy_already_bypassed {
             Some(d.new_decaying_sublink)
         } else {
@@ -1445,7 +1621,8 @@ impl RoutingAcceptor {
             if d.new_link_state_fragment.is_null() {
                 return Err(RoutingError::BadParcel("central link without link state"));
             }
-            self.memory()?.fragment(d.new_link_state_fragment)?;
+            self.memory_for(link_id)?
+                .fragment(d.new_link_state_fragment)?;
             // `AdoptFragmentRefIfValid` does NOT increment: the adoption takes
             // the sender's released reference (the sender's `FragmentRef`
             // `release()`d it into the descriptor). The shared ref count is
@@ -1481,6 +1658,7 @@ impl RoutingAcceptor {
             // The decaying peripheral outward link forwards parcels already
             // queued or in flight on the sender's node.
             router.outward.set_primary_link(Link::remote(
+                link_id,
                 decaying_sublink,
                 LinkKind::PeripheralOutward,
                 LinkSide::B,
@@ -1498,6 +1676,7 @@ impl RoutingAcceptor {
                 },
             );
             router.outward.set_primary_link(Link::remote(
+                link_id,
                 d.new_sublink,
                 LinkKind::Central,
                 LinkSide::B,
@@ -1505,6 +1684,7 @@ impl RoutingAcceptor {
             ));
         } else {
             router.outward.set_primary_link(Link::remote(
+                link_id,
                 d.new_sublink,
                 LinkKind::PeripheralOutward,
                 LinkSide::B,
@@ -1512,26 +1692,27 @@ impl RoutingAcceptor {
             ));
         }
 
-        self.owners.insert(d.new_sublink, d.new_sublink);
+        self.owners.insert((link_id, d.new_sublink), d.new_sublink);
         if let Some(decaying) = new_decaying_sublink {
-            self.owners.insert(decaying, d.new_sublink);
+            self.owners.insert((link_id, decaying), d.new_sublink);
         }
         self.routers.insert(d.new_sublink, router);
 
         // Accept early parcels for the new sublink AND its decaying sublink
         // (parcels for the decaying route can arrive before the descriptor is
         // processed, e.g. when the sender's IO thread flushes asynchronously).
-        let mut early: Vec<AcceptParcel> = match self.early_parcels.remove(&d.new_sublink) {
-            Some(q) => q.into_iter().collect(),
-            None => Vec::new(),
-        };
+        let mut early: Vec<AcceptParcel> =
+            match self.early_parcels.remove(&(link_id, d.new_sublink)) {
+                Some(q) => q.into_iter().collect(),
+                None => Vec::new(),
+            };
         if let Some(decaying) = new_decaying_sublink {
-            if let Some(q) = self.early_parcels.remove(&decaying) {
+            if let Some(q) = self.early_parcels.remove(&(link_id, decaying)) {
                 early.extend(q.into_iter());
             }
         }
         for p in early {
-            self.process_accept_parcel(p, Vec::new())?;
+            self.process_accept_parcel(p, Vec::new(), link_id)?;
         }
 
         // If the source router rolled peer-bypass details into the descriptor,
@@ -1540,35 +1721,156 @@ impl RoutingAcceptor {
             let rid = d.new_sublink;
             let target_node = d.proxy_peer_node_name;
             let target_sublink = d.proxy_peer_sublink;
-            self.router_bypass_peer(rid, target_node, target_sublink)?;
+            self.router_bypass_peer(rid, link_id, target_node, target_sublink)?;
         }
 
         self.router_flush(d.new_sublink, false)?;
         Ok(d.new_sublink)
     }
 
-    /// `Router::BypassPeer` (the immediate-bypass path from a descriptor): the
-    /// requestor is our peripheral outward peer; its outward peer lives on our
-    /// own node's link target — here, always the broker — so the bypass is
-    /// completed by the broker's side and we only validate the request source.
+    /// `Router::BypassPeer` (the descriptor's immediate-bypass path): the
+    /// requestor is our peripheral outward peer over `requestor_link_id`; its
+    /// outward peer lives on `bypass_target_node` via `bypass_target_sublink`.
+    ///
+    /// When the bypass target is on another node and we have a link to it, the
+    /// bypass is completed by `BypassPeerWithNewRemoteLink`: we allocate a
+    /// fresh `RouterLinkState` from the target link's memory, begin decaying
+    /// our outward requestor link, create a new central link to the target
+    /// node, and send `AcceptBypassLink` over the target link (the outbound
+    /// id-31 path sealed by the multi-node court).
     fn router_bypass_peer(
         &mut self,
         rid: u64,
-        _bypass_target_node: NodeName,
-        _bypass_target_sublink: u64,
+        requestor_link_id: u64,
+        bypass_target_node: NodeName,
+        bypass_target_sublink: u64,
     ) -> Result<(), RoutingError> {
-        // On this node, a descriptor's `proxy_peer_*` fields identify the
-        // broker (the only peer), and the broker completes the bypass with a
-        // BypassPeerWithNewLocalLink on its side, ending with a StopProxying
-        // message to our proxy. There is nothing for us to send; we wait for
-        // the StopProxying that follows.
-        let router = self
-            .routers
-            .get(&rid)
-            .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
-        if router.outward.primary.is_none() {
-            return Err(RoutingError::BadParcel("bypass requestor is not our peer"));
+        // Validate that the source of this request is our peripheral outward
+        // peer (`outward_link != &requestor` in the official).
+        let requestor_sublink = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
+            let Some(primary) = router.outward.primary.as_ref() else {
+                // This Router may have been disconnected already; silently
+                // ignore the request (the official returns true).
+                return Ok(());
+            };
+            if primary.link_id != requestor_link_id {
+                return Err(RoutingError::BadParcel(
+                    "rejecting BypassPeer from a non-outward peer",
+                ));
+            }
+            primary.sublink
+        };
+
+        if bypass_target_node != self.local_name {
+            // The proxy's outward peer lives on another node: we need a link
+            // to it (`Node::GetLink`).
+            let target_link_id = self.link_id_for_node(bypass_target_node)?;
+            return self.bypass_peer_with_new_remote_link(
+                rid,
+                requestor_link_id,
+                requestor_sublink,
+                bypass_target_sublink,
+                target_link_id,
+            );
         }
+        Err(RoutingError::Unsupported(
+            MSG_ID_BYPASS_PEER,
+            "BypassPeerWithNewLocalLink not exercised by a sealed court",
+        ))
+    }
+
+    /// The NodeLink id of the link to the given node (`Node::GetLink`). Only
+    /// the sealed courts' links exist (broker link + direct peer link).
+    fn link_id_for_node(&self, name: NodeName) -> Result<u64, RoutingError> {
+        if name == self.broker_name {
+            return Ok(LINK_ID_BROKER);
+        }
+        if self.referrer_name.is_valid() && name == self.referrer_name {
+            return Ok(LINK_ID_DIRECT);
+        }
+        Err(RoutingError::Unsupported(
+            MSG_ID_BYPASS_PEER,
+            "EstablishLink (unknown node) not exercised by a sealed court",
+        ))
+    }
+
+    /// `Router::BypassPeerWithNewRemoteLink`: replace our outward link to the
+    /// requestor's proxy with a new central link to the bypass target over
+    /// `target_link_id`, transmitting `AcceptBypassLink` first (the new link
+    /// is only adopted after the message goes out, so the peer can route it).
+    fn bypass_peer_with_new_remote_link(
+        &mut self,
+        rid: u64,
+        requestor_link_id: u64,
+        requestor_sublink: u64,
+        bypass_target_sublink: u64,
+        target_link_id: u64,
+    ) -> Result<(), RoutingError> {
+        let requestor_node = self.remote_name_for(requestor_link_id)?;
+        // `TryAllocateRouterLinkState` from the target link's memory; the
+        // sealed courts never exhaust here (the official would retry
+        // asynchronously on failure).
+        let Some(new_link_state) = self
+            .memory_mut_for(target_link_id)?
+            .try_allocate_link_state()?
+        else {
+            return Ok(());
+        };
+        // The new central link holds a copy of the FragmentRef.
+        self.memory_for(target_link_id)?
+            .add_link_state_ref(new_link_state)?;
+        let new_sublink = self.memory_for(target_link_id)?.allocate_sublink_ids(1)?;
+
+        // Begin decaying our outward (requestor) link.
+        let length_to_decaying_link = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
+            router.outbound.current_sequence_number()
+        };
+        {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
+            if router.disconnected {
+                return Ok(());
+            }
+            if !router.outward.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay the outward link"));
+            }
+            router
+                .outward
+                .set_length_to_decaying_link(length_to_decaying_link);
+        }
+
+        // `NodeLink::AcceptBypassLink`: inform the bypass target that it can
+        // bypass the proxy, providing the new central sublink + link state.
+        let msg = messages::encode_accept_bypass_link(
+            requestor_node,
+            bypass_target_sublink,
+            length_to_decaying_link,
+            new_sublink,
+            new_link_state,
+        );
+        self.send_link_message_on(target_link_id, msg)?;
+
+        // Adopt the new central link (the official `SetOutwardLink`, which
+        // marks side A stable when the edges are stable and flushes).
+        let new_link = Link::remote(
+            target_link_id,
+            new_sublink,
+            LinkKind::Central,
+            LinkSide::A,
+            Some(new_link_state),
+        );
+        self.set_outward_link(rid, &new_link)?;
+        self.router_flush(rid, true)?;
         Ok(())
     }
 
@@ -1598,7 +1900,11 @@ impl RoutingAcceptor {
     /// plain proxy path with the outward link unlocked (the official
     /// `SerializeNewRouterAndConfigureProxy` behavior for a local outward
     /// link).
-    fn serialize_router(&mut self, rid: u64) -> Result<(u64, RouterDescriptor), RoutingError> {
+    fn serialize_router(
+        &mut self,
+        rid: u64,
+        link_id: u64,
+    ) -> Result<(u64, RouterDescriptor), RoutingError> {
         // Snapshot the outward primary and its local peer (`Router::SerializeNewRouter`
         // reads these under the lock).
         let (outward_primary, local_peer) = {
@@ -1627,7 +1933,9 @@ impl RoutingAcceptor {
         // The WithLocalPeer path: the router's peer is on this node.
         if let Some(local_peer) = local_peer {
             if locked {
-                if let Some(descriptor) = self.serialize_router_with_local_peer(rid, local_peer)? {
+                if let Some(descriptor) =
+                    self.serialize_router_with_local_peer(rid, local_peer, link_id)?
+                {
                     return Ok((rid, descriptor));
                 }
                 // No link state available (pool exhausted; the lobby fired).
@@ -1684,7 +1992,7 @@ impl RoutingAcceptor {
         }
         // Register the new peripheral inward link on the NodeLink; the router
         // adopts it in begin_proxying after the descriptor is transmitted.
-        self.owners.insert(new_sublink, rid);
+        self.owners.insert((link_id, new_sublink), rid);
         Ok((rid, descriptor))
     }
 
@@ -1702,6 +2010,7 @@ impl RoutingAcceptor {
         &mut self,
         rid: u64,
         local_peer: u64,
+        link_id: u64,
     ) -> Result<Option<RouterDescriptor>, RoutingError> {
         // `TryAllocateRouterLinkState`: on failure, unconditionally lobby for
         // more capacity (the `RequestMemory`/`ProvideMemory` round trip) and
@@ -1737,8 +2046,8 @@ impl RoutingAcceptor {
         let decaying_sublink = new_sublink + 1;
         // Register the tentative routes on the NodeLink (adopted in
         // `begin_proxying` after transmission).
-        self.owners.insert(new_sublink, local_peer);
-        self.owners.insert(decaying_sublink, rid);
+        self.owners.insert((link_id, new_sublink), local_peer);
+        self.owners.insert((link_id, decaying_sublink), rid);
 
         let mut descriptor = RouterDescriptor {
             new_sublink,
@@ -1782,7 +2091,12 @@ impl RoutingAcceptor {
     ///   local peer adopts the new central link (`SetOutwardLink`, which marks
     ///   side A stable on the shared state).
     /// * plain proxy: the inward edge adopts the peripheral inward link.
-    fn begin_proxying(&mut self, rid: u64, d: &RouterDescriptor) -> Result<(), RoutingError> {
+    fn begin_proxying(
+        &mut self,
+        rid: u64,
+        d: &RouterDescriptor,
+        link_id: u64,
+    ) -> Result<(), RoutingError> {
         let new_sublink = d.new_sublink;
         if d.proxy_already_bypassed {
             // Release this router's outward link (the old local link to its
@@ -1817,6 +2131,7 @@ impl RoutingAcceptor {
                         ));
                     };
                     inward.set_primary_link(Link::remote(
+                        link_id,
                         d.new_decaying_sublink,
                         LinkKind::PeripheralInward,
                         LinkSide::A,
@@ -1827,6 +2142,7 @@ impl RoutingAcceptor {
             // The local peer's new outward link is the central link; adopt it
             // and mark side A stable (`Router::SetOutwardLink`).
             let central = Link::remote(
+                link_id,
                 new_sublink,
                 LinkKind::Central,
                 LinkSide::A,
@@ -1850,6 +2166,7 @@ impl RoutingAcceptor {
             };
             if router.outbound.final_sequence_length().is_none() && !router.disconnected {
                 inward.set_primary_link(Link::remote(
+                    link_id,
                     new_sublink,
                     LinkKind::PeripheralInward,
                     LinkSide::A,
@@ -2371,13 +2688,15 @@ impl RoutingAcceptor {
             length_from_local_peer,
         ))?;
         let new_link = Link::remote(
+            0,
             bypass_sublink,
             LinkKind::Central,
             LinkSide::A,
             Some(link_state),
         );
         self.set_outward_link(local_peer, &new_link)?;
-        self.owners.insert(bypass_sublink, local_peer);
+        self.owners
+            .insert((LINK_ID_BROKER, bypass_sublink), local_peer);
 
         self.router_flush(rid, false)?;
         self.router_flush(other_bridge, false)?;
@@ -2933,10 +3252,13 @@ impl RoutingAcceptor {
 
     /// `Router::AcceptBypassLink` (the receive side of `BypassPeerWithLink`):
     /// adopt the new central link on `b.new_sublink`, begin decaying the old
-    /// link, and tell the peer to stop proxying on the old sublink.
+    /// link, and tell the peer to stop proxying on the old sublink. `link_id`
+    /// is the NodeLink the message arrived on (the new sublink is scoped to
+    /// it).
     fn on_bypass_peer_with_link(
         &mut self,
         b: messages::BypassPeerWithLink,
+        link_id: u64,
     ) -> Result<(), RoutingError> {
         if b.new_link_state_fragment.is_null() {
             return Err(RoutingError::BadParcel("bypass with null link state"));
@@ -2945,7 +3267,7 @@ impl RoutingAcceptor {
 
         // The message targets the router owning the old sublink; a deactivated
         // sublink is silently ignored (the official `GetRouter` returns null).
-        let rid = match self.owners.get(&b.sublink).copied() {
+        let rid = match self.owners.get(&(link_id, b.sublink)).copied() {
             Some(rid) => rid,
             None => return Ok(()),
         };
@@ -2984,12 +3306,13 @@ impl RoutingAcceptor {
                 .set_length_from_decaying_link(b.inbound_sequence_length);
             old_sublink = old.sublink;
             router.outward.set_primary_link(Link::remote(
+                link_id,
                 b.new_sublink,
                 LinkKind::Central,
                 LinkSide::B,
                 Some(b.new_link_state_fragment),
             ));
-            self.owners.insert(b.new_sublink, rid);
+            self.owners.insert((link_id, b.new_sublink), rid);
         }
 
         // The new link goes to the same node as the old one: tell the peer to
@@ -3000,9 +3323,9 @@ impl RoutingAcceptor {
         ))?;
 
         // Drain early parcels for the new sublink.
-        if let Some(queued) = self.early_parcels.remove(&b.new_sublink) {
+        if let Some(queued) = self.early_parcels.remove(&(link_id, b.new_sublink)) {
             for p in queued {
-                self.process_accept_parcel(p, Vec::new())?;
+                self.process_accept_parcel(p, Vec::new(), link_id)?;
             }
         }
         self.router_flush(rid, false)
@@ -3010,7 +3333,11 @@ impl RoutingAcceptor {
 
     /// Deserialize the new routers described by an AcceptParcel's
     /// `new_routers` array; returns their identity sublinks in order.
-    fn deserialize_portals(&mut self, p: &AcceptParcel) -> Result<Vec<u64>, RoutingError> {
+    fn deserialize_portals(
+        &mut self,
+        p: &AcceptParcel,
+        link_id: u64,
+    ) -> Result<Vec<u64>, RoutingError> {
         if p.new_routers.len() % RouterDescriptor::SIZE != 0 {
             return Err(RoutingError::BadParcel("malformed new_routers array"));
         }
@@ -3028,7 +3355,7 @@ impl RoutingAcceptor {
             let bytes =
                 &p.new_routers[i * RouterDescriptor::SIZE..(i + 1) * RouterDescriptor::SIZE];
             let d = RouterDescriptor::decode(bytes)?;
-            let rid = self.router_deserialize(d)?;
+            let rid = self.router_deserialize(d, link_id)?;
             out.push(rid);
         }
         Ok(out)
@@ -3077,7 +3404,7 @@ impl RoutingAcceptor {
                 }
                 Object::Router(rid) => {
                     handle_types.push(handle_type::PORTAL);
-                    serialized.push(self.serialize_router(*rid)?);
+                    serialized.push(self.serialize_router(*rid, link.link_id)?);
                 }
             }
         }
@@ -3093,7 +3420,7 @@ impl RoutingAcceptor {
         );
         self.send_link_message(msg)?;
         for (rid, d) in serialized {
-            self.begin_proxying(rid, &d)?;
+            self.begin_proxying(rid, &d, link.link_id)?;
         }
         Ok(())
     }
@@ -3172,6 +3499,53 @@ impl RoutingAcceptor {
             Err(crate::ipcz::link_memory::LinkMemoryError::OutOfBounds) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Send a NodeLink message on the given link, assigning the per-link
+    /// sequence number.
+    fn send_link_message_on(
+        &mut self,
+        link_id: u64,
+        mut payload: Vec<u8>,
+    ) -> Result<(), RoutingError> {
+        if link_id == LINK_ID_DIRECT {
+            let direct = self
+                .direct
+                .as_mut()
+                .ok_or(RoutingError::Unexpected("direct link not established"))?;
+            set_message_sequence_number(&mut payload, direct.next_link_seq);
+            direct.next_link_seq += 1;
+            direct.channel.send(&payload, &[])?;
+            return Ok(());
+        }
+        set_message_sequence_number(&mut payload, self.next_link_seq);
+        self.next_link_seq += 1;
+        self.channel.send(&payload, &[])?;
+        Ok(())
+    }
+
+    /// Send a NodeLink message on the given link with attached descriptors
+    /// (e.g. an `AddBlockBuffer` carrying the shared buffer).
+    fn send_link_message_with_fds_on(
+        &mut self,
+        link_id: u64,
+        mut payload: Vec<u8>,
+        fds: &[RawFd],
+    ) -> Result<(), RoutingError> {
+        if link_id == LINK_ID_DIRECT {
+            let direct = self
+                .direct
+                .as_mut()
+                .ok_or(RoutingError::Unexpected("direct link not established"))?;
+            set_message_sequence_number(&mut payload, direct.next_link_seq);
+            direct.next_link_seq += 1;
+            direct.channel.send(&payload, fds)?;
+            return Ok(());
+        }
+        set_message_sequence_number(&mut payload, self.next_link_seq);
+        self.next_link_seq += 1;
+        self.channel.send(&payload, fds)?;
+        Ok(())
     }
 
     /// Send a NodeLink message, assigning the per-link sequence number.
@@ -3281,33 +3655,33 @@ impl RoutingAcceptor {
     /// them are dropped, not errors). The router's shared `RouterLinkState`
     /// references are released (the last ref frees the block).
     fn remove_router(&mut self, rid: u64) {
-        let (sublinks, state_links): (Vec<u64>, Vec<Link>) = {
+        let (sublinks, state_links): (Vec<(u64, u64)>, Vec<Link>) = {
             let Some(router) = self.routers.get(&rid) else {
                 return;
             };
             let mut out = Vec::new();
             let mut states = Vec::new();
             if let Some(l) = &router.outward.primary {
-                out.push(l.sublink);
+                out.push((l.link_id, l.sublink));
                 if l.link_state.is_some() {
                     states.push(l.clone());
                 }
             }
             if let Some(l) = router.outward.decaying_link() {
-                out.push(l.sublink);
+                out.push((l.link_id, l.sublink));
                 if l.link_state.is_some() {
                     states.push(l.clone());
                 }
             }
             if let Some(inward) = &router.inward {
                 if let Some(l) = &inward.primary {
-                    out.push(l.sublink);
+                    out.push((l.link_id, l.sublink));
                     if l.link_state.is_some() {
                         states.push(l.clone());
                     }
                 }
                 if let Some(l) = inward.decaying_link() {
-                    out.push(l.sublink);
+                    out.push((l.link_id, l.sublink));
                     if l.link_state.is_some() {
                         states.push(l.clone());
                     }
@@ -3320,7 +3694,7 @@ impl RoutingAcceptor {
         }
         // Sweep stale owners entries (released links, e.g. a fully decayed
         // peripheral link whose sublink was already released from the edge).
-        let stale: Vec<u64> = self
+        let stale: Vec<(u64, u64)> = self
             .owners
             .iter()
             .filter(|(_, owner)| **owner == rid)
@@ -3349,25 +3723,27 @@ impl RoutingAcceptor {
         if crate::ipcz::link_memory::LinkMemory::is_initial_link_state(state) {
             return Ok(());
         }
-        let last = self.memory()?.release_link_state_ref(state)?;
+        let last = self
+            .memory_for(link.link_id)?
+            .release_link_state_ref(state)?;
         if last {
             // The official `FreeFragment` asserts the fragment is addressable
             // and within a block allocator; a failure here is a protocol error.
-            if !self.memory()?.free_block(state)? {
+            if !self.memory_for(link.link_id)?.free_block(state)? {
                 return Err(RoutingError::BadParcel("failed to free link state block"));
             }
         }
         Ok(())
     }
 
-    /// Drain all currently available messages (used before sending, so
-    /// in-flight routing messages are processed first).
+    /// Drain all currently available messages on the broker link (used before
+    /// sending, so in-flight routing messages are processed first).
     fn drain_available(&mut self) -> Result<(), RoutingError> {
         loop {
             match self.channel.recv_available()? {
                 RecvResult::Message(m) => {
                     let decoded = messages::decode_message(&m.payload, m.fds.len())?;
-                    self.dispatch(decoded, m.fds)?;
+                    self.dispatch(decoded, m.fds, LINK_ID_BROKER)?;
                 }
                 RecvResult::WouldBlock => return Ok(()),
                 RecvResult::PeerClosed => {
@@ -3457,7 +3833,7 @@ mod tests {
         let mut peer = crate::ipcz::channel::Channel::adopt(pair.b.into_raw_fd()).unwrap();
         let (p1, p2) = a.open_portals().unwrap();
         let d = a
-            .serialize_router_with_local_peer(p2, p1)
+            .serialize_router_with_local_peer(p2, p1, LINK_ID_BROKER)
             .unwrap()
             .expect("link state available");
 
@@ -3475,8 +3851,11 @@ mod tests {
         assert!(proxy.inward.is_some());
         assert!(proxy.inward.as_ref().unwrap().is_decay_deferred());
         // The tentative sublinks are registered on the NodeLink.
-        assert_eq!(a.owners.get(&d.new_sublink), Some(&p1));
-        assert_eq!(a.owners.get(&d.new_decaying_sublink), Some(&p2));
+        assert_eq!(a.owners.get(&(LINK_ID_BROKER, d.new_sublink)), Some(&p1));
+        assert_eq!(
+            a.owners.get(&(LINK_ID_BROKER, d.new_decaying_sublink)),
+            Some(&p2)
+        );
         // The link state was allocated from the shared pool (ref count 2:
         // allocation + the central link's copy).
         let view = a
@@ -3492,12 +3871,15 @@ mod tests {
         // stable marked). The proxy's decay bounds are 0/0 (a fresh pair with
         // no queued parcels), so the flush completes the decay and the proxy
         // drops immediately.
-        a.begin_proxying(p2, &d).unwrap();
+        a.begin_proxying(p2, &d, LINK_ID_BROKER).unwrap();
         assert!(
             a.routers.get(&p2).is_none(),
             "the fresh-pair proxy decays and drops in the same flush"
         );
-        assert_eq!(a.owners.get(&d.new_decaying_sublink), None);
+        assert_eq!(
+            a.owners.get(&(LINK_ID_BROKER, d.new_decaying_sublink)),
+            None
+        );
         let local = a.routers.get(&p1).unwrap();
         let central = local
             .outward
@@ -3544,7 +3926,9 @@ mod tests {
         }
         assert!(allocated.len() >= 1400, "pool should be large");
         let (p1, p2) = a.open_portals().unwrap();
-        let d = a.serialize_router_with_local_peer(p2, p1).unwrap();
+        let d = a
+            .serialize_router_with_local_peer(p2, p1, LINK_ID_BROKER)
+            .unwrap();
         assert!(d.is_none(), "exhausted pool must fall back");
         // The unconditional lobby fired: a RequestMemory{65536} went out.
         let msg = peer.recv().unwrap().expect("RequestMemory message");
@@ -3557,7 +3941,7 @@ mod tests {
         }
         // The fallback plain proxy path (local outward link: unlocked, no
         // proxy fields) still serializes.
-        let (rid, d) = a.serialize_router(p2).unwrap();
+        let (rid, d) = a.serialize_router(p2, LINK_ID_BROKER).unwrap();
         assert_eq!(rid, p2);
         assert!(!d.proxy_already_bypassed);
         assert!(!d.proxy_peer_node_name.is_valid());

@@ -19,9 +19,16 @@ Evidence: `evidence/interop/`, `evidence/manifests/interop-<stamp>.json`.
 * `src/ipcz/link_memory.rs` — the shared primary buffer, fragments,
   `RouterLinkState`, the `BlockAllocator` free-list.
 * `src/ipcz/acceptor.rs` — the native non-broker node state machine.
+* `src/ipcz/router.rs` — the `Router` state machine (edges, decaying links,
+  parcel queues, local links, bridge edges) shared by the routing acceptor.
+* `src/ipcz/routing.rs` — the Phase 5 routing acceptor: the full non-broker
+  node including the bridge-chain state machines
+  (`MaybeStartBridgeBypass` / `StartBridgeBypassFromLocalPeer`).
 * `src/bin/ipcz-acceptor.rs` — oracle-compatible harness
   (`<socket-fd> <events.jsonl>`).
 * `src/bin/wire-relay.rs` — man-in-the-middle wire capture.
+* `src/bin/wire-dump.rs` — forensic wire-capture decoder (message inventory
+  with sublinks, fragment descriptors, payloads, `RouterDescriptor` fields).
 * `src/bin/candidate-harness.rs` — in-process system-court harness.
 
 Mixed-language pairings required by the bindings court:

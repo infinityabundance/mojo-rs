@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
   "check": "no-oracle-dependency",
-  "generated_at_utc": "2026-08-05T06:33:11Z",
+  "generated_at_utc": "2026-08-05T09:45:25Z",
   "verdict": "pass",
   "notes": [""],
   "cargo_tree_sha256": "b2cc45c8f49f33ba44907e6532842f2865398b91170479800ff113fbb71d9cb2",
   "binaries": {
     "candidate-harness": {
-      "sha256": "5565e4bb733d950bbde86ce5486f895b00a1303c2275e1c86d8fa24f69e180c5",
-      "ldd_sha256": "67af659674733b28cb3d5aa8e88c16862cef4fa530dce126251ea1ac725a8240",
+      "sha256": "f3e3bce739b93ebb9736926d7cf802373c58eb01888b3abfbd229404669d7a94",
+      "ldd_sha256": "1badd364b55d24eeef0203c3edaeb47e1250c551e0e3eb9d2592fa1440844bae",
       "nm_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "readelf_sha256": "1955175daad7e6be54810892d9664413f098f50f780584d5841547ad3304e0eb"
+      "readelf_sha256": "5fb7191394c42cf5ada8612e25232837ae7332b0506c766aaf7a8eb6ad88e5b0"
     }
 ,
     "mojo-rs-casefile": {
-      "sha256": "77c5cc0d7843586b65d1036fa41db52c99748d00d4f12414cd930c1fc22afae6",
-      "ldd_sha256": "e2e8a97b5f1c7984d87b210d36749ace99fda04f0e5089e2b5f22733de346450",
+      "sha256": "55afc0aacc5c0e910d3460c59d9757b107e187af7a60b5258d52d8f202cdb7af",
+      "ldd_sha256": "9b2b7f4b303d82a6b48a0fc999d6938769cbbe443b252455d7bb034228135bd3",
       "nm_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "readelf_sha256": "d799635690aeb8afe920f7e41706518ab0cd6de6f9ddaf5dfe5a115a4226eed4"
     }

@@ -14,6 +14,11 @@
 //!   `BeginProxyingToNewRouter`);
 //! * proxy bypass completion: `StopProxying`, `StopProxyingToLocalPeer`, and
 //!   the broker's `BypassPeerWithLink` bootstrap bypass;
+//! * bridge chains: `MergeRoute` (the invitation attachments are merged onto
+//!   the remote initial portals), bridge parcel forwarding over local bridge
+//!   links (`AcceptOutboundParcel`), the acceptor's own bridge bypass
+//!   (`MaybeStartBridgeBypass` / `StartBridgeBypassFromLocalPeer`), and the
+//!   bridge-aware `StopProxyingToLocalPeer` / `AcceptRouteClosureFrom`;
 //! * shared `RouterLinkState` coordination (`TryLock`, `SetSideStable`,
 //!   `allowed_bypass_request_source`) and the shared sublink allocator.
 //!
@@ -106,6 +111,9 @@ impl std::error::Error for RoutingError {}
 const ACCEPTOR_INITIAL_PORTALS: u32 = 8;
 /// The bootstrap pipe sublink (initial portal 1).
 const BOOTSTRAP_SUBLINK: u64 = 1;
+/// Router identities for local-only routers (bridge-chain routers have no
+/// sublink, so their identities come from a counter far above any sublink id).
+const LOCAL_RID_BASE: u64 = 1 << 32;
 
 /// A processed parcel: its payload and any deserialized portal identities.
 struct ProcessedParcel {
@@ -123,7 +131,7 @@ pub struct RoutingAcceptor {
     link_memory: Option<LinkMemory>,
     /// Per-link outgoing message sequence number (after Connect).
     next_link_seq: u64,
-    /// Routers by identity sublink (their first primary sublink).
+    /// Routers by identity (their first primary sublink, or a local rid).
     routers: HashMap<u64, Router>,
     /// Sublink -> owning router identity.
     owners: HashMap<u64, u64>,
@@ -131,6 +139,10 @@ pub struct RoutingAcceptor {
     early_parcels: HashMap<u64, VecDeque<AcceptParcel>>,
     /// The broker's node name (from the Connect greeting).
     broker_name: NodeName,
+    /// The app-facing bootstrap pipe router (the invitation attachment).
+    bootstrap_rid: u64,
+    /// The next identity for local-only routers.
+    next_rid: u64,
     /// Events in casefile format.
     events: Vec<Event>,
     /// Event sequence counter.
@@ -149,6 +161,8 @@ impl RoutingAcceptor {
             owners: HashMap::new(),
             early_parcels: HashMap::new(),
             broker_name: NodeName::invalid(),
+            bootstrap_rid: 0,
+            next_rid: LOCAL_RID_BASE,
             events: Vec::new(),
             event_seq: 0,
         })
@@ -236,6 +250,10 @@ impl RoutingAcceptor {
                     if p.sublink == BOOTSTRAP_SUBLINK && p.handle_types.contains(&handle_type::PORTAL)
             )
         })?;
+        // The transfer's arrival marks the point where the oracle's side-B
+        // stable marks have become observable to the broker; mark ours now so
+        // this side wins the bridge-bypass lock, matching the baseline.
+        self.mark_initial_links_stable()?;
         let transfer_payload;
         let b1_identity;
         match transfer {
@@ -298,15 +316,33 @@ impl RoutingAcceptor {
         // bootstrap router transmits on its migrated primary sublink below.
         self.drain_available()?;
 
+        // The broker's own bridge bypass is a deterministic response to the
+        // `FlushRouter` we just sent (its deferred bypass attempt unblocks once
+        // our side of the bypass link is stable). The oracle acceptor's IO
+        // thread processes it before the application's next puts, so the
+        // transfer-back rides on the broker-assigned sublink (15 in the
+        // baseline); the single-threaded candidate waits for it explicitly to
+        // reproduce the same observable ordering.
+        let bootstrap_now = self.bootstrap_sublink()?;
+        let (bb, bb_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::BypassPeerWithLink(b) if b.sublink == bootstrap_now
+            )
+        })?;
+        if let DecodedMessage::BypassPeerWithLink(b) = bb {
+            self.dispatch(DecodedMessage::BypassPeerWithLink(b), bb_fds)?;
+        }
+
         // Step 3: send r1 over the wire on the b1 route.
         self.put(b1_identity, b"r1".to_vec(), Vec::new())?;
         self.emit(5, EventKind::Result, "MOJO_RESULT_OK");
 
         // Step 4: send the transfer-back on the bootstrap with the b1 handle.
-        // The bootstrap router transmits on its current primary sublink (it
-        // may have migrated during the broker's bypass above).
+        // The bootstrap (attachment) router transmits on its current primary
+        // sublink (it migrated to the broker's bypass link above).
         self.put(
-            BOOTSTRAP_SUBLINK,
+            self.bootstrap_rid,
             b"transfer-back".to_vec(),
             vec![Object::Router(b1_identity)],
         )?;
@@ -339,16 +375,17 @@ impl RoutingAcceptor {
         // Step 7: close the bootstrap portal locally. The broker already
         // closed its end, so no closure message is transmitted (the primary
         // link was released when the peer's RouteClosed arrived).
-        self.close_route(BOOTSTRAP_SUBLINK)?;
+        self.close_route(self.bootstrap_rid)?;
         self.emit(9, EventKind::Lifecycle, "MOJO_RESULT_OK");
         Ok(())
     }
 
-    /// The bootstrap router's current primary sublink (its identity stays
-    /// `BOOTSTRAP_SUBLINK`; the primary migrates on bypass).
+    /// The bootstrap (attachment) router's current primary sublink (its
+    /// identity stays `BOOTSTRAP_SUBLINK`-derived; the primary migrates on
+    /// bypass).
     fn bootstrap_sublink(&self) -> Result<u64, RoutingError> {
         self.routers
-            .get(&BOOTSTRAP_SUBLINK)
+            .get(&self.bootstrap_rid)
             .and_then(|r| r.outward.primary.as_ref())
             .map(|l| l.sublink)
             .ok_or(RoutingError::Unexpected(
@@ -390,12 +427,7 @@ impl RoutingAcceptor {
                 offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(i) as u32,
                 size: ROUTER_LINK_STATE_SIZE as u32,
             };
-            let link = Link {
-                sublink,
-                kind: LinkKind::Central,
-                side: LinkSide::B,
-                link_state: Some(state),
-            };
+            let link = Link::remote(sublink, LinkKind::Central, LinkSide::B, Some(state));
             let router = if i == 1 {
                 // The bootstrap portal (side B of the initial central link).
                 Router::new_terminal(link)
@@ -404,9 +436,6 @@ impl RoutingAcceptor {
                 r.outward.set_primary_link(link);
                 r
             };
-            // SetOutwardLink marks a central link stable when the router has
-            // no decaying links; the acceptor is side B of initial links.
-            self.memory()?.set_side_stable(state, false)?;
             self.owners.insert(sublink, sublink);
             self.routers.insert(sublink, router);
         }
@@ -416,6 +445,107 @@ impl RoutingAcceptor {
         // Reproduced byte-exactly (golden fixture `acceptor-to-broker.bin`
         // messages 1-2) so the routing wire capture matches the baseline.
         self.send_shared_memory_client()?;
+        // `Invitation::Accept` then merges each attachment slot onto its
+        // initial portal (`OpenPortals` + `MergePortals(portals[i+1],
+        // bridge)`). The bootstrap pipe (initial portal 1) therefore becomes a
+        // three-router bridge chain:
+        //
+        //   attachment (app-facing) ⟷ R_bridge ⟷ [bridge edge] ⟷ R_remote ⟷
+        //   [NodeLink sublink 1] ⟷ broker
+        //
+        // The broker's end mirrors the chain, so both ends independently run
+        // bridge bypass (`MaybeStartBridgeBypass`) to collapse it.
+        //
+        // NOTE on the side-B stable marks: the official non-broker marks its
+        // initial links stable when the Connect handshake completes. The
+        // baseline wire shows the oracle acceptor *winning* the sub-1 bypass
+        // lock race: the broker's early `BypassPeerWithLink` attempts all fail
+        // (its side observes the acceptor's side-B stable only after the
+        // transfer arrives), so the acceptor initiates. The candidate matches
+        // that observable ordering by marking the initial links stable at the
+        // same point in the exchange (just before the first parcel arrives),
+        // not at Connect time.
+        self.setup_bootstrap_bridge()?;
+        self.router_flush(BOOTSTRAP_SUBLINK, false)?;
+        Ok(())
+    }
+
+    /// Mark this side stable on the initial portal links (the official
+    /// `SetOutwardLink`'s `MarkSideStable` for the initial routers). Timed to
+    /// match the oracle's observable ordering: after the broker has processed
+    /// the Connect reply (so its early bridge-bypass lock attempts defer), but
+    /// before the first parcel is processed (so this side's own bypass lock
+    /// attempt succeeds).
+    fn mark_initial_links_stable(&mut self) -> Result<(), RoutingError> {
+        // The initial portals 0 and 1 are the only ones the broker offered
+        // (num_initial_portals = 2 in the routing court).
+        for i in 0..MAX_INITIAL_PORTALS.min(2) {
+            let state = FragmentDescriptor {
+                buffer_id: 0,
+                offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(i) as u32,
+                size: ROUTER_LINK_STATE_SIZE as u32,
+            };
+            self.memory()?.set_side_stable(state, false)?;
+        }
+        Ok(())
+    }
+
+    /// Build the bootstrap bridge chain: the app-facing attachment router and
+    /// the interior bridge router, linked to the initial portal 1 router
+    /// (`R_remote`, identity `BOOTSTRAP_SUBLINK`) by a local bridge link, and
+    /// to each other by a local central link.
+    ///
+    /// Mirrors `Invitation::Accept`'s per-attachment `OpenPortals` +
+    /// `MergePortals(portals[i + 1], bridge)`: `OpenPortals` creates the
+    /// attachment/bridge pair linked by a local central link (born stable);
+    /// `MergeRoute` links the bridge router and the initial portal router with
+    /// a local bridge link (born unstable).
+    fn setup_bootstrap_bridge(&mut self) -> Result<(), RoutingError> {
+        let r_bridge_rid = self.next_rid;
+        self.next_rid += 1;
+        let attachment_rid = self.next_rid;
+        self.next_rid += 1;
+        self.bootstrap_rid = attachment_rid;
+
+        // OpenPortals: attachment (side A) ⟷ R_bridge (side B), local central,
+        // kStable.
+        let (attach_link, bridge_central_link) = Link::local_pair(
+            LinkKind::Central,
+            LinkSide::A,
+            attachment_rid,
+            r_bridge_rid,
+            true,
+        );
+        // MergeRoute: R_remote (side A) ⟷ R_bridge (side B), local bridge,
+        // kUnstable.
+        let (remote_bridge_link, bridge_bridge_link) = Link::local_pair(
+            LinkKind::Bridge,
+            LinkSide::A,
+            BOOTSTRAP_SUBLINK,
+            r_bridge_rid,
+            false,
+        );
+
+        let mut attachment = Router::bare();
+        attachment.outward.set_primary_link(attach_link);
+        let mut r_bridge = Router::bare();
+        r_bridge.outward.set_primary_link(bridge_central_link);
+        r_bridge.bridge = Some(Edge {
+            primary: Some(bridge_bridge_link),
+            decaying: None,
+        });
+        {
+            let r_remote = self
+                .routers
+                .get_mut(&BOOTSTRAP_SUBLINK)
+                .ok_or(RoutingError::Unexpected("bootstrap router missing"))?;
+            r_remote.bridge = Some(Edge {
+                primary: Some(remote_bridge_link),
+                decaying: None,
+            });
+        }
+        self.routers.insert(r_bridge_rid, r_bridge);
+        self.routers.insert(attachment_rid, attachment);
         Ok(())
     }
 
@@ -522,15 +652,19 @@ impl RoutingAcceptor {
                     s.outbound_sequence_length,
                 )
             }
-            DecodedMessage::StopProxyingToLocalPeer(_) => {
-                // The official router ignores this when its decaying link has
-                // no local peer (always the case here); a disconnected router
-                // silently accepts it.
-                Ok(())
+            DecodedMessage::StopProxyingToLocalPeer(s) => {
+                // Routed to the router owning the sublink, exactly like the
+                // official `NodeLink::OnStopProxyingToLocalPeer`.
+                let Some(rid) = self.owners.get(&s.sublink).copied() else {
+                    return Ok(());
+                };
+                self.router_stop_proxying_to_local_peer(rid, s.outbound_sequence_length)
             }
             DecodedMessage::FlushRouter(f) => {
                 if let Some(&rid) = self.owners.get(&f.sublink) {
-                    self.router_flush(rid)?;
+                    // The official `OnFlushRouter` forces a proxy-bypass
+                    // attempt on the target router.
+                    self.router_flush(rid, true)?;
                 }
                 Ok(())
             }
@@ -698,7 +832,7 @@ impl RoutingAcceptor {
                 return Err(RoutingError::BadParcel("route sequence gap or duplicate"));
             }
         }
-        self.router_flush(rid)?;
+        self.router_flush(rid, false)?;
         Ok(ProcessedParcel {
             payload,
             identities,
@@ -755,12 +889,12 @@ impl RoutingAcceptor {
         if let Some(decaying_sublink) = new_decaying_sublink {
             // The decaying peripheral outward link forwards parcels already
             // queued or in flight on the sender's node.
-            router.outward.set_primary_link(Link {
-                sublink: decaying_sublink,
-                kind: LinkKind::PeripheralOutward,
-                side: LinkSide::B,
-                link_state: None,
-            });
+            router.outward.set_primary_link(Link::remote(
+                decaying_sublink,
+                LinkKind::PeripheralOutward,
+                LinkSide::B,
+                None,
+            ));
             router.outward.begin_primary_link_decay();
             router
                 .outward
@@ -772,19 +906,19 @@ impl RoutingAcceptor {
                     d.next_incoming_sequence_number
                 },
             );
-            router.outward.set_primary_link(Link {
-                sublink: d.new_sublink,
-                kind: LinkKind::Central,
-                side: LinkSide::B,
+            router.outward.set_primary_link(Link::remote(
+                d.new_sublink,
+                LinkKind::Central,
+                LinkSide::B,
                 link_state,
-            });
+            ));
         } else {
-            router.outward.set_primary_link(Link {
-                sublink: d.new_sublink,
-                kind: LinkKind::PeripheralOutward,
-                side: LinkSide::B,
-                link_state: None,
-            });
+            router.outward.set_primary_link(Link::remote(
+                d.new_sublink,
+                LinkKind::PeripheralOutward,
+                LinkSide::B,
+                None,
+            ));
         }
 
         self.owners.insert(d.new_sublink, d.new_sublink);
@@ -809,7 +943,7 @@ impl RoutingAcceptor {
             self.router_bypass_peer(rid, target_node, target_sublink)?;
         }
 
-        self.router_flush(d.new_sublink)?;
+        self.router_flush(d.new_sublink, false)?;
         Ok(d.new_sublink)
     }
 
@@ -937,12 +1071,12 @@ impl RoutingAcceptor {
                 ));
             };
             if router.outbound.final_sequence_length().is_none() && !router.disconnected {
-                inward.set_primary_link(Link {
-                    sublink: new_sublink,
-                    kind: LinkKind::PeripheralInward,
-                    side: LinkSide::A,
-                    link_state: None,
-                });
+                inward.set_primary_link(Link::remote(
+                    new_sublink,
+                    LinkKind::PeripheralInward,
+                    LinkSide::A,
+                    None,
+                ));
             }
             if router.outward.primary.is_some() && router.outward.is_stable() && inward.is_stable()
             {
@@ -961,34 +1095,552 @@ impl RoutingAcceptor {
             .map(|r| r.outbound.final_sequence_length().is_none() && !r.disconnected)
             .unwrap_or(false)
         {
-            self.router_flush(rid)?;
+            self.router_flush(rid, false)?;
         }
         Ok(())
     }
 
+    /// `RouterLink::MarkSideStable` on a link: remote links OR the stable bit
+    /// into the shared fragment; local links into the shared in-process state.
+    fn mark_side_stable_on_link(&mut self, link: &Link) -> Result<(), RoutingError> {
+        if let Some(desc) = link.link_state {
+            self.memory()?.set_side_stable(desc, link.side.is_a())?;
+        }
+        if let Some(state) = &link.local_state {
+            state.borrow_mut().set_side_stable(link.side.is_a());
+        }
+        Ok(())
+    }
+
+    /// `RouterLink::TryLockForClosure` on a link.
+    fn try_lock_link_for_closure(&mut self, link: &Link) -> Result<bool, RoutingError> {
+        if let Some(desc) = link.link_state {
+            return Ok(self.memory()?.try_lock_link_state(desc, link.side.is_a())?);
+        }
+        if let Some(state) = &link.local_state {
+            return Ok(state.borrow_mut().try_lock(link.side.is_a()));
+        }
+        Ok(false)
+    }
+
+    /// `RouterLink::TryLockForBypass` on a link: lock the link state for a
+    /// bypass and record the allowed bypass request source.
+    fn try_lock_link_for_bypass(&mut self, link: &Link, source: u64) -> Result<bool, RoutingError> {
+        if let Some(desc) = link.link_state {
+            if !self.memory()?.try_lock_link_state(desc, link.side.is_a())? {
+                return Ok(false);
+            }
+            self.memory_mut()?
+                .write_allowed_bypass_source(desc, source)?;
+            return Ok(true);
+        }
+        if let Some(state) = &link.local_state {
+            let mut st = state.borrow_mut();
+            if !st.try_lock(link.side.is_a()) {
+                return Ok(false);
+            }
+            st.allowed_bypass_source = source;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// `RouterLink::Unlock` on a link locked for bypass.
+    fn unlock_link_for_bypass(&mut self, link: &Link) -> Result<(), RoutingError> {
+        if let Some(desc) = link.link_state {
+            self.memory()?.unlock_link_state(desc, link.side.is_a())?;
+        }
+        if let Some(state) = &link.local_state {
+            state.borrow_mut().unlock(link.side.is_a());
+        }
+        Ok(())
+    }
+
+    /// `RouterLink::FlushOtherSideIfWaiting` on a link: if the peer set its
+    /// waiting bit on the link state, wake it (a `FlushRouter` message, or a
+    /// forced flush of the local peer router).
+    fn flush_other_side_if_waiting(&mut self, link: &Link) -> Result<(), RoutingError> {
+        if let Some(desc) = link.link_state {
+            if self.memory()?.reset_waiting_bit(desc, !link.side.is_a())? {
+                self.send_link_message(messages::encode_flush_router(link.sublink))?;
+            }
+            return Ok(());
+        }
+        if let Some(state) = &link.local_state {
+            if state.borrow_mut().reset_waiting_bit(!link.side.is_a()) {
+                if let Some(peer) = link.local_peer {
+                    self.router_flush(peer, true)?;
+                }
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// Deliver route closure over a released link: locally to the peer router
+    /// (`AcceptRouteClosureFrom` with the link's type), or over the wire as
+    /// `RouteClosed`.
+    fn deliver_route_closed(&mut self, link: &Link, len: u64) -> Result<(), RoutingError> {
+        if let Some(peer) = link.local_peer {
+            self.router_route_closed_local(peer, link.kind, len)
+        } else {
+            self.send_link_message(messages::encode_route_closed(link.sublink, len))
+        }
+    }
+
+    /// `Router::SetOutwardLink`: adopt a new outward link, marking the side
+    /// stable when the link is central and both edges are stable (or the
+    /// router is disconnected, in which case the link is dropped).
+    fn set_outward_link(&mut self, rid: u64, link: &Link) -> Result<(), RoutingError> {
+        let mark = {
+            let router = self.routers.get(&rid).ok_or(RoutingError::BadParcel(
+                "set outward link for unknown router",
+            ))?;
+            link.kind.is_central()
+                && router.outward.is_stable()
+                && router.inward.as_ref().is_none_or(Edge::is_stable)
+        };
+        if mark {
+            self.mark_side_stable_on_link(link)?;
+        }
+        {
+            let router = self.routers.get_mut(&rid).ok_or(RoutingError::BadParcel(
+                "set outward link for unknown router",
+            ))?;
+            if !router.disconnected {
+                router.outward.set_primary_link(link.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// `Router::MaybeStartBridgeBypass`: collapse a bridge chain when both
+    /// bridge routers have stable outward links, replacing the chain with a
+    /// single central link. All three cases (no local peers, one local peer,
+    /// two local peers) mirror the pinned `router.cc`.
+    fn maybe_start_bridge_bypass(&mut self, rid: u64) -> Result<(), RoutingError> {
+        // Snapshot: this router's bridge peer (the router on the other side of
+        // the bridge edge).
+        let second_bridge = {
+            let Some(router) = self.routers.get(&rid) else {
+                return Ok(());
+            };
+            if router.bridge.is_none() || !router.bridge_stable() {
+                return Ok(());
+            }
+            router.bridge.as_ref().and_then(Edge::get_local_peer)
+        };
+        let Some(second_bridge) = second_bridge else {
+            return Ok(());
+        };
+
+        // Snapshot both bridge routers' outward primary links.
+        let first_link = self
+            .routers
+            .get(&rid)
+            .and_then(|r| r.outward.primary.clone());
+        let second_link = self
+            .routers
+            .get(&second_bridge)
+            .and_then(|r| r.outward.primary.clone());
+        let (Some(first_link), Some(second_link)) = (first_link, second_link) else {
+            return Ok(());
+        };
+
+        // The bypass request source for each link is the peer node of the
+        // other bridge router's outward link (invalid when that peer is
+        // local).
+        let first_local_peer = first_link.local_peer;
+        let second_local_peer = second_link.local_peer;
+        let first_peer_node = if first_link.is_local() {
+            0
+        } else {
+            self.broker_name.low
+        };
+        let second_peer_node = if second_link.is_local() {
+            0
+        } else {
+            self.broker_name.low
+        };
+
+        // Lock both outward links for bypass (`TryLockForBypass`). On failure
+        // of the second, unlock the first and give up.
+        if !self.try_lock_link_for_bypass(&first_link, second_peer_node)? {
+            return Ok(());
+        }
+        if !self.try_lock_link_for_bypass(&second_link, first_peer_node)? {
+            self.unlock_link_for_bypass(&first_link)?;
+            return Ok(());
+        }
+
+        // Case 1: neither bridge router's outward peer is local. Bypass both
+        // bridge routers with a new central link directly to the other bridge
+        // router's outward peer.
+        if first_local_peer.is_none() && second_local_peer.is_none() {
+            for r in [rid, second_bridge] {
+                if let Some(router) = self.routers.get_mut(&r) {
+                    if !router.outward.begin_primary_link_decay() {
+                        return Err(RoutingError::BadParcel("failed to decay outward edge"));
+                    }
+                    if let Some(edge) = &mut router.bridge {
+                        if !edge.begin_primary_link_decay() {
+                            return Err(RoutingError::BadParcel("failed to decay bridge edge"));
+                        }
+                    }
+                }
+            }
+            // The first link is remote (both are); ask its peer to bypass the
+            // proxy with a direct link to the second router's outward peer.
+            let target_sublink = second_link.sublink;
+            self.send_link_message(messages::encode_bypass_peer(
+                first_link.sublink,
+                self.broker_name,
+                target_sublink,
+            ))?;
+            return Ok(());
+        }
+
+        // Case 2: only one bridge router has a local outward peer. The bridge
+        // router whose outward peer is local initiates the bypass.
+        if second_local_peer.is_none() {
+            let link_state = self.memory_mut()?.try_allocate_link_state()?;
+            return self.start_bridge_bypass_from_local_peer(rid, link_state);
+        } else if first_local_peer.is_none() {
+            let link_state = self.memory_mut()?.try_allocate_link_state()?;
+            return self.start_bridge_bypass_from_local_peer(second_bridge, link_state);
+        }
+
+        // Case 3: both bridge routers' outward peers are local. All four
+        // routers live on this node; bypass synchronously with a new local
+        // central link between the two outward peers.
+        let (Some(first_local), Some(second_local)) = (first_local_peer, second_local_peer) else {
+            return Err(RoutingError::BadParcel(
+                "local peer missing in case-3 bypass",
+            ));
+        };
+        let length_from_first_peer = self
+            .routers
+            .get(&first_local)
+            .map(|r| r.outbound_length())
+            .unwrap_or(0);
+        let length_from_second_peer = self
+            .routers
+            .get(&second_local)
+            .map(|r| r.outbound_length())
+            .unwrap_or(0);
+        // Decay all six edges (the official order).
+        {
+            let router = self
+                .routers
+                .get_mut(&first_local)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay first peer edge"));
+            }
+            edge.set_length_to_decaying_link(length_from_first_peer);
+            edge.set_length_from_decaying_link(length_from_second_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&second_local)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay second peer edge"));
+            }
+            edge.set_length_to_decaying_link(length_from_second_peer);
+            edge.set_length_from_decaying_link(length_from_first_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bridge router missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay this outward edge"));
+            }
+            edge.set_length_to_decaying_link(length_from_second_peer);
+            edge.set_length_from_decaying_link(length_from_first_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&second_bridge)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay bridge peer edge"));
+            }
+            edge.set_length_to_decaying_link(length_from_first_peer);
+            edge.set_length_from_decaying_link(length_from_second_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bridge router missing"))?;
+            let edge = router
+                .bridge
+                .as_mut()
+                .ok_or(RoutingError::BadParcel("bridge missing"))?;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay this bridge edge"));
+            }
+            edge.set_length_to_decaying_link(length_from_first_peer);
+            edge.set_length_from_decaying_link(length_from_second_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&second_bridge)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let edge = router
+                .bridge
+                .as_mut()
+                .ok_or(RoutingError::BadParcel("bridge peer missing bridge"))?;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel(
+                    "failed to decay bridge peer's bridge edge",
+                ));
+            }
+            edge.set_length_to_decaying_link(length_from_second_peer);
+            edge.set_length_from_decaying_link(length_from_first_peer);
+        }
+        // New local central link between the two outward peers.
+        let (link_a, link_b) = Link::local_pair(
+            LinkKind::Central,
+            LinkSide::A,
+            first_local,
+            second_local,
+            true,
+        );
+        {
+            let router = self
+                .routers
+                .get_mut(&first_local)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            router.outward.set_primary_link(link_a);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&second_local)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            router.outward.set_primary_link(link_b);
+        }
+        self.router_flush(rid, false)?;
+        self.router_flush(second_bridge, false)?;
+        self.router_flush(first_local, false)?;
+        self.router_flush(second_local, false)?;
+        Ok(())
+    }
+
+    /// `Router::StartBridgeBypassFromLocalPeer`: the bridge router whose
+    /// outward peer is local initiates a bypass of both bridge routers with a
+    /// new central link from the local peer directly to the other bridge
+    /// router's remote outward peer.
+    fn start_bridge_bypass_from_local_peer(
+        &mut self,
+        rid: u64,
+        link_state: FragmentDescriptor,
+    ) -> Result<(), RoutingError> {
+        let (local_peer, other_bridge) = {
+            let Some(router) = self.routers.get(&rid) else {
+                return Ok(());
+            };
+            if router.bridge.is_none() || !router.bridge_stable() {
+                return Ok(());
+            }
+            (
+                router.outward.get_local_peer(),
+                router.bridge.as_ref().and_then(|b| b.get_local_peer()),
+            )
+        };
+        let (Some(local_peer), Some(other_bridge)) = (local_peer, other_bridge) else {
+            return Ok(());
+        };
+
+        // The other bridge router's outward link must be a remote link to the
+        // peer node.
+        let remote_link = {
+            let router = self
+                .routers
+                .get(&other_bridge)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let link = router
+                .outward
+                .primary
+                .clone()
+                .ok_or(RoutingError::BadParcel("bridge peer has no outward link"))?;
+            if link.is_local() {
+                return Err(RoutingError::BadParcel("bridge peer outward link is local"));
+            }
+            link
+        };
+        if link_state.is_null() {
+            // The official retries asynchronously after allocating a
+            // fragment; allocation is synchronous here, so a null state is a
+            // protocol violation.
+            return Err(RoutingError::BadParcel("null link state for bridge bypass"));
+        }
+
+        let length_from_local_peer = self
+            .routers
+            .get(&local_peer)
+            .map(|r| r.outbound_length())
+            .unwrap_or(0);
+        let bypass_sublink = self.memory()?.allocate_sublink_ids(1)?;
+
+        // Decay all five edges (the official order): the local peer's
+        // outward, the other bridge router's outward, this bridge edge, this
+        // outward edge, and the other bridge router's bridge edge.
+        {
+            let router = self
+                .routers
+                .get_mut(&local_peer)
+                .ok_or(RoutingError::BadParcel("local peer missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel(
+                    "failed to decay local peer's outward edge",
+                ));
+            }
+            edge.set_length_to_decaying_link(length_from_local_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&other_bridge)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel(
+                    "failed to decay bridge peer's outward edge",
+                ));
+            }
+            edge.set_length_to_decaying_link(length_from_local_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bridge router missing"))?;
+            let edge = router
+                .bridge
+                .as_mut()
+                .ok_or(RoutingError::BadParcel("bridge missing"))?;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay this bridge edge"));
+            }
+            edge.set_length_to_decaying_link(length_from_local_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bridge router missing"))?;
+            let edge = &mut router.outward;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failed to decay this outward edge"));
+            }
+            edge.set_length_from_decaying_link(length_from_local_peer);
+        }
+        {
+            let router = self
+                .routers
+                .get_mut(&other_bridge)
+                .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+            let edge = router
+                .bridge
+                .as_mut()
+                .ok_or(RoutingError::BadParcel("bridge peer missing bridge"))?;
+            if !edge.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel(
+                    "failed to decay bridge peer's bridge edge",
+                ));
+            }
+            edge.set_length_from_decaying_link(length_from_local_peer);
+        }
+
+        // Notify the remote peer of the bypass, then let the local peer adopt
+        // the new central link.
+        self.send_link_message(messages::encode_bypass_peer_with_link(
+            remote_link.sublink,
+            bypass_sublink,
+            link_state,
+            length_from_local_peer,
+        ))?;
+        let new_link = Link::remote(
+            bypass_sublink,
+            LinkKind::Central,
+            LinkSide::A,
+            Some(link_state),
+        );
+        self.set_outward_link(local_peer, &new_link)?;
+        self.owners.insert(bypass_sublink, local_peer);
+
+        self.router_flush(rid, false)?;
+        self.router_flush(other_bridge, false)?;
+        self.router_flush(local_peer, false)?;
+        Ok(())
+    }
+
     /// `Router::Flush`: forward parcels, finish decays, deliver to the portal,
-    /// propagate closure, and drop dead proxies.
-    fn router_flush(&mut self, rid: u64) -> Result<(), RoutingError> {
-        // Collect parcels to transmit (outward then inward forwarding).
+    /// propagate closure, attempt bridge bypass, and flush the peer if it is
+    /// waiting. `force` mirrors `FlushBehavior::kForceProxyBypassAttempt`
+    /// (set when the router was flushed by a `FlushRouter` message or a
+    /// local-link waiting-bit wakeup).
+    fn router_flush(&mut self, rid: u64, force: bool) -> Result<(), RoutingError> {
+        // Capture the flush-start conditions (the official lock block captures
+        // them before any mutation).
+        let (on_central, had_decaying_outward, had_decaying_inward) = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
+            (
+                router.on_central_link(),
+                router.outward_has_decaying(),
+                router.inward_has_decaying(),
+            )
+        };
+
+        // Collect parcels to transmit: outbound (toward the far portal) then
+        // inbound (forwarded over the inward edge, or over the bridge edge for
+        // merged routers).
         let outbound = self
             .routers
             .get_mut(&rid)
             .map(|r| r.collect_outbound())
             .unwrap_or_default();
-        for (sublink, parcel) in outbound {
-            self.transmit_parcel(sublink, parcel)?;
+        let inbound = {
+            let router = self.routers.get_mut(&rid);
+            match router {
+                Some(r) if r.inward.is_some() => r.collect_inbound(),
+                Some(r) if r.bridge.is_some() => r.collect_bridge(),
+                _ => Vec::new(),
+            }
+        };
+        for (link, parcel) in outbound {
+            self.transmit_parcel(&link, parcel)?;
         }
-        let inward = self
-            .routers
-            .get_mut(&rid)
-            .map(|r| r.collect_inbound())
-            .unwrap_or_default();
-        for (sublink, parcel) in inward {
-            self.transmit_parcel(sublink, parcel)?;
+        for (link, parcel) in inbound {
+            self.transmit_parcel(&link, parcel)?;
         }
 
-        // Finish decays (releasing the decaying links).
-        let _ = self.routers.get_mut(&rid).map(|r| r.finish_decays());
+        // Finish decays (releasing the decaying links) and the bridge decay.
+        let (out_decayed, in_decayed) = {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
+            let (_, out_decayed, _, in_decayed) = router.finish_decays();
+            router.finish_bridge_decay();
+            (out_decayed, in_decayed)
+        };
 
         // Deliver contiguous inbound parcels to the terminal portal; drop a
         // proxy with no links left.
@@ -1021,87 +1673,129 @@ impl RoutingAcceptor {
             return Ok(());
         }
 
-        // Mark the central link stable when both edges are stable.
-        let mark_stable = {
+        // Mark the central link stable once a decay completes and both edges
+        // are stable (the official `Flush`'s `MarkSideStable` after
+        // `MaybeFinishDecay`). This is what unblocks the peer's own bypass and
+        // lets the waiting-bit wakeup fire.
+        let either_decayed = out_decayed || in_decayed;
+        let both_stable = {
             let router = self
                 .routers
                 .get(&rid)
                 .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
-            if router.on_central_link() && router.outward.is_stable() {
-                let inward_stable = match &router.inward {
-                    Some(e) => e.is_stable(),
-                    None => true,
-                };
-                if inward_stable {
-                    router.outward.primary.as_ref().and_then(|l| l.link_state)
-                } else {
-                    None
-                }
+            let outward_stable =
+                router.outward.primary.is_some() && (!had_decaying_outward || out_decayed);
+            let inward_stable = if router.inward.is_some() {
+                !had_decaying_inward || in_decayed
             } else {
-                None
-            }
+                true
+            };
+            outward_stable && inward_stable
         };
-        if let Some(state) = mark_stable {
-            let side_a = self
+        let mut dropped_last_decaying_link = false;
+        if on_central && either_decayed && both_stable {
+            if let Some(link) = self
                 .routers
                 .get(&rid)
-                .and_then(|r| r.outward.primary.as_ref())
-                .is_some_and(|l| l.side.is_a());
-            self.memory()?.set_side_stable(state, side_a)?;
+                .and_then(|r| r.outward.primary.clone())
+            {
+                self.mark_side_stable_on_link(&link)?;
+                dropped_last_decaying_link = true;
+            }
         }
 
         // Closure propagation.
-        let mut route_closed: Option<(u64, u64)> = None;
-        let mut forward_closed: Option<(u64, u64)> = None;
-        let mut try_lock: Option<(u64, bool, FragmentDescriptor, u64)> = None;
+        let mut route_closed: Option<(Link, u64)> = None;
+        let mut forward_closed: Option<(Link, u64)> = None;
+        let mut try_lock: Option<(Link, u64)> = None;
+        let mut dead_outward = false;
         {
             let router = self
                 .routers
                 .get_mut(&rid)
                 .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
-            let on_central = router.on_central_link();
             let outbound_done = router.outbound.is_sequence_fully_consumed();
             let inbound_expects_more = router.inbound.expects_more_elements();
             let inbound_consumed = router.inbound.is_sequence_fully_consumed();
 
             if on_central && outbound_done {
-                if let Some(primary) = &router.outward.primary {
-                    if let Some(state) = primary.link_state {
-                        if let Some(final_len) = router.outbound.final_sequence_length() {
-                            try_lock =
-                                Some((primary.sublink, primary.side.is_a(), state, final_len));
-                        }
-                    } else if let Some(final_len) = router.outbound.final_sequence_length() {
-                        route_closed = Some((primary.sublink, final_len));
-                        router.outward.release_primary_link();
-                    }
+                if let (Some(primary), Some(final_len)) = (
+                    router.outward.primary.clone(),
+                    router.outbound.final_sequence_length(),
+                ) {
+                    try_lock = Some((primary, final_len));
                 }
             } else if !inbound_expects_more {
-                router.outward.release_primary_link();
+                if router.outward.primary.is_some() {
+                    router.outward.release_primary_link();
+                    dead_outward = true;
+                }
             }
             if inbound_consumed {
                 if let Some(final_len) = router.inbound.final_sequence_length() {
                     if let Some(inward) = &mut router.inward {
                         if let Some(link) = inward.release_primary_link() {
-                            forward_closed = Some((link.sublink, final_len));
+                            forward_closed = Some((link, final_len));
+                        }
+                    } else if router.bridge.is_some() {
+                        if let Some(link) = router.bridge_link() {
+                            router.bridge = None;
+                            forward_closed = Some((link, final_len));
                         }
                     }
                 }
             }
         }
-        if let Some((sublink, side_a, state, final_len)) = try_lock {
-            if self.memory()?.try_lock_link_state(state, side_a)? {
-                route_closed = Some((sublink, final_len));
+        if let Some((link, final_len)) = try_lock {
+            if self.try_lock_link_for_closure(&link)? {
+                dead_outward = true;
                 self.routers
                     .get_mut(&rid)
                     .map(|r| r.outward.release_primary_link());
+                route_closed = Some((link, final_len));
             }
         }
-        if let Some((sublink, len)) = route_closed {
-            self.send_link_message(messages::encode_route_closed(sublink, len))?;
+
+        // Bridge bypass: possible only with a bridge edge, a stable outward
+        // link, and no inward links.
+        let (bridge_present, has_stable_outward, has_no_inward) = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
+            let has_stable_outward =
+                router.outward.primary.is_some() && (!had_decaying_outward || out_decayed);
+            let has_no_inward = router.inward.is_none() && (!had_decaying_inward || in_decayed);
+            (router.bridge.is_some(), has_stable_outward, has_no_inward)
+        };
+        if bridge_present && has_stable_outward && has_no_inward {
+            self.maybe_start_bridge_bypass(rid)?;
         }
-        if let Some((sublink, len)) = forward_closed {
-            self.send_link_message(messages::encode_route_closed(sublink, len))?;
+
+        // Deliver closures over the released links (local peers receive the
+        // closure directly; remote links get a RouteClosed message).
+        if let Some((link, len)) = route_closed {
+            self.deliver_route_closed(&link, len)?;
+        }
+        if let Some((link, len)) = forward_closed {
+            self.deliver_route_closed(&link, len)?;
+        }
+
+        // The flush tail: no further work when the outward link is gone or
+        // the router is not on a central link; otherwise flush the other side
+        // if it is waiting on our stability.
+        if dead_outward || !on_central {
+            return Ok(());
+        }
+        if !dropped_last_decaying_link && !force {
+            return Ok(());
+        }
+        if let Some(link) = self
+            .routers
+            .get(&rid)
+            .and_then(|r| r.outward.primary.clone())
+        {
+            self.flush_other_side_if_waiting(&link)?;
         }
         Ok(())
     }
@@ -1121,7 +1815,7 @@ impl RoutingAcceptor {
                 return Err(RoutingError::BadParcel("close sequence regression"));
             }
         }
-        self.router_flush(rid)
+        self.router_flush(rid, false)
     }
 
     /// `Router::AcceptRouteClosureFrom`: the far end closed after sending
@@ -1155,7 +1849,43 @@ impl RoutingAcceptor {
                 return Err(RoutingError::BadParcel("closure sequence regression"));
             }
         }
-        self.router_flush(rid)
+        self.router_flush(rid, false)
+    }
+
+    /// `Router::AcceptRouteClosureFrom` for a closure delivered over a local
+    /// link (`LocalRouterLink::AcceptRouteClosure`): the link type selects the
+    /// queue the final length applies to; a bridge closure also releases the
+    /// bridge edge.
+    fn router_route_closed_local(
+        &mut self,
+        rid: u64,
+        kind: LinkKind,
+        sequence_length: u64,
+    ) -> Result<(), RoutingError> {
+        {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("route closed for unknown router"))?;
+            if kind.is_outward() {
+                if !router.inbound.set_final_sequence_length(sequence_length) {
+                    return Err(RoutingError::BadParcel("closure sequence regression"));
+                }
+                if router.inward.is_none() && router.bridge.is_none() {
+                    router.peer_closed = true;
+                }
+            } else if kind == LinkKind::PeripheralInward {
+                if !router.outbound.set_final_sequence_length(sequence_length) {
+                    return Err(RoutingError::BadParcel("closure sequence regression"));
+                }
+            } else if kind.is_bridge() {
+                if !router.outbound.set_final_sequence_length(sequence_length) {
+                    return Err(RoutingError::BadParcel("closure sequence regression"));
+                }
+                router.bridge = None;
+            }
+        }
+        self.router_flush(rid, false)
     }
 
     /// `Router::AcceptRouteDisconnectedFrom`: a node on the route was lost.
@@ -1171,6 +1901,11 @@ impl RoutingAcceptor {
             if let Some(inward) = &mut router.inward {
                 inward.release_primary_link();
                 inward.release_decaying_link();
+            } else if let Some(bridge) = &mut router.bridge {
+                // Bridges forward disconnection over their link like any other
+                // edge (`AcceptRouteDisconnectedFrom`'s `forwarding_links`).
+                bridge.release_primary_link();
+                bridge.release_decaying_link();
             }
             router.peer_closed = true;
             let _ = router
@@ -1220,12 +1955,174 @@ impl RoutingAcceptor {
                 .outward
                 .set_length_from_decaying_link(inbound_sequence_length);
         }
-        self.router_flush(rid)
+        self.router_flush(rid, false)
     }
 
-    /// `Router::AcceptBypassLink`-style handling of `BypassPeerWithLink`
-    /// (the broker's bootstrap-route bypass): adopt the new central link and
-    /// begin decaying the old one.
+    /// `Router::StopProxyingToLocalPeer`: the peer bypassed a proxy whose
+    /// route includes this router; finalize the decay lengths. Handles both
+    /// the plain local-peer case and the bridge-peer case (three local
+    /// routers: this router, its bridge peer, and the bridge peer's outward
+    /// peer).
+    fn router_stop_proxying_to_local_peer(
+        &mut self,
+        rid: u64,
+        outbound_sequence_length: u64,
+    ) -> Result<(), RoutingError> {
+        // Disambiguate the recipient: a decaying bridge link's local peer, or
+        // a decaying outward link's local peer.
+        let (bridge_peer, local_peer) = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("stop proxying for unknown router"))?;
+            match &router.bridge {
+                Some(b) => (b.get_decaying_local_peer(), None),
+                None => (
+                    None,
+                    router.outward.decaying_link().and_then(|l| l.local_peer),
+                ),
+            }
+        };
+
+        // The common case: this router, its decaying local peer, and the
+        // proxy on the other end of the decaying links.
+        if let Some(local_peer) = local_peer {
+            if bridge_peer.is_some() {
+                return Err(RoutingError::BadParcel("ambiguous local peers"));
+            }
+            let valid = {
+                let this_router = self
+                    .routers
+                    .get(&rid)
+                    .ok_or(RoutingError::BadParcel("stop proxying for unknown router"))?;
+                let Some(peer_router) = self.routers.get(&local_peer) else {
+                    // The peer was disconnected; ignore the request.
+                    return Ok(());
+                };
+                let our_link = this_router.outward.decaying_link();
+                let peer_link = peer_router.outward.decaying_link();
+                let (Some(our_link), Some(peer_link)) = (our_link, peer_link) else {
+                    return Ok(());
+                };
+                our_link.is_local()
+                    && peer_link.is_local()
+                    && our_link.local_peer == Some(local_peer)
+                    && peer_link.local_peer == Some(rid)
+                    && this_router.inward.is_some()
+                    && peer_router.outward.length_from_decaying_link().is_none()
+                    && this_router.outward.length_to_decaying_link().is_none()
+                    && this_router
+                        .inward
+                        .as_ref()
+                        .is_none_or(|e| e.length_from_decaying_link().is_none())
+            };
+            if !valid {
+                return Err(RoutingError::BadParcel("invalid proxy"));
+            }
+            if let Some(peer_router) = self.routers.get_mut(&local_peer) {
+                peer_router
+                    .outward
+                    .set_length_from_decaying_link(outbound_sequence_length);
+            }
+            if let Some(this_router) = self.routers.get_mut(&rid) {
+                this_router
+                    .outward
+                    .set_length_to_decaying_link(outbound_sequence_length);
+                if let Some(inward) = &mut this_router.inward {
+                    inward.set_length_from_decaying_link(outbound_sequence_length);
+                }
+            }
+            self.router_flush(rid, false)?;
+            self.router_flush(local_peer, false)?;
+            return Ok(());
+        }
+
+        // The bridge case: three local routers are involved. Both this router
+        // and its bridge peer serve as "the" proxy being bypassed.
+        if let Some(bridge_peer) = bridge_peer {
+            let local_peer2 = {
+                let bp = self
+                    .routers
+                    .get(&bridge_peer)
+                    .ok_or(RoutingError::BadParcel("bridge peer missing"))?;
+                if bp.outward.is_stable() {
+                    return Err(RoutingError::BadParcel("invalid bridge peer"));
+                }
+                bp.outward
+                    .get_decaying_local_peer()
+                    .ok_or(RoutingError::BadParcel(
+                        "bridge peer has no decaying local peer",
+                    ))?
+            };
+            let valid = {
+                let this_router = self
+                    .routers
+                    .get(&rid)
+                    .ok_or(RoutingError::BadParcel("stop proxying for unknown router"))?;
+                let (Some(peer_router), Some(bp)) = (
+                    self.routers.get(&local_peer2),
+                    self.routers.get(&bridge_peer),
+                ) else {
+                    return Ok(());
+                };
+                !this_router.outward.is_stable()
+                    && !peer_router.outward.is_stable()
+                    && !bp.outward.is_stable()
+                    && peer_router.outward.length_from_decaying_link().is_none()
+                    && this_router.outward.length_from_decaying_link().is_none()
+                    && this_router
+                        .bridge
+                        .as_ref()
+                        .is_none_or(|e| e.length_to_decaying_link().is_none())
+                    && bp.outward.length_to_decaying_link().is_none()
+                    && bp
+                        .bridge
+                        .as_ref()
+                        .is_none_or(|e| e.length_from_decaying_link().is_none())
+            };
+            if !valid {
+                return Err(RoutingError::BadParcel("invalid bridge proxy"));
+            }
+            if let Some(peer_router) = self.routers.get_mut(&local_peer2) {
+                peer_router
+                    .outward
+                    .set_length_from_decaying_link(outbound_sequence_length);
+            }
+            if let Some(this_router) = self.routers.get_mut(&rid) {
+                this_router
+                    .outward
+                    .set_length_from_decaying_link(outbound_sequence_length);
+                if let Some(b) = &mut this_router.bridge {
+                    b.set_length_to_decaying_link(outbound_sequence_length);
+                }
+            }
+            if let Some(bp) = self.routers.get_mut(&bridge_peer) {
+                bp.outward
+                    .set_length_to_decaying_link(outbound_sequence_length);
+                if let Some(b) = &mut bp.bridge {
+                    b.set_length_from_decaying_link(outbound_sequence_length);
+                }
+            }
+            self.router_flush(rid, false)?;
+            self.router_flush(local_peer2, false)?;
+            self.router_flush(bridge_peer, false)?;
+            return Ok(());
+        }
+
+        // No local peer and no bridge peer: the request is invalid (or the
+        // router was disconnected, in which case it is silently ignored).
+        if self.routers.get(&rid).is_some_and(|r| r.disconnected) {
+            Ok(())
+        } else {
+            Err(RoutingError::BadParcel(
+                "no local peer for StopProxyingToLocalPeer",
+            ))
+        }
+    }
+
+    /// `Router::AcceptBypassLink` (the receive side of `BypassPeerWithLink`):
+    /// adopt the new central link on `b.new_sublink`, begin decaying the old
+    /// link, and tell the peer to stop proxying on the old sublink.
     fn on_bypass_peer_with_link(
         &mut self,
         b: messages::BypassPeerWithLink,
@@ -1235,59 +2132,69 @@ impl RoutingAcceptor {
         }
         self.memory()?.fragment(b.new_link_state_fragment)?;
 
+        // The message targets the router owning the old sublink; a deactivated
+        // sublink is silently ignored (the official `GetRouter` returns null).
+        let rid = match self.owners.get(&b.sublink).copied() {
+            Some(rid) => rid,
+            None => return Ok(()),
+        };
+        let old_sublink;
         let length_to_proxy_from_us;
-        let received_on_old;
         {
             let router = self
                 .routers
-                .get_mut(&b.sublink)
-                .ok_or(RoutingError::BadParcel("bypass for unknown sublink"))?;
-            let _old = router
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
+            if router.disconnected || router.outward.primary.is_none() {
+                // The route is already dysfunctional; discard the bypass link.
+                return Ok(());
+            }
+            let old = router
                 .outward
                 .primary
                 .clone()
                 .ok_or(RoutingError::BadParcel("bypass without outward link"))?;
+            if old.is_local() {
+                // Bypass links only make sense at a remote outward link.
+                return Err(RoutingError::BadParcel("unexpected bypass at a local link"));
+            }
+            // The new link goes to the same node as the old one (the native
+            // acceptor has a single NodeLink, so the official same-node
+            // shortcut always applies; `CanNodeRequestBypass` is never needed).
             length_to_proxy_from_us = router.outbound.current_sequence_number();
-            received_on_old = router.inbound.current_sequence_number();
-            router.outward.begin_primary_link_decay();
+            if !router.outward.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failure to decay link"));
+            }
             router
                 .outward
                 .set_length_to_decaying_link(length_to_proxy_from_us);
             router
                 .outward
                 .set_length_from_decaying_link(b.inbound_sequence_length);
-            router.outward.set_primary_link(Link {
-                sublink: b.new_sublink,
-                kind: LinkKind::Central,
-                side: LinkSide::B,
-                link_state: Some(b.new_link_state_fragment),
-            });
-            self.owners.insert(b.new_sublink, b.sublink);
+            old_sublink = old.sublink;
+            router.outward.set_primary_link(Link::remote(
+                b.new_sublink,
+                LinkKind::Central,
+                LinkSide::B,
+                Some(b.new_link_state_fragment),
+            ));
+            self.owners.insert(b.new_sublink, rid);
         }
 
         // The new link goes to the same node as the old one: tell the peer to
         // stop proxying on the old sublink.
         self.send_link_message(messages::encode_stop_proxying_to_local_peer(
-            b.sublink,
+            old_sublink,
             length_to_proxy_from_us,
         ))?;
 
-        // If the decaying link already received its full sequence, drop it and
-        // mark our side stable.
-        if received_on_old >= b.inbound_sequence_length {
-            if let Some(router) = self.routers.get_mut(&b.sublink) {
-                router.outward.release_decaying_link();
-            }
-            self.memory()?
-                .set_side_stable(b.new_link_state_fragment, false)?;
-        }
         // Drain early parcels for the new sublink.
         if let Some(queued) = self.early_parcels.remove(&b.new_sublink) {
             for p in queued {
                 self.process_accept_parcel(p, Vec::new())?;
             }
         }
-        Ok(())
+        self.router_flush(rid, false)
     }
 
     /// Deserialize the new routers described by an AcceptParcel's
@@ -1316,8 +2223,37 @@ impl RoutingAcceptor {
         Ok(out)
     }
 
-    /// Transmit one parcel on a sublink, serializing any attached portals.
-    fn transmit_parcel(&mut self, sublink: u64, parcel: Parcel) -> Result<(), RoutingError> {
+    /// Transmit one parcel on a link, serializing any attached portals. Local
+    /// links deliver the parcel directly to the peer router
+    /// (`LocalRouterLink::AcceptParcel`: central links deliver as inbound,
+    /// bridge links as outbound); remote links transmit over the NodeLink.
+    fn transmit_parcel(&mut self, link: &Link, parcel: Parcel) -> Result<(), RoutingError> {
+        if let Some(peer_rid) = link.local_peer {
+            let accepted = match link.kind {
+                LinkKind::Central => self
+                    .routers
+                    .get_mut(&peer_rid)
+                    .map(|r| r.accept_inbound(parcel))
+                    .unwrap_or(false),
+                LinkKind::Bridge => self
+                    .routers
+                    .get_mut(&peer_rid)
+                    .map(|r| r.accept_outbound(parcel))
+                    .unwrap_or(false),
+                LinkKind::PeripheralOutward | LinkKind::PeripheralInward => {
+                    // Local links are only ever central or bridge.
+                    return Err(RoutingError::BadParcel("peripheral local link"));
+                }
+            };
+            if !accepted {
+                return Err(RoutingError::BadParcel("local delivery sequence gap"));
+            }
+            // `AcceptInboundParcel` / `AcceptOutboundParcel` flush the
+            // receiver.
+            return self.router_flush(peer_rid, false);
+        }
+
+        let sublink = link.sublink;
         let mut handle_types: Vec<u32> = Vec::new();
         let mut serialized: Vec<(u64, RouterDescriptor)> = Vec::new();
         for obj in &parcel.objects {
@@ -1367,7 +2303,7 @@ impl RoutingAcceptor {
                 return Err(RoutingError::BadParcel("outbound sequence regression"));
             }
         }
-        self.router_flush(rid)
+        self.router_flush(rid, false)
     }
 
     /// Send a NodeLink message, assigning the per-link sequence number.

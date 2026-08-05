@@ -620,3 +620,121 @@ The acceptor-initiated bridge bypass (the bridge chain
 `MaybeStartBridgeBypass`/`StartBridgeBypassFromLocalPeer` machinery) to
 remove the one documented routing wire divergence, then
 `RequestMemory`/`ProvideMemory` and multi-node graphs.
+
+---
+
+## Cycle 2026-08-05 — Phase 5 routing seal: acceptor-initiated bridge bypass (divergence closed)
+
+### 1. What was actually implemented
+
+* **Bridge chain model** in the native routing acceptor
+  (`crates/mojo-rs-interop/src/ipcz/router.rs`, `routing.rs`):
+  - `LinkKind::Bridge`; `Link` now carries a `local_peer` (router identity)
+    and a shared in-process `LocalLinkState` (`Rc<RefCell<>>`) mirroring the
+    official `LocalRouterLink::SharedState` — local central links born
+    `kStable`, local bridge links born `kUnstable`, with `TryLock` /
+    `SetSideStable` / `Unlock` / `ResetWaitingBit` simulations of the pinned
+    CAS loops;
+  - `Router::bridge: Option<Edge>`; bridge parcel collection
+    (`collect_bridge`), bridge decay (`finish_bridge_decay`), `bridge_link`
+    capture, `finish_decays` now reports which edges decayed;
+  - `MergeRoute`-equivalent bootstrap chain setup
+    (`setup_bootstrap_bridge`): attachment ⟷ R_bridge (local central,
+    `kStable`) ⟷ R_remote (local bridge, `kUnstable`) ⟷ [sublink 1];
+  - `maybe_start_bridge_bypass` (all three cases: neither/one/both local
+    outward peers, `TryLockForBypass` ordering and unlock-on-failure),
+    `start_bridge_bypass_from_local_peer` (five-edge decay,
+    `BypassPeerWithLink` outbound, local-peer adoption of the new central
+    link as side A), bridge-aware `AcceptBypassLink` /
+    `StopProxyingToLocalPeer` / `AcceptRouteClosureFrom`, the bridge-aware
+    `Flush` (decay-gated `MarkSideStable`, dead-bridge closure forwarding,
+    `MaybeStartBridgeBypass` precondition, `FlushOtherSideIfWaiting` tail
+    gated on `dropped_last_decaying_link` / force), and local-link parcel /
+    closure / disconnection delivery.
+* **Timing fix for the bypass lock race**: the baseline oracle marks its
+  initial links side-B stable only after the broker processes the Connect
+  reply, so the broker's early bridge-bypass lock attempts defer and the
+  acceptor wins the lock at the first parcel. The candidate marks the
+  initial links stable at the same point in the exchange
+  (`mark_initial_links_stable`, called when the transfer parcel arrives) and
+  waits for the broker's own `BypassPeerWithLink(14→15)` before the
+  transfer-back, reproducing the baseline's ordering deterministically.
+* **Forensic tooling**: `wire-dump` binary decodes wire captures into a
+  message inventory (message ids, sequence numbers, sublinks, fragment
+  descriptors, payloads, `RouterDescriptor` fields).
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/router.rs`,
+`crates/mojo-rs-interop/src/ipcz/routing.rs`,
+`crates/mojo-rs-interop/src/bin/wire-dump.rs` (new),
+`evidence/routing/WIRE-ANALYSIS.md`, `courts/curated/phase5-routing-bridge-bypass.md`,
+`atlas/feature-matrix.json`, `STATUS.md`, this log.
+
+### 3. Compatibility claims now supported
+
+The routing court's one documented wire divergence (the acceptor's own
+bridge bypass) is **closed**: the native acceptor→broker wire matches the
+baseline message-for-message (`BypassPeerWithLink(1→14)`,
+`FlushRouter(14)`, `StopProxyingToLocalPeer(14, 0)`, `r1` on sublink 12,
+`transfer-back` on sublink 15 with descriptor `new=16`), with only the
+permitted normalizations (node names; inline-vs-fragment parcel data;
+per-direction sequence numbers).
+
+### 4. Which courts were run
+
+`scripts/run_routing_court.sh` (5 consecutive passes, broker events
+byte-identical), `scripts/run_court.sh system` (26/26), 
+`scripts/run_interop_court.sh` (PASS), `scripts/run_invite_court.sh` (PASS),
+`scripts/verify_no_oracle_dependency.sh` (PASS).
+
+### 5. Exact pass/fail counts
+
+Routing court: 5/5 PASS. System court: 26/26. Workspace tests: 34 suites,
+0 failures (38 interop-lib tests, 8 new router state-machine tests).
+
+### 6. New residuals and evidence paths
+
+`evidence/routing/20260805T094338Z/`, `20260805T094359Z` (sealed
+post-fix runs), `evidence/routing/WIRE-ANALYSIS.md` (updated).
+
+### 7. Every observed mismatch
+
+1. The shared sub-1 `RouterLinkState` status word was observed at `0xd`
+   (side-A stable + both waiting bits, side-B stable absent) during the
+   broker's concurrent Connect-reply/put processing. A reachability
+   experiment (pinned `TryLock`/`SetSideStable`/`Unlock`/`ResetWaitingBit`
+   against a real shared memfd) proved `0xd` unreachable via valid CAS
+   sequences from the native's observed states — an unexplained broker-side
+   artifact of the oracle build's threaded interleaving. The timing fix
+   avoids the state entirely (side-B stable is marked after the broker's
+   early attempts have deferred).
+2. The transfer-back initially rode on the native's own bypass sublink (14)
+   with the `StopProxyingToLocalPeer` reply emitted after it, because the
+   single-threaded native did not process the broker's
+   `BypassPeerWithLink(14→15)` before the application's puts (the oracle's
+   IO thread does). Fixed by waiting for the broker's bypass before the
+   transfer-back.
+
+### 8. Root cause of each fixed mismatch
+
+1. The native marked its initial links side-B stable at Connect time, which
+   the broker's early bypass attempts could observe; the baseline oracle
+   marks them later in the exchange. Fixed by moving the marks to the same
+   point as the oracle's observable ordering.
+2. The run() scenario is single-threaded; the oracle's routing is
+   multi-threaded. The scenario now deterministically waits for the
+   broker's bypass response to the `FlushRouter` it sent.
+
+### 9. Remaining unsupported behavior
+
+Per `STATUS.md`: `BypassPeer`/`AcceptBypassLink` outbound,
+`RequestMemory`/`ProvideMemory`, multi-subparcel and split parcels,
+multi-node graphs, node loss beyond the single link; Phase 6 C ABI export,
+Phase 7 mojom/bindings, concurrency/stress/fuzz sealing, other platforms.
+
+### 10. Next highest-value parity gate
+
+Per the directive's sequence: the remaining Phase 5 routing work
+(`RequestMemory`/`ProvideMemory`, then multi-node graphs) — or, per the
+user's earlier direction, Phase 6 (C ABI export) after the routing thread.

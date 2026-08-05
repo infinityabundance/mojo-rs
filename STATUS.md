@@ -108,7 +108,7 @@ The native side implements, against the pinned ipcz sources:
 
 ## Sealed
 
-### Phase 5 routing seal (partial) — portal transfer in both directions + proxy bypass
+### Phase 5 routing seal — portal transfer in both directions + proxy bypass + acceptor-initiated bridge bypass
 
 The routing court (`scripts/run_routing_court.sh`) runs the official broker
 (`invite-broker-routing`) against the official oracle acceptor (baseline) and
@@ -136,12 +136,18 @@ The broker's event stream is BYTE-IDENTICAL between the baseline and the
 interop run (15 events: invitation, transfer, `w1`, `r1`, `transfer-back`
 with one extracted handle, `w2`, closes, lifecycle); both processes exit 0.
 
-Wire residuals vs the baseline are documented in
-`evidence/routing/WIRE-ANALYSIS.md` and the curated casefile
-`courts/curated/phase5-routing-bridge-bypass.md`: the oracle acceptor runs
-its own bridge-chain bypass (`BypassPeerWithLink` outbound), the native
-acceptor replies only to the broker's bypass. Normalized: node names, sublink
-ids, per-direction link sequence numbers.
+**The bridge-bypass divergence is closed.** The bootstrap pipe is backed by
+an ipcz *bridge chain* (`P1 ⟷ attachment ⟷ R_bridge ⟷ R_remote ⟷ broker`),
+so both ends independently run bridge bypass. The native routing acceptor
+now models the full bridge chain and its state machines, and the
+acceptor→broker wire matches the baseline message-for-message:
+`BypassPeerWithLink(1→14)`, `FlushRouter(14)`, `StopProxyingToLocalPeer(14, 0)`,
+`r1` on sublink 12, and the `transfer-back` on sublink 15 with descriptor
+`{new 16, proxy_peer_sublink 12}`. Permitted normalizations only: node
+names, inline-vs-fragment parcel data (both decode identically), and
+per-direction link sequence numbers. See
+`evidence/routing/WIRE-ANALYSIS.md` and
+`courts/curated/phase5-routing-bridge-bypass.md`.
 
 The native routing acceptor (`crates/mojo-rs-interop/src/ipcz/{router,routing}.rs`)
 implements the non-broker ipcz `Router` state machine against the pinned
@@ -149,13 +155,18 @@ sources: terminal/proxy routers, decaying links with sequence-length bounds,
 sequenced parcel queues, `Router::Deserialize` (including the
 `proxy_already_bypassed` setup), `SerializeNewRouterAndConfigureProxy` +
 `BeginProxyingToNewRouter`, `AcceptBypassLink` semantics for the broker's
-`BypassPeerWithLink`, `StopProxying` teardown, `RouteClosed` propagation, and
-the shared `RouterLinkState` compare-exchange loops
-(`TryLock`/`SetSideStable`/`Unlock`/`ResetWaitingBit`, each verified against
-`router_link_state.cc` and with regression tests). Also sealed: the
-shared-memory-service client handshake on the internal portal 0 (byte-exact
-against the golden fixture) and the `RouterDescriptor` wire layout
-(96 bytes; `proxy_already_bypassed`/`peer_closed` flag byte at offset 64).
+`BypassPeerWithLink`, `StopProxying` teardown, `RouteClosed` propagation,
+`MergeRoute` (local central links born `kStable`, local bridge links born
+`kUnstable`), the bridge-aware `Flush` / `StopProxyingToLocalPeer` /
+`AcceptRouteClosureFrom`, and `MaybeStartBridgeBypass` /
+`StartBridgeBypassFromLocalPeer` (all three bypass cases), plus the shared
+`RouterLinkState` compare-exchange loops (`TryLock`/`SetSideStable`/
+`Unlock`/`ResetWaitingBit`, each verified against `router_link_state.cc`
+and with regression tests, including the in-process local-link state).
+Also sealed: the shared-memory-service client handshake on the internal
+portal 0 (byte-exact against the golden fixture) and the `RouterDescriptor`
+wire layout (96 bytes; `proxy_already_bypassed`/`peer_closed` flag byte at
+offset 64).
 
 Real bugs found and fixed during this cycle (each preserved in
 `evidence/routing/`):
@@ -171,12 +182,21 @@ Real bugs found and fixed during this cycle (each preserved in
   court's receive predicate and the sublink bookkeeping now handle both;
 - the bootstrap router's primary sublink migrates on the broker's bypass —
   the transfer-back and the `RouteClosed` wait must follow the current
-  primary sublink.
+  primary sublink;
+- the bridge bypass lock race: the baseline oracle marks its initial links
+  stable only after the broker processes the Connect reply, so the broker's
+  early bridge-bypass attempts defer and the acceptor wins the lock at the
+  first parcel; the candidate now marks the initial links stable at the same
+  point in the exchange, and waits for the broker's own bypass
+  (`BypassPeerWithLink(14→15)`) before the transfer-back, reproducing the
+  baseline's ordering deterministically;
+- `Router::finish_decays` captured the released decaying link *after*
+  `maybe_finish_decay` reset the decaying slot (the official captures the
+  link before `MaybeFinishDecay`) — fixed with a regression test.
 
-Not yet implemented (documented scope boundary for this phase): the
-acceptor-initiated bridge-bypass chain, `BypassPeer`/`AcceptBypassLink`
-outbound, `RequestMemory`/`ProvideMemory`, multi-subparcel and split
-parcels, and multi-node graphs.
+Not yet implemented (documented scope boundary): `BypassPeer`/
+`AcceptBypassLink` outbound, `RequestMemory`/`ProvideMemory`, multi-subparcel
+and split parcels, multi-node graphs, and node loss beyond the single link.
 
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
@@ -239,13 +259,12 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 ## Not yet sealed (next gates)
 
 - Routing / port transfer (Phase 5): the remaining portal state machines —
-  the acceptor-initiated bridge-bypass chain, `BypassPeer`/`AcceptBypassLink`
-  outbound, node loss (`RouteDisconnected`) beyond the single-link case,
-  `RequestMemory`/`ProvideMemory`, multi-node graphs, and portal transfer
-  under load. The native routing acceptor currently seals the
-  WithLocalPeer transfer, the proxy serialization path, the broker's
-  `BypassPeerWithLink` adoption, `StopProxying` teardown, and closure
-  propagation over a single NodeLink.
+  `BypassPeer`/`AcceptBypassLink` outbound, node loss (`RouteDisconnected`)
+  beyond the single-link case, `RequestMemory`/`ProvideMemory`, multi-node
+  graphs, and portal transfer under load. The native routing acceptor
+  currently seals the WithLocalPeer transfer, the proxy serialization path,
+  the acceptor-initiated bridge bypass (both directions), `StopProxying`
+  teardown, and closure propagation over a single NodeLink.
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 

@@ -562,3 +562,61 @@ sealed; the routing seal continues with the acceptor-initiated bridge bypass
 (the bridge chain `MaybeStartBridgeBypass`/`StartBridgeBypassFromLocalPeer`
 machinery) to remove the one documented wire divergence — then
 `RequestMemory`/`ProvideMemory` and multi-node graphs.
+
+## Cycle 2026-08-05 — crates.io release v0.3.0 (Phase 5 routing surface)
+
+### 1. What was actually implemented
+
+* Lockstep workspace version bump 0.2.0 → 0.3.0 (all 14 crates; the path
+  dependency specs in the umbrella `Cargo.toml` were bumped in lockstep).
+* Published all 14 crates to crates.io at v0.3.0 in dependency order
+  (platform → wire → mojom → casefile → codegen → core → c-api → io →
+  bindings → system → oracle → test-support → interop → umbrella `mojo-rs`).
+* Post-publish consumer smoke test: a scratch project depending on
+  `mojo-rs = "0.3.0"` from the real registry (no path deps) built and ran,
+  exercising the data-pipe round trip and shared-buffer cross-handle
+  visibility through the umbrella re-exports.
+
+### 2. Which files changed
+
+`Cargo.toml`, `Cargo.lock`, `STATUS.md`, `WORKLOG.md`.
+
+### 3. Compatibility claims now supported
+
+None new (publication does not change sealed behavior); the published
+artifacts now match the Phase 5 routing repository, including the
+`mojo-rs-interop` `router`/`routing` modules and the `routing-acceptor`
+binary.
+
+### 4. Which courts were run
+
+Post-publish smoke build/run (pass). The sealed courts are unchanged by
+publication.
+
+### 5. Exact pass/fail counts
+
+14/14 publishes succeeded; smoke test pass; 0 failures.
+
+### 6. New residuals and evidence paths
+
+crates.io: `mojo-rs` 0.3.0 and all 13 members at 0.3.0.
+
+### 7. Every observed mismatch
+
+None.
+
+### 8. Root cause of each fixed mismatch
+
+n/a.
+
+### 9. Remaining unsupported behavior
+
+Unchanged: the remaining Phase 5 routing state machines, Phase 6 C ABI
+export, Phase 7 mojom/bindings, concurrency/stress/fuzz, other platforms.
+
+### 10. Next highest-value parity gate
+
+The acceptor-initiated bridge bypass (the bridge chain
+`MaybeStartBridgeBypass`/`StartBridgeBypassFromLocalPeer` machinery) to
+remove the one documented routing wire divergence, then
+`RequestMemory`/`ProvideMemory` and multi-node graphs.

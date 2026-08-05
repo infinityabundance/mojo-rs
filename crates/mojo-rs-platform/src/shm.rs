@@ -53,6 +53,41 @@ impl SharedMemory {
         Ok(SharedMemory { fd: owned, size })
     }
 
+    /// Adopt a shared-memory descriptor received out-of-band (e.g. via
+    /// `SCM_RIGHTS`) as a shared-memory object of `size` bytes.
+    ///
+    /// The caller transfers ownership of `fd`; it is closed when this object
+    /// is dropped. The size must be known independently (e.g. from the wire
+    /// `BufferHeader`); it is validated against the descriptor at map time.
+    pub fn from_raw_fd(fd: RawFd, size: usize) -> io::Result<SharedMemory> {
+        if fd < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "negative descriptor",
+            ));
+        }
+        // SAFETY: the caller transfers ownership of a valid descriptor.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        // Validate that the descriptor is a seekable shared-memory object of
+        // at least `size` bytes, so a bogus descriptor cannot later fault the
+        // mapping.
+        // SAFETY: `st` is a zeroed, valid output buffer for `fstat`.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fd is owned and valid; `st` points to writable storage.
+        let rc = unsafe { sys::fstat(fd, &mut st) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let reported = st.st_size as u64;
+        if (reported as usize) < size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "descriptor smaller than declared size",
+            ));
+        }
+        Ok(SharedMemory { fd: owned, size })
+    }
+
     /// The size of the memory object.
     pub fn size(&self) -> usize {
         self.size
@@ -138,6 +173,14 @@ impl Deref for Mapping {
     fn deref(&self) -> &[u8] {
         // SAFETY: the mapping is live and owned for `len` bytes.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl std::ops::DerefMut for Mapping {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `&mut self` grants exclusive access to the owned mapping for
+        // `len` bytes; no other aliasing mutable references can exist.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 }
 

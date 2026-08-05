@@ -41,6 +41,15 @@ pub unsafe fn fcntl_setfd(fd: RawFd, flags: libc::c_int) -> libc::c_int {
     unsafe { libc::fcntl(fd, libc::F_SETFD, flags) }
 }
 
+/// `fstat(fd, buf)`. Returns the raw result (0 on success, -1 on error).
+///
+/// SAFETY: `fd` must be a valid open descriptor and `buf` must point to
+/// writable storage for a `struct stat`.
+pub unsafe fn fstat(fd: RawFd, buf: *mut libc::stat) -> libc::c_int {
+    // SAFETY: single syscall; contract per the caller.
+    unsafe { libc::fstat(fd, buf) }
+}
+
 /// `fcntl(fd, F_GETFL)`. Returns the file status flags or -1.
 ///
 /// SAFETY: `fd` must be a valid open descriptor.

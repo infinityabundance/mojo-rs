@@ -17,6 +17,40 @@ below is a CLAIM only when the cited evidence exists and verifies.
 
 ## Sealed
 
+### Phase 3 interop seal — bidirectional official C++ ⇄ native Rust transfer
+
+The native Rust `ipcz-acceptor` (`mojo-rs-interop`) completes the official
+ConnectNode handshake with the pinned official broker and exchanges a message
+plus a wrapped descriptor in each direction through the bootstrap pipe.
+
+`scripts/run_interop_court.sh` runs the official broker against both the
+official oracle acceptor (baseline) and the native Rust acceptor, through the
+wire-relay man-in-the-middle. The broker's event stream is BYTE-IDENTICAL in
+the two runs, and both processes exit 0:
+
+| Run | Broker exit | Peer exit |
+|---|---|---|
+| baseline (oracle acceptor) | 0 | 0 |
+| interop (native Rust acceptor) | 0 | 0 |
+
+Evidence: `evidence/interop/<stamp>/` (events, wire captures) and
+`evidence/manifests/interop-<stamp>.json` (hashes). The wire shows the full
+native exchange: Connect reply, StopProxyingToLocalPeer, fragment-based
+AcceptParcel reply (shared-memory mailbox), RouteClosed.
+
+The native side implements, against the pinned ipcz sources:
+
+* `NodeConnectorForNonBrokerToBroker`: Connect greeting handling + reply.
+* `NodeLinkMemory::PrimaryBuffer`: link-memory adoption, fragment resolution,
+  `RouterLinkState` status bits, parcel `FragmentHeader` publish/consume.
+* `Router::AcceptBypassLink`: adoption of the broker's peer-initiated bypass
+  (new central link, decay of the old link, `StopProxyingToLocalPeer`).
+* `AcceptParcel` delivery (inline and shared-memory fragment paths), split
+  parcels (`AcceptParcelDriverObjects`), `RouteClosed` propagation.
+* The official `BlockAllocator` free-list for 64-byte parcel fragments.
+
+## Sealed
+
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
 streams for every case in `courts/system/`:
@@ -77,14 +111,14 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 
 ## Not yet sealed (next gates)
 
-- interop.cpp (C++ client ⇄ Rust server): the candidate must speak the ipcz
-  node-link protocol (captured in evidence/invitations/wire/) to accept an
-  official invitation. This is the Phase 3 seal gate.
-- Routing / port transfer (Phase 5): the ipcz message layer
-  (MessageHeader, node messages, shared-memory mailboxes) plus portal state
-  machines, developed against the captured wire and the pinned source.
-- Data pipes, shared buffers, C ABI export, mojom toolchain, bindings,
-  concurrency/stress, fuzzing, other platforms.
+- Routing / port transfer (Phase 5): the full portal state machines —
+  portal transfer through parcels (RouterDescriptor), proxy bypass
+  (BypassPeer/AcceptBypassLink), node loss (RouteDisconnected), multi-node
+  graphs, and the remaining NodeLink message types (RequestMemory,
+  ProvideMemory, AddBlockBuffer beyond the primary buffer). The Phase 3
+  acceptor covers the direct central-link subset.
+- Data pipes, shared buffers (Mojo API surface), C ABI export, mojom
+  toolchain, bindings, concurrency/stress, fuzzing, other platforms.
 
 Every phase gate in the master directive §14 applies; a waived gate requires a
 written reason here.

@@ -145,3 +145,115 @@ bindings, concurrency/stress, fuzzing, and additional platforms.
 The Phase 3 seal gate: official C++ client ⇄ native Rust server over the ipcz
 node-link protocol, built against the captured wire
 (`evidence/invitations/wire/`) and the pinned source.
+
+---
+
+## Cycle 2026-08-05 — Phase 3 interop seal: the native ipcz acceptor
+
+### 1. What was actually implemented
+
+The native Rust ipcz acceptor (`mojo-rs-interop/src/ipcz/`): a non-broker
+node that completes the official ConnectNode handshake with the pinned
+official broker and exchanges a message plus a wrapped descriptor in each
+direction through the bootstrap pipe. New modules:
+
+* `channel.rs` — the socket transport: `IpczHeader` framing, `SCM_RIGHTS`
+  descriptor tracking by byte offset, poll + nonblocking drain, classified
+  malformed-input errors.
+* `link_memory.rs` — the shared primary buffer: layout constants, fragment
+  resolution with bounds checks, `RouterLinkState` status bits (atomic),
+  parcel `FragmentHeader` publish/consume (release/acquire), the official
+  `BlockAllocator` free-list for 64-byte blocks.
+* `messages.rs` — full decode of the NodeLink message types the acceptor
+  handles (Connect, AddBlockBuffer, AcceptParcel, AcceptParcelDriverObjects,
+  RouteClosed/Disconnected, BypassPeerWithLink, StopProxyingToLocalPeer,
+  FlushRouter, RequestMemory/ProvideMemory) plus byte-exact encoders
+  (golden tests against the captured official wire).
+* `acceptor.rs` — the state machine: Connect handshake, initial portals,
+  AcceptParcel delivery (inline and shared-memory fragment paths), split
+  parcels, peer-initiated bypass adoption (`AcceptBypassLink` semantics),
+  RouteClosed propagation, unsupported types rejected explicitly.
+* `bin/ipcz-acceptor.rs` — the harness (oracle-compatible
+  `<socket-fd> <events.jsonl>` interface).
+* `scripts/run_interop_court.sh` — the Phase 3 gate court: official broker
+  against the oracle acceptor (baseline) and the native acceptor (interop),
+  with wire capture and hashed receipts.
+* `mojo-rs-platform`: `SharedMemory::from_raw_fd` (adopt a transferred
+  memfd), `sys::fstat` wrapper, `Mapping::DerefMut`.
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/{mod,wire,messages,channel,link_memory,acceptor}.rs`,
+`crates/mojo-rs-interop/src/bin/ipcz-acceptor.rs`,
+`crates/mojo-rs-platform/src/{shm,sys}.rs`,
+`scripts/run_interop_court.sh`, `atlas/feature-matrix.json`, `STATUS.md`.
+
+### 3. Compatibility claims now supported
+
+* `interop.cpp` capability moved from Scaffolded to **Interoperable**: the
+  official broker's event stream is byte-identical whether its peer is the
+  official oracle acceptor or the native Rust acceptor; both peers exit 0.
+* The Connect handshake, link-memory mailbox (fragment-based AcceptParcel),
+  bypass adoption, and closure propagation are demonstrated on the official
+  wire.
+
+### 4. Which courts were run
+
+* `cargo test --workspace`: 93/93 (23 in mojo-rs-interop: golden byte-identical
+  encode tests against the captured official wire, decode/validation tests,
+  channel tests, link-memory tests).
+* `cargo clippy --workspace --all-targets`: 0 errors.
+* `cargo fmt --check`: clean.
+* `scripts/run_interop_court.sh`: PASS x4 (broker event streams byte-identical;
+  baseline and interop pairs both exit 0).
+* `scripts/verify_no_oracle_dependency.sh`: PASS.
+
+### 5. Exact pass/fail counts
+
+tests 93/93; clippy 0; fmt 0 diffs; interop court 4/4 passes; negative proof PASS.
+
+### 6. New residuals and evidence paths
+
+`evidence/interop/<stamp>/` (baseline + interop broker/acceptor events, wire
+captures) and `evidence/manifests/interop-<stamp>.json`. The native
+acceptor's wire: Connect reply (80B), StopProxyingToLocalPeer (64B),
+fragment-based AcceptParcel reply (168B, shared-memory mailbox),
+RouteClosed (64B).
+
+### 7. Every observed mismatch
+
+* Broker vs oracle baseline message sequence: the oracle acceptor initiates
+  its own bypass (the broker then sends StopProxyingToLocalPeer before its
+  own BypassPeerWithLink); the native acceptor does not initiate bypass, so
+  the broker sends only BypassPeerWithLink. This is a permitted divergence
+  (the routing messages are optimizations), verified by the byte-identical
+  broker EVENT streams.
+* Fixed during the cycle: (a) AcceptParcel params were 80 bytes (stray
+  fragment padding field) — desynchronized array offsets, broker rejected the
+  parcel; (b) blocking sockets deadlocked the drain (recvmsg never returns
+  WouldBlock) — switched to poll + nonblocking; (c) parcel fragment
+  `FragmentHeader` field order was reversed (size at offset 4 instead of 0) —
+  broker read size 0; (d) fragment size was published before the data
+  (release-sequence violation) — data now written first; (e) reply memfd was
+  4096 bytes (ftruncate) instead of exactly the content — trailing zeros
+  failed the oracle's content comparison.
+
+### 8. Root cause of each fixed mismatch
+
+See above: each was a wire-layout or memory-ordering deviation from the
+pinned sources, found by decoding the captured wire and comparing
+byte-for-byte.
+
+### 9. Remaining unsupported behavior
+
+Routing/port transfer beyond the direct central link (Phase 5), data pipes,
+shared buffers (Mojo API), C ABI export, mojom toolchain, bindings,
+concurrency/stress, fuzzing, other platforms. The acceptor rejects portal
+transfers (kPortal) and multi-subparcel parcels explicitly.
+
+### 10. Next highest-value parity gate
+
+Phase 5 routing: portal transfer via `RouterDescriptor` parcels and the
+remaining NodeLink message types (BypassPeer/AcceptBypassLink proxy bypass,
+RequestMemory/ProvideMemory), building the full router state machine against
+the pinned sources and the captured wire.

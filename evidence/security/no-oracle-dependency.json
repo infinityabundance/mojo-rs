@@ -1,23 +1,23 @@
 {
   "schema_version": 1,
   "check": "no-oracle-dependency",
-  "generated_at_utc": "2026-08-05T03:34:18Z",
+  "generated_at_utc": "2026-08-05T03:38:22Z",
   "verdict": "pass",
   "notes": [""],
-  "cargo_tree_sha256": "6047d770fa7597449ddb3a1aea751a8df10b86016c6661a2cdabbe31666b5f2c",
+  "cargo_tree_sha256": "b24e03ac3aba33fdc319afb4438a9d4d01093282cfd7169143e8c866f1a8eb7f",
   "binaries": {
     "candidate-harness": {
-      "sha256": "2ac9e80115a10f638352e7988b82240bc297fe55a5eecb4bbe928d06c01061be",
-      "ldd_sha256": "5c9c1cee50e349e6eedee5e97194ae4fc1757f798933bb224c07f442317d8d6e",
+      "sha256": "d3ef5c9e3ff13caf21ab8f3dcd9a32e0f73aa22bc3b236fa905a431df8a2a4d3",
+      "ldd_sha256": "fb6f897c6b3693c09c8621864aefd5b66a66fbc5e55bec6f4f371e296422ccfe",
       "nm_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "readelf_sha256": "61d2b0bd4f745d57d439ecc790c190daabef4ca3a799cbc2818a20a92da09984"
+      "readelf_sha256": "b833bf61b82c65b55d1cbaa09415f3537d0129c346d244402dffb8ba53252ec0"
     }
 ,
     "mojo-rs-casefile": {
-      "sha256": "ff26202dc9d0052981c2aefe4ecde802181d55dd3be5e5822398c181e6e6507c",
-      "ldd_sha256": "b7da43c6879d24950f19a9f8be99ccf8b53a86ac8abcf080a7546a8fe3a3d1c8",
+      "sha256": "7a0bbb2e8fa90345d92d68cd2573faeb6dbf6ecc68e9615e9a433639f43c3f96",
+      "ldd_sha256": "bb994e647d8da13af45aff4773f27815895ef9016f7b807428970cffc7cb81b5",
       "nm_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "readelf_sha256": "1b4ce32e185622c67ab2eff469eace729a781c34dcd00067f0452157bc3e1cc4"
+      "readelf_sha256": "9237a676bdf9c2201cec92e96ef73e135623cd0acb22da31f65edcd6b246af80"
     }
   }
 }

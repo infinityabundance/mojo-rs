@@ -312,12 +312,15 @@ impl MessageBuilder {
         }
         // Precompute the placement: the DriverObjectData array occupies the
         // current position; each object's data array follows, aligned.
+        // Zero-byte objects carry no data array (`driver_data_array` 0),
+        // matching the official `SerializeDriverObject` which only allocates
+        // when `num_bytes > 0`.
         let base = self.payload_len();
         let do_arr_size = align8(8 + driver_data.len() * 8);
         let mut data_offsets = Vec::with_capacity(driver_data.len());
         let mut off = base + do_arr_size;
         for data in driver_data {
-            data_offsets.push(off);
+            data_offsets.push(if data.is_empty() { 0 } else { off });
             off += align8(8 + data.len());
         }
         let mut objects = Vec::with_capacity(driver_data.len() * 8);
@@ -332,6 +335,9 @@ impl MessageBuilder {
         let arr_offset = self.append_array(&objects, driver_data.len() as u32);
         debug_assert_eq!(arr_offset as usize, base, "driver object array placement");
         for (i, data) in driver_data.iter().enumerate() {
+            if data.is_empty() {
+                continue;
+            }
             let o = self.append_array(data, data.len() as u32);
             debug_assert_eq!(o as usize, data_offsets[i], "driver data array placement");
         }

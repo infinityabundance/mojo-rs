@@ -28,8 +28,8 @@
 //! `AcceptBypassLink`, `ProxyWillStop`) are rejected explicitly rather than
 //! silently ignored.
 
-use std::collections::{HashMap, VecDeque};
-use std::os::unix::io::IntoRawFd;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::os::unix::io::{IntoRawFd, RawFd};
 
 use mojo_rs_casefile::events::{Event, EventKind};
 use mojo_rs_platform::fd::OwnedFd;
@@ -41,8 +41,8 @@ use crate::ipcz::link_memory::{
 };
 use crate::ipcz::messages::{
     self, AcceptParcel, DecodedMessage, FragmentDescriptor, MSG_ID_ACCEPT_BYPASS_LINK,
-    MSG_ID_ACCEPT_PARCEL, MSG_ID_BYPASS_PEER, MSG_ID_PROXY_WILL_STOP, NodeName, RouterDescriptor,
-    handle_type,
+    MSG_ID_ACCEPT_PARCEL, MSG_ID_BYPASS_PEER, MSG_ID_PROXY_WILL_STOP, MSG_ID_REQUEST_MEMORY,
+    NodeName, RouterDescriptor, handle_type,
 };
 use crate::ipcz::router::{Edge, Link, LinkKind, LinkSide, Object, Parcel, Router};
 use crate::ipcz::wire::{WireError, set_message_sequence_number};
@@ -143,10 +143,31 @@ pub struct RoutingAcceptor {
     bootstrap_rid: u64,
     /// The next identity for local-only routers.
     next_rid: u64,
+    /// In-flight `RequestMemory` requests by buffer size, FIFO per size
+    /// (`NodeLink::pending_memory_requests_`: the callbacks are keyed by the
+    /// requested size and completed in request order on `ProvideMemory`).
+    pending_memory_requests: HashMap<u32, VecDeque<PendingMemoryRequest>>,
+    /// Block sizes with an in-flight capacity request (one per block size;
+    /// mirrors `NodeLinkMemory::capacity_callbacks_`'s `need_new_request`).
+    capacity_pending: HashSet<u32>,
+    /// Parcels deferred because their data fragment references a buffer not
+    /// yet received (`NodeLink::WaitForParcelFragmentToResolve`), keyed by
+    /// buffer id and completed when the `AddBlockBuffer` arrives.
+    pending_fragments: HashMap<u64, VecDeque<(AcceptParcel, Vec<OwnedFd>)>>,
     /// Events in casefile format.
     events: Vec<Event>,
     /// Event sequence counter.
     event_seq: u64,
+}
+
+/// A pending `RequestMemory` (a `ProvideMemory` reply is expected): the
+/// completion carries the requested buffer size and the block size the
+/// caller's `RequestBlockCapacity` lobbied for.
+struct PendingMemoryRequest {
+    /// The requested buffer size (the `RequestMemory`/`ProvideMemory` size).
+    buffer_size: u32,
+    /// The block size the completion must initialize and share.
+    block_size: u32,
 }
 
 impl RoutingAcceptor {
@@ -163,6 +184,9 @@ impl RoutingAcceptor {
             broker_name: NodeName::invalid(),
             bootstrap_rid: 0,
             next_rid: LOCAL_RID_BASE,
+            pending_memory_requests: HashMap::new(),
+            capacity_pending: HashSet::new(),
+            pending_fragments: HashMap::new(),
             events: Vec::new(),
             event_seq: 0,
         })
@@ -378,6 +402,214 @@ impl RoutingAcceptor {
         self.close_route(self.bootstrap_rid)?;
         self.emit(9, EventKind::Lifecycle, "MOJO_RESULT_OK");
         Ok(())
+    }
+
+    /// The memory-expansion scenario (`invite-broker-memory` /
+    /// `invite-acceptor-memory`): seals the parcel-fragment allocation and
+    /// free-list-reuse semantics against the official broker.
+    ///
+    /// The primary buffer's 256-byte block pool holds exactly 8 allocable
+    /// blocks, so the 9th parcel of 200 bytes (m8) falls back to inline data
+    /// (the pinned mojo embedder sets `IPCZ_MEMORY_FIXED_PARCEL_CAPACITY`,
+    /// disabling parcel-data expansion). The broker reads m0..m8 only after
+    /// the sync marker, freeing the blocks (LIFO); m9 and m10 then reuse the
+    /// freed blocks from the primary buffer — the free-list reuse is part of
+    /// the seal (fragment offsets must match the baseline). The `RequestMemory` /
+    /// `ProvideMemory` machinery is implemented but not exercised by this
+    /// court: its only reachable trigger in this epoch is `RouterLinkState`
+    /// pool exhaustion, which requires the proxy-bypass machinery (the next
+    /// Phase 5 gate).
+    ///
+    /// Event sequence mirrors the oracle acceptor driver:
+    /// 0 lifecycle, 1-2 result (connect), 3 message (transfer-b1), 4 message
+    /// (w1), 5-13 result (m0..m8), 14 result (sync), 15 result (transfer-back),
+    /// 16 message (w3), 17-18 result (m9, m10), 19 message (peer closed),
+    /// 20 result (close), 21 lifecycle.
+    pub fn run_memory(&mut self) -> Result<(), RoutingError> {
+        self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        self.connect()?;
+        self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 1: receive the transferred portal on the bootstrap pipe.
+        let (transfer, transfer_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.sublink == BOOTSTRAP_SUBLINK && p.handle_types.contains(&handle_type::PORTAL)
+            )
+        })?;
+        self.mark_initial_links_stable()?;
+        let b1_identity;
+        match transfer {
+            DecodedMessage::AcceptParcel(p) => {
+                let processed = self.process_accept_parcel(p, transfer_fds)?;
+                if processed.identities.len() != 1 {
+                    return Err(RoutingError::BadParcel(
+                        "expected exactly one transferred portal",
+                    ));
+                }
+                b1_identity = processed.identities[0];
+                if processed.payload != b"transfer-b1" {
+                    return Err(RoutingError::BadParcel("unexpected transfer payload"));
+                }
+            }
+            _ => return Err(RoutingError::Unexpected("transfer predicate misrouted")),
+        }
+        self.emit_message(3, b"transfer-b1", 1);
+
+        // Step 2: receive w1 on the transferred portal's route.
+        let b1_sublinks: Vec<u64> = {
+            let router = self
+                .routers
+                .get(&b1_identity)
+                .ok_or(RoutingError::BadParcel("b1 router missing"))?;
+            let mut out = Vec::with_capacity(2);
+            if let Some(l) = &router.outward.primary {
+                out.push(l.sublink);
+            }
+            if let Some(l) = router.outward.decaying_link() {
+                out.push(l.sublink);
+            }
+            out
+        };
+        let (w1, w1_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.handle_types.is_empty() && b1_sublinks.contains(&p.sublink)
+            )
+        })?;
+        let w1_payload = match w1 {
+            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, w1_fds)?.payload,
+            _ => return Err(RoutingError::Unexpected("w1 predicate misrouted")),
+        };
+        if w1_payload != b"w1" {
+            return Err(RoutingError::BadParcel("unexpected w1 payload"));
+        }
+        self.emit_message(4, &w1_payload, 0);
+        // The broker's own bridge bypass follows the `FlushRouter` we sent;
+        // process it so the transfer-back rides on the broker-assigned sublink
+        // (deterministic ordering, as in `run`).
+        let bootstrap_now = self.bootstrap_sublink()?;
+        let (bb, bb_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::BypassPeerWithLink(b) if b.sublink == bootstrap_now
+            )
+        })?;
+        if let DecodedMessage::BypassPeerWithLink(b) = bb {
+            self.dispatch(DecodedMessage::BypassPeerWithLink(b), bb_fds)?;
+        }
+
+        // Step 3: m0..m8 on B'. The 8 primary 256-byte blocks are consumed by
+        // m0..m7; m8's fragment allocation fails (the mojo embedder disables
+        // parcel-data expansion), so m8 travels inline — exactly like the
+        // oracle baseline.
+        for i in 0..9u32 {
+            let frag = self.put(b1_identity, Self::memory_payload(i), Vec::new())?;
+            if i < 8 {
+                // m0..m7 are fragment-backed from the primary 256-block pool.
+                let f = frag.ok_or(RoutingError::BadParcel(
+                    "pre-exhaustion parcel unexpectedly inline",
+                ))?;
+                if f.buffer_id != crate::ipcz::link_memory::PRIMARY_BUFFER_ID {
+                    return Err(RoutingError::BadParcel(
+                        "pre-exhaustion parcel not from the primary buffer",
+                    ));
+                }
+            } else if frag.is_some() {
+                // m8's allocation must fail (all 8 blocks consumed).
+                return Err(RoutingError::BadParcel(
+                    "exhaustion parcel unexpectedly fragment-backed",
+                ));
+            }
+            self.emit(5 + i as u64, EventKind::Result, "MOJO_RESULT_OK");
+        }
+
+        // Step 4: the sync marker on the bootstrap pipe; the broker reads m0..m8
+        // only after receiving it (so the 256-blocks stay allocated at m8's put).
+        self.put(self.bootstrap_rid, b"sync".to_vec(), Vec::new())?;
+        self.emit(14, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 5: the transfer-back on the bootstrap with the b1 handle. The
+        // `ProvideMemory` round trip completes during this exchange.
+        self.put(
+            self.bootstrap_rid,
+            b"transfer-back".to_vec(),
+            vec![Object::Router(b1_identity)],
+        )?;
+        self.emit(15, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 6: drain the broker's routing messages (its bypass of the
+        // bootstrap route, the proxy teardown) and wait for w3. The broker
+        // sends w3 after its own w2 round trip, so by the time it arrives the
+        // broker has read (and freed) m0..m8 — the m9/m10 allocations below
+        // are therefore deterministically served by the freed primary blocks.
+        let bootstrap_now = self.bootstrap_sublink()?;
+        let (w3, w3_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.sublink == bootstrap_now && p.handle_types.is_empty()
+            )
+        })?;
+        let w3_payload = match w3 {
+            DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, w3_fds)?.payload,
+            _ => return Err(RoutingError::Unexpected("w3 predicate misrouted")),
+        };
+        if w3_payload != b"w3" {
+            return Err(RoutingError::BadParcel("unexpected w3 payload"));
+        }
+        self.emit_message(16, &w3_payload, 0);
+
+        // Step 7: m9 and m10 on the bootstrap pipe — fragment-backed from the
+        // primary buffer, reusing the blocks the broker freed when it read
+        // m0..m8 (LIFO free-list: m9 gets block 8, m10 gets block 7).
+        for (i, op) in [(9u32, 17u64), (10, 18)] {
+            let frag = self.put(self.bootstrap_rid, Self::memory_payload(i), Vec::new())?;
+            let f = frag.ok_or(RoutingError::BadParcel(
+                "post-read parcel unexpectedly inline",
+            ))?;
+            if f.buffer_id != crate::ipcz::link_memory::PRIMARY_BUFFER_ID {
+                return Err(RoutingError::BadParcel(
+                    "post-read parcel not from the primary buffer",
+                ));
+            }
+            if f.size != 256 {
+                return Err(RoutingError::BadParcel(
+                    "post-read parcel has the wrong block size",
+                ));
+            }
+            self.emit(op, EventKind::Result, "MOJO_RESULT_OK");
+        }
+
+        // Step 8: the broker closes its bootstrap end; RouteClosed arrives on
+        // the bootstrap route's current primary sublink.
+        let bootstrap_now = self.bootstrap_sublink()?;
+        let (rc, rc_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::RouteClosed(r) if r.sublink == bootstrap_now
+            )
+        })?;
+        if let DecodedMessage::RouteClosed(r) = rc {
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds)?;
+        }
+        self.emit(19, EventKind::Message, "MOJO_RESULT_FAILED_PRECONDITION");
+
+        // Step 9: close the bootstrap portal locally.
+        self.close_route(self.bootstrap_rid)?;
+        self.emit(20, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(21, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        Ok(())
+    }
+
+    /// A deterministic 200-byte memory-court payload: `m{NN}` plus padding.
+    fn memory_payload(i: u32) -> Vec<u8> {
+        let mut p = format!("m{i:02}").into_bytes();
+        p.resize(200, b'x');
+        p
     }
 
     /// The bootstrap (attachment) router's current primary sublink (its
@@ -615,11 +847,16 @@ impl RoutingAcceptor {
                     return Err(RoutingError::BadParcel("AddBlockBuffer index out of range"));
                 }
                 let fd = fds[b.buffer_index as usize].try_dup()?;
-                self.memory_mut()?.add_block_buffer(
-                    b.buffer_id,
-                    fd.into_raw_fd(),
-                    b.block_size as usize,
-                )?;
+                self.memory_mut()?
+                    .add_block_buffer(b.buffer_id, fd.into_raw_fd(), b.block_size)?;
+                // Resolve any parcels deferred on this buffer
+                // (`WaitForParcelFragmentToResolve` completes when the buffer
+                // arrives).
+                if let Some(queued) = self.pending_fragments.remove(&b.buffer_id) {
+                    for (p, p_fds) in queued {
+                        self.process_accept_parcel(p, p_fds)?;
+                    }
+                }
                 Ok(())
             }
             DecodedMessage::AcceptParcel(p) => self.process_accept_parcel(p, fds).map(|_| ()),
@@ -668,14 +905,26 @@ impl RoutingAcceptor {
                 }
                 Ok(())
             }
-            DecodedMessage::RequestMemory(_) => Err(RoutingError::Unsupported(
-                64,
-                "RequestMemory not supported by the routing acceptor",
-            )),
-            DecodedMessage::ProvideMemory(_) => Err(RoutingError::Unsupported(
-                65,
-                "ProvideMemory not supported by the routing acceptor",
-            )),
+            DecodedMessage::RequestMemory(r) => self.on_request_memory(r.size),
+            DecodedMessage::ProvideMemory(r) => {
+                // `ProvideMemory` carries exactly one driver object (the
+                // buffer) at index 0; the descriptor travels with the message.
+                if fds.len() != 1 {
+                    return Err(RoutingError::BadParcel(
+                        "ProvideMemory without exactly one buffer descriptor",
+                    ));
+                }
+                // SAFETY of the length: checked above.
+                let fd = match fds.into_iter().next() {
+                    Some(fd) => fd,
+                    None => {
+                        return Err(RoutingError::BadParcel(
+                            "ProvideMemory without a buffer descriptor",
+                        ));
+                    }
+                };
+                self.on_provide_memory(r.size, fd)
+            }
             DecodedMessage::BypassPeer(_) => Err(RoutingError::Unsupported(
                 MSG_ID_BYPASS_PEER,
                 "inbound BypassPeer not exercised by the routing court",
@@ -720,7 +969,23 @@ impl RoutingAcceptor {
                 "multi-subparcel parcels not exercised by the routing court",
             ));
         }
-        let payload = self.parcel_data(&p)?;
+        let payload = match self.parcel_data(&p) {
+            Ok(payload) => payload,
+            Err(RoutingError::Memory(crate::ipcz::link_memory::LinkMemoryError::UnknownBuffer)) => {
+                // The parcel's data lives in a buffer we have not received yet;
+                // defer acceptance until the AddBlockBuffer arrives
+                // (`NodeLink::WaitForParcelFragmentToResolve`).
+                self.pending_fragments
+                    .entry(p.parcel_fragment.buffer_id)
+                    .or_default()
+                    .push_back((p, fds));
+                return Ok(ProcessedParcel {
+                    payload: Vec::new(),
+                    identities: Vec::new(),
+                });
+            }
+            Err(e) => return Err(e),
+        };
         let identities = self.deserialize_portals(&p)?;
         let mut identities_iter = identities.iter();
         let mut objects: Vec<Object> = Vec::new();
@@ -822,6 +1087,10 @@ impl RoutingAcceptor {
                 sequence_number: p.sequence_number,
                 data: payload.clone(),
                 objects,
+                // Received fragment data is copied out at delivery; the
+                // fragment itself is not retained (the receive-side free is a
+                // documented boundary until a court exercises it).
+                fragment: None,
             };
             let accepted = if is_outward {
                 router.accept_inbound(parcel)
@@ -1303,10 +1572,23 @@ impl RoutingAcceptor {
         // Case 2: only one bridge router has a local outward peer. The bridge
         // router whose outward peer is local initiates the bypass.
         if second_local_peer.is_none() {
-            let link_state = self.memory_mut()?.try_allocate_link_state()?;
+            let Some(link_state) = self.memory_mut()?.try_allocate_link_state()? else {
+                // The 64-byte pool is exhausted: lobby for more capacity and
+                // defer the bypass (the official retries asynchronously; no
+                // sealed court exhausts this pool — documented boundary).
+                self.request_block_capacity(
+                    crate::ipcz::link_memory::ROUTER_LINK_STATE_SIZE as u32,
+                )?;
+                return Ok(());
+            };
             return self.start_bridge_bypass_from_local_peer(rid, link_state);
         } else if first_local_peer.is_none() {
-            let link_state = self.memory_mut()?.try_allocate_link_state()?;
+            let Some(link_state) = self.memory_mut()?.try_allocate_link_state()? else {
+                self.request_block_capacity(
+                    crate::ipcz::link_memory::ROUTER_LINK_STATE_SIZE as u32,
+                )?;
+                return Ok(());
+            };
             return self.start_bridge_bypass_from_local_peer(second_bridge, link_state);
         }
 
@@ -1638,7 +1920,9 @@ impl RoutingAcceptor {
                 .get_mut(&rid)
                 .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
             let (_, out_decayed, _, in_decayed) = router.finish_decays();
-            router.finish_bridge_decay();
+            // The bridge decay completion is driven by the flush; the released
+            // bridge edge's sublink ownership is swept by `remove_router`.
+            let _ = router.finish_bridge_decay();
             (out_decayed, in_decayed)
         };
 
@@ -2271,9 +2555,10 @@ impl RoutingAcceptor {
             }
         }
         let new_routers: Vec<Vec<u8>> = serialized.iter().map(|(_, d)| d.encode()).collect();
-        let msg = messages::encode_accept_parcel_with_portals(
+        let msg = messages::encode_accept_parcel_full(
             sublink,
             parcel.sequence_number,
+            parcel.fragment,
             &parcel.data,
             &handle_types,
             &new_routers,
@@ -2286,24 +2571,80 @@ impl RoutingAcceptor {
         Ok(())
     }
 
-    /// `Router::Put` from a portal: enqueue an outbound parcel and flush.
-    fn put(&mut self, rid: u64, data: Vec<u8>, objects: Vec<Object>) -> Result<(), RoutingError> {
+    /// `Router::Put` from a portal: allocate the parcel data (`AllocateOutboundParcel`),
+    /// enqueue an outbound parcel, and flush.
+    ///
+    /// The data allocation happens at put time based on the outward primary
+    /// link: a remote link allocates a shared-memory fragment (`Parcel::AllocateData`
+    /// with the link memory), falling back to inline data when no block is
+    /// available; a local link (or none) allocates inline.
+    ///
+    /// Returns the fragment descriptor backing the payload, if one was
+    /// allocated (the caller can verify the block-capacity expansion).
+    fn put(
+        &mut self,
+        rid: u64,
+        data: Vec<u8>,
+        objects: Vec<Object>,
+    ) -> Result<Option<FragmentDescriptor>, RoutingError> {
+        let (seq, use_fragment) = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("put for unknown router"))?;
+            let seq = router.outbound.current_sequence_number();
+            let use_fragment = !data.is_empty()
+                && router
+                    .outward
+                    .primary
+                    .as_ref()
+                    .is_some_and(|l| !l.is_local());
+            (seq, use_fragment)
+        };
+        let fragment = if use_fragment {
+            self.write_parcel_fragment_or_inline(&data)?
+        } else {
+            None
+        };
         {
             let router = self
                 .routers
                 .get_mut(&rid)
                 .ok_or(RoutingError::BadParcel("put for unknown router"))?;
-            let seq = router.outbound.current_sequence_number();
             let parcel = Parcel {
                 sequence_number: seq,
                 data,
                 objects,
+                fragment,
             };
             if !router.push_outbound(parcel) {
                 return Err(RoutingError::BadParcel("outbound sequence regression"));
             }
         }
-        self.router_flush(rid, false)
+        self.router_flush(rid, false)?;
+        Ok(fragment)
+    }
+
+    /// `Parcel::AllocateData` for a remote outward link: try to allocate a
+    /// shared-memory fragment for `data.len() + sizeof(FragmentHeader)` bytes,
+    /// falling back to inline data when no block is available.
+    ///
+    /// NOTE on expansion: the pinned mojo embedder sets
+    /// `IPCZ_MEMORY_FIXED_PARCEL_CAPACITY` (ipcz_api.cc, crbug.com/40876289),
+    /// so `allow_memory_expansion_for_parcel_data_` is false and
+    /// `AllocateFragment` does NOT lobby for parcel data — the inline fallback
+    /// is the official behavior in this epoch. The only expansion trigger is
+    /// `RouterLinkState` pool exhaustion (the unconditional lobby in
+    /// `TryAllocateRouterLinkState`), handled by the link-state path.
+    fn write_parcel_fragment_or_inline(
+        &mut self,
+        data: &[u8],
+    ) -> Result<Option<FragmentDescriptor>, RoutingError> {
+        match self.memory_mut()?.write_parcel_fragment(data) {
+            Ok(f) => Ok(Some(f)),
+            Err(crate::ipcz::link_memory::LinkMemoryError::OutOfBounds) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Send a NodeLink message, assigning the per-link sequence number.
@@ -2312,6 +2653,99 @@ impl RoutingAcceptor {
         self.next_link_seq += 1;
         self.channel.send(&payload, &[])?;
         Ok(())
+    }
+
+    /// Send a NodeLink message with attached descriptors (e.g. an
+    /// `AddBlockBuffer` carrying the shared buffer).
+    fn send_link_message_with_fds(
+        &mut self,
+        mut payload: Vec<u8>,
+        fds: &[RawFd],
+    ) -> Result<(), RoutingError> {
+        set_message_sequence_number(&mut payload, self.next_link_seq);
+        self.next_link_seq += 1;
+        self.channel.send(&payload, fds)?;
+        Ok(())
+    }
+
+    /// `NodeLinkMemory::RequestBlockCapacity`: lobby for a new block buffer of
+    /// `block_size`-byte blocks. Exactly one in-flight request per block size
+    /// (further requests while one is pending are folded into it, matching
+    /// `capacity_callbacks_`'s `need_new_request`); the request is routed
+    /// through `Node::AllocateSharedMemory`, which — because this node
+    /// connected as the allocation delegate (`IPCZ_CONNECT_NODE_TO_ALLOCATION_DELEGATE`
+    /// set by `Invitation::Accept` when local allocation is disabled) — sends
+    /// `RequestMemory` to the broker.
+    fn request_block_capacity(&mut self, block_size: u32) -> Result<(), RoutingError> {
+        if self.capacity_pending.contains(&block_size) {
+            return Ok(());
+        }
+        self.capacity_pending.insert(block_size);
+        // `kMinBlockAllocatorCapacity` blocks per page, rounded up to whole
+        // pages (`RequestBlockCapacity`'s `num_pages` computation).
+        let min_buffer_size = (block_size as usize)
+            .saturating_mul(crate::ipcz::link_memory::MIN_BLOCK_ALLOCATOR_CAPACITY);
+        let num_pages = min_buffer_size
+            .div_ceil(crate::ipcz::link_memory::BLOCK_ALLOCATOR_PAGE_SIZE)
+            .max(1);
+        let buffer_size = num_pages * crate::ipcz::link_memory::BLOCK_ALLOCATOR_PAGE_SIZE;
+        let buffer_size32 = u32::try_from(buffer_size)
+            .map_err(|_| RoutingError::BadParcel("block buffer request exceeds u32 size"))?;
+        self.pending_memory_requests
+            .entry(buffer_size32)
+            .or_default()
+            .push_back(PendingMemoryRequest {
+                buffer_size: buffer_size32,
+                block_size,
+            });
+        self.send_link_message(messages::encode_request_memory(buffer_size32))
+    }
+
+    /// `NodeLink::OnProvideMemory`: adopt the provided buffer, initialize its
+    /// block allocator region, share it with the peer via `AddBlockBuffer`
+    /// (transmitted BEFORE the local registration, matching the official
+    /// share-then-register order), and complete the pending capacity request.
+    fn on_provide_memory(&mut self, size: u32, fd: OwnedFd) -> Result<(), RoutingError> {
+        let pending = self
+            .pending_memory_requests
+            .get_mut(&size)
+            .and_then(VecDeque::pop_front)
+            .ok_or(RoutingError::BadParcel(
+                "ProvideMemory without a pending request",
+            ))?;
+        if self
+            .pending_memory_requests
+            .get(&size)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.pending_memory_requests.remove(&size);
+        }
+        let block_size = pending.block_size;
+        // Allocate the buffer id from the shared primary header, then share the
+        // buffer with the peer before registering it locally.
+        let id = self.memory()?.allocate_new_buffer_id()?;
+        let dup = fd.try_dup()?;
+        let payload = messages::encode_add_block_buffer(id, block_size, 0);
+        self.send_link_message_with_fds(payload, &[dup.as_raw_fd()])?;
+        self.memory_mut()?
+            .register_block_buffer(id, fd.into_raw_fd(), block_size)?;
+        // The capacity request for this block size has completed; any further
+        // requests may now start a fresh round trip.
+        self.capacity_pending.remove(&block_size);
+        Ok(())
+    }
+
+    /// `NodeLink::OnRequestMemory`: this node is the broker for its link and
+    /// must allocate and provide a buffer. The routing acceptor is the
+    /// allocation *delegate* (not the provider), so the official broker never
+    /// sends it `RequestMemory`; multi-node courts with a native broker will
+    /// exercise this path.
+    fn on_request_memory(&mut self, size: u32) -> Result<(), RoutingError> {
+        let _ = size;
+        Err(RoutingError::Unsupported(
+            MSG_ID_REQUEST_MEMORY,
+            "native broker role not exercised by a sealed court",
+        ))
     }
 
     /// Remove a router and all its sublinks. The owners map is swept for any

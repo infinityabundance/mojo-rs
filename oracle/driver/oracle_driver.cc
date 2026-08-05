@@ -1761,6 +1761,318 @@ int RunRoutingAcceptor(int socket_fd, const char* events_path) {
   return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
 }
 
+// The Phase 5 memory-expansion scenario (official broker and acceptor sides):
+//
+//   invite-broker-memory  <socket-fd> <events.jsonl>
+//   invite-acceptor-memory <socket-fd> <events.jsonl>
+//
+// Seals the RequestMemory / ProvideMemory / AddBlockBuffer block-capacity
+// expansion deterministically:
+//   1. the broker transfers B through the bootstrap pipe and writes w1 on A;
+//   2. the acceptor sends m0..m8 (9 x 200-byte parcels) on B' — the primary
+//      buffer's 256-byte pool holds exactly 8 allocable blocks, so m8's
+//      fragment allocation fails and triggers RequestBlockCapacity(256),
+//      which (the acceptor is the allocation delegate) sends RequestMemory
+//      to the broker; m8 itself travels inline;
+//   3. the acceptor sends a "sync" marker on the bootstrap pipe; the broker
+//      reads m0..m8 from A only after receiving it, so the 256-blocks stay
+//      allocated at m8's put;
+//   4. the acceptor sends the transfer-back (B' + handle) through the
+//      bootstrap; the ProvideMemory round trip completes during this
+//      exchange (the broker replies with a 64 KiB memfd; the acceptor
+//      initializes it as a 256-byte block allocator, shares it via
+//      AddBlockBuffer{id=1, 256}, and registers it);
+//   5. the broker does a w2 round trip on A/B'' and then sends w3 on the
+//      bootstrap; receiving w3 guarantees the expansion completed on the
+//      acceptor side (ProvideMemory precedes w3 in arrival order);
+//   6. the acceptor sends m9 and m10 on the bootstrap — deterministically
+//      fragment-backed from the new buffer;
+//   7. the broker reads m9/m10, then closes A, B'', and the bootstrap pipe
+//      (RouteClosed propagation to the acceptor).
+// ---------------------------------------------------------------------------
+
+// The deterministic 200-byte memory-court payload m{NN} + 'x' padding.
+std::string MemoryPayload(int i) {
+  std::string p = "m";
+  if (i < 10) {
+    p += "0";
+  }
+  p += std::to_string(i);
+  p.resize(200, 'x');
+  return p;
+}
+
+int RunMemoryBroker(int socket_fd, const char* events_path) {
+  mojo::core::Configuration config;
+  config.is_broker_process = true;
+  config.force_direct_shared_memory_allocation = true;
+  mojo::core::Init(config);
+
+  EventWriter writer(events_path);
+  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  MojoHandle invitation;
+  MojoResult r = MojoCreateInvitation(nullptr, &invitation);
+  writer.Emit(1, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle pipe;
+  r = MojoAttachMessagePipeToInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
+  writer.Emit(2, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
+  r = MojoSendInvitation(invitation, nullptr, &endpoint, nullptr, 0, nullptr);
+  writer.Emit(3, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  MojoHandle a, b;
+  r = MojoCreateMessagePipe(nullptr, &a, &b);
+  writer.Emit(4, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Transfer B to the acceptor through the bootstrap pipe.
+  r = SendMessageWithHandle(pipe, "transfer-b1", b);
+  writer.Emit(5, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  // w1 routes over the wire to the acceptor's B'.
+  r = SendPayload(a, "w1");
+  writer.Emit(6, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // The sync marker on the bootstrap pipe: the acceptor has queued m0..m8 on
+  // A (per-link FIFO on its side), so reading them now cannot free blocks
+  // before m8's put-time allocation.
+  std::string payload;
+  r = RecvPayload(pipe, &payload);
+  base::DictValue sync_extra;
+  sync_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(7, "message", ResultName(r), sync_extra);
+  if (r != MOJO_RESULT_OK || payload != "sync") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Read m0..m8 from A and verify each payload.
+  for (int i = 0; i < 9; ++i) {
+    r = RecvPayload(a, &payload);
+    base::DictValue m_extra;
+    m_extra.Set("payload_hex", HexEncode(
+        reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+    writer.Emit(8 + i, "message", ResultName(r), m_extra);
+    if (r != MOJO_RESULT_OK || payload != MemoryPayload(i)) {
+      writer.WriteOut();
+      return 1;
+    }
+  }
+
+  // Receive the transfer-back and extract B'' (the broker completes the
+  // bypass locally).
+  MojoHandle b2;
+  r = RecvMessageWithHandle(pipe, &payload, &b2);
+  base::DictValue back_extra;
+  back_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  back_extra.Set("handles", static_cast<int>(b2 != MOJO_HANDLE_INVALID ? 1 : 0));
+  writer.Emit(17, "message", ResultName(r), back_extra);
+  if (r != MOJO_RESULT_OK || payload != "transfer-back" ||
+      b2 == MOJO_HANDLE_INVALID) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // w2 round trip on A/B'' (local after the bypass).
+  r = SendPayload(a, "w2");
+  writer.Emit(18, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = RecvPayload(b2, &payload);
+  base::DictValue w2_extra;
+  w2_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(19, "message", ResultName(r), w2_extra);
+  if (r != MOJO_RESULT_OK || payload != "w2") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // w3 on the bootstrap pipe: the pacing signal that the memory expansion
+  // completed on the acceptor side (the broker sent ProvideMemory before w3;
+  // the acceptor's buffer registration precedes the w3 delivery).
+  r = SendPayload(pipe, "w3");
+  writer.Emit(20, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // m9 and m10 on the bootstrap pipe (fragment-backed from the new buffer).
+  for (int i = 9; i <= 10; ++i) {
+    r = RecvPayload(pipe, &payload);
+    base::DictValue m_extra;
+    m_extra.Set("payload_hex", HexEncode(
+        reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+    writer.Emit(20 + i - 8, "message", ResultName(r), m_extra);
+    if (r != MOJO_RESULT_OK || payload != MemoryPayload(i)) {
+      writer.WriteOut();
+      return 1;
+    }
+  }
+
+  MojoClose(a);
+  writer.Emit(23, "result", ResultName(MOJO_RESULT_OK), extra);
+  MojoClose(b2);
+  writer.Emit(24, "result", ResultName(MOJO_RESULT_OK), extra);
+  MojoClose(pipe);
+  writer.Emit(25, "result", ResultName(MOJO_RESULT_OK), extra);
+
+  writer.Emit(26, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return 0;
+}
+
+int RunMemoryAcceptor(int socket_fd, const char* events_path) {
+  mojo::core::Init();
+
+  EventWriter writer(events_path);
+  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
+  MojoHandle invitation;
+  MojoResult r = MojoAcceptInvitation(&endpoint, nullptr, &invitation);
+  writer.Emit(1, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  MojoHandle pipe;
+  r = MojoExtractMessagePipeFromInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
+  writer.Emit(2, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Receive B' (the transferred portal).
+  std::string payload;
+  MojoHandle b1;
+  r = RecvMessageWithHandle(pipe, &payload, &b1);
+  base::DictValue t_extra;
+  t_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  t_extra.Set("handles", static_cast<int>(b1 != MOJO_HANDLE_INVALID ? 1 : 0));
+  writer.Emit(3, "message", ResultName(r), t_extra);
+  if (r != MOJO_RESULT_OK || payload != "transfer-b1" ||
+      b1 == MOJO_HANDLE_INVALID) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Receive w1 over the wire.
+  r = RecvPayload(b1, &payload);
+  base::DictValue w1_extra;
+  w1_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(4, "message", ResultName(r), w1_extra);
+  if (r != MOJO_RESULT_OK || payload != "w1") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // m0..m8 on B'. m0..m7 consume the primary 256-byte blocks; m8's fragment
+  // allocation fails (the parcel goes inline) and triggers the RequestMemory
+  // round trip.
+  for (int i = 0; i < 9; ++i) {
+    r = SendPayload(b1, MemoryPayload(i));
+    writer.Emit(5 + i, "result", ResultName(r), extra);
+    if (r != MOJO_RESULT_OK) {
+      writer.WriteOut();
+      return 1;
+    }
+  }
+
+  // The sync marker on the bootstrap pipe (the broker reads m0..m8 after it).
+  r = SendPayload(pipe, "sync");
+  writer.Emit(14, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Transfer B' back through the bootstrap pipe (the proxy path). The
+  // ProvideMemory round trip completes during this exchange.
+  r = SendMessageWithHandle(pipe, "transfer-back", b1);
+  writer.Emit(15, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // w3: the pacing round trip. The IO thread processes the broker's
+  // ProvideMemory before the w3 delivery (arrival order), so the new buffer is
+  // registered locally when this returns.
+  r = RecvPayload(pipe, &payload);
+  base::DictValue w3_extra;
+  w3_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(16, "message", ResultName(r), w3_extra);
+  if (r != MOJO_RESULT_OK || payload != "w3") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // m9 and m10 on the bootstrap pipe — fragment-backed from the new buffer.
+  r = SendPayload(pipe, MemoryPayload(9));
+  writer.Emit(17, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = SendPayload(pipe, MemoryPayload(10));
+  writer.Emit(18, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // The broker closes its bootstrap end: the read fails with
+  // FAILED_PRECONDITION (peer closed).
+  r = RecvPayload(pipe, &payload);
+  base::DictValue c_extra;
+  c_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(19, "message", ResultName(r), c_extra);
+
+  MojoClose(pipe);
+  MojoClose(invitation);
+  writer.Emit(20, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(21, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
+}
+
 }  // namespace invite
 
 }  // namespace
@@ -1775,7 +2087,9 @@ int main(int argc, char** argv) {
   }
   if (argc - pos < 1) {
     fprintf(stderr,
-            "usage: mojo_rs_oracle_driver <baseline|invite-broker|invite-acceptor> ...\n");
+            "usage: mojo_rs_oracle_driver <baseline|invite-broker|invite-acceptor|\n"
+            "       invite-broker-routing|invite-acceptor-routing|\n"
+            "       invite-broker-memory|invite-acceptor-memory> ...\n");
     return 2;
   }
   std::string command = argv[pos];
@@ -1801,7 +2115,8 @@ int main(int argc, char** argv) {
   }
 
   if (command == "invite-broker" || command == "invite-acceptor" ||
-      command == "invite-broker-routing" || command == "invite-acceptor-routing") {
+      command == "invite-broker-routing" || command == "invite-acceptor-routing" ||
+      command == "invite-broker-memory" || command == "invite-acceptor-memory") {
     // The transport channel runs on a dedicated IO thread with an IO message
     // pump (the pump registers the IOWatcher the channel requires).
     base::Thread io_thread("mojo-rs-oracle-io");
@@ -1839,6 +2154,24 @@ int main(int argc, char** argv) {
       }
       int socket_fd = atoi(pos_argv[2]);
       return invite::RunRoutingAcceptor(socket_fd, pos_argv[3]);
+    }
+    if (command == "invite-broker-memory") {
+      if (positional != 3) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-broker-memory <socket-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_fd = atoi(pos_argv[2]);
+      return invite::RunMemoryBroker(socket_fd, pos_argv[3]);
+    }
+    if (command == "invite-acceptor-memory") {
+      if (positional != 3) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-acceptor-memory <socket-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_fd = atoi(pos_argv[2]);
+      return invite::RunMemoryAcceptor(socket_fd, pos_argv[3]);
     }
     if (positional != 3) {
       fprintf(stderr,

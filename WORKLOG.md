@@ -738,3 +738,149 @@ Phase 7 mojom/bindings, concurrency/stress/fuzz sealing, other platforms.
 Per the directive's sequence: the remaining Phase 5 routing work
 (`RequestMemory`/`ProvideMemory`, then multi-node graphs) — or, per the
 user's earlier direction, Phase 6 (C ABI export) after the routing thread.
+
+## Cycle 2026-08-05 — Phase 5 memory court: parcel-fragment allocator seal + RequestMemory/ProvideMemory machinery
+
+### 1. What was actually implemented
+
+* **Generalized block allocator** (`crates/mojo-rs-interop/src/ipcz/link_memory.rs`):
+  - the primary buffer's fixed block regions for 64/256/512/1k/2k/4k are now
+    modeled (`PRIMARY_BLOCK_REGIONS`), with a CAS-based free-list pop
+    (`BlockAllocator::Allocate` port: `expected` refreshed from the observed
+    front header on every failed CAS) and push (`BlockAllocator::Free` port:
+    LIFO head insertion) over the shared 4-byte `BlockHeader {version, next}`;
+  - `try_allocate_fragment` (`AllocateFragment` port): ideal block size via
+    `GetBlockSizeForFragmentSize` (`max(64, bit_ceil)`), `lower_bound` pool
+    selection, active-allocator-first iteration (extras newest-first, then
+    the primary region);
+  - `AddBlockBuffer` support fixed on both sides: the receive side
+    (`add_block_buffer`) now adopts the descriptor at its real size
+    (`fstat`, via the new `SharedMemory::from_fd`) and registers the block
+    size, instead of the previous latent bug of mapping `block_size` bytes;
+    the send side (`register_block_buffer`) initializes the region
+    (`InitializeRegion` port) before sharing;
+  - `allocate_new_buffer_id` (shared-header atomic fetch-add),
+    `get_total_block_capacity` / `can_expand_block_capacity`,
+    `free_block`, and the general `write_parcel_fragment` (any block size,
+    FragmentHeader release publish).
+* **RequestMemory/ProvideMemory machinery** (`routing.rs`):
+  - `pending_memory_requests` FIFO per buffer size (the official
+    `pending_memory_requests_` map), `capacity_pending` (one in-flight
+    request per block size, the `need_new_request` semantics),
+    `request_block_capacity` (page-rounded buffer size), `on_provide_memory`
+    (adopt → `AllocateNewBufferId` → transmit `AddBlockBuffer` BEFORE local
+    registration, matching the official share-then-register order),
+    `pending_fragments` (deferred parcels whose fragment buffer has not
+    arrived — `WaitForParcelFragmentToResolve`), and `send_link_message_with_fds`;
+  - new encoders (`encode_request_memory`, `encode_provide_memory`,
+    `encode_add_block_buffer`, `encode_accept_parcel_full`) and a decoder fix
+    for `ProvideMemory`'s driver object; a `MessageBuilder::append_driver_objects`
+    fix for zero-byte objects (`driver_data_array = 0`, matching the mojo
+    driver's memfd serialization with no data bytes);
+  - the `ProvideMemory`/`RequestMemory` dispatch, and the `AddBlockBuffer`
+    dispatch now resolves deferred parcels.
+* **Parcel-fragment transmit** (`router.rs`, `routing.rs`): `Parcel` carries
+  an optional fragment descriptor; `put` allocates the parcel data at put
+  time based on the outward primary link (remote → shared-memory fragment,
+  local/absent → inline), matching `Router::AllocateOutboundParcel`; the
+  `encode_accept_parcel_arrays` fix (inline data array omitted when a
+  fragment is present — the official encodes one or the other, never both).
+* **Epoch discovery**: the pinned mojo embedder sets
+  `IPCZ_MEMORY_FIXED_PARCEL_CAPACITY` (`mojo/core/ipcz_api.cc`, TODO
+  crbug.com/40876289), so parcel-data-driven expansion is disabled; the
+  native mirrors this (`write_parcel_fragment_or_inline` falls back to
+  inline without lobbying).
+* **The memory court**: `invite-broker-memory` / `invite-acceptor-memory`
+  oracle-driver modes, the native `memory-acceptor` binary
+  (`RoutingAcceptor::run_memory`), and `scripts/run_memory_court.sh` — the
+  m0..m8 (200-byte parcels) / sync / transfer-back / w3 / m9-m10 scenario
+  that seals the fragment allocator and the LIFO free-list reuse.
+
+### 2. Which files changed
+
+`crates/mojo-rs-platform/src/shm.rs`, `crates/mojo-rs-interop/src/ipcz/{link_memory,router,routing,messages,wire}.rs`,
+`crates/mojo-rs-interop/src/ipcz/acceptor.rs` (AddBlockBuffer call-site fix),
+`crates/mojo-rs-interop/src/bin/memory-acceptor.rs` (new),
+`oracle/driver/oracle_driver.cc` + `oracle/patches/mojo-rs-oracle-driver.patch`
+(new memory modes), `scripts/run_memory_court.sh` (new),
+`courts/curated/phase5-memory-court.md` (new), `evidence/routing/WIRE-ANALYSIS.md`,
+`atlas/feature-matrix.json`, `STATUS.md`, this log.
+
+### 3. Compatibility claims now supported
+
+The native memory acceptor's parcel-fragment allocation, 256-byte pool
+exhaustion (inline fallback), and LIFO free-list reuse are byte-observable on
+the acceptor→broker wire and match the oracle baseline **byte-for-byte**
+(modulo node names and per-link sequence numbers): m0..m7 at offsets
+96256..98048, m8 inline, sync at 1152, transfer-back at 1280, m9 at 98048 and
+m10 at 97792. The broker's event streams are byte-identical. The
+`RequestMemory`/`ProvideMemory`/`AddBlockBuffer` round trip is implemented
+and unit-tested but not differentially triggered in this epoch (see §9).
+
+### 4. Which courts were run
+
+`scripts/run_memory_court.sh` (3+ consecutive PASS, wire-identical),
+`scripts/run_routing_court.sh` (PASS, broker events byte-identical),
+`scripts/run_court.sh system` (26/26), `scripts/verify_no_oracle_dependency.sh`
+(PASS), `scripts/verify_storage_layout.sh` (PASS).
+
+### 5. Exact pass/fail counts
+
+Memory court: 3/3 PASS. Routing court: 1/1 (post-change). System court: 26/26.
+Workspace tests: 155 passed, 0 failures (44 in mojo-rs-interop, including 6
+new allocator tests). Clippy: 0 errors. fmt: clean.
+
+### 6. New residuals and evidence paths
+
+`evidence/memory/<stamp>/` (baseline + interop events and wire captures;
+byte-identical broker streams; wire-identical acceptor→broker captures),
+`evidence/manifests/memory-<stamp>.json`.
+
+### 7. Every observed mismatch
+
+1. The first memory-court interop run timed out: the transfer-back message
+   was malformed (the inline data array was still appended when a fragment
+   was present, shifting the handle-types/new-routers array offsets).
+2. The initial m8-triggered-expansion court design was invalidated by the
+   epoch: the mojo embedder disables parcel-data expansion, so the baseline
+   produces NO `RequestMemory` traffic (m8 inline, m9/m10 reuse freed primary
+   blocks). The court was redesigned around the actual behavior.
+3. The `free_block` loop rejected freeing into an EMPTY free-list (front
+   pointing at block 0) — the official `is_index_valid` covers index 0.
+4. `try_allocate_fragment` tried the primary region before the extras; the
+   official `BlockAllocatorPool::Allocate` tries the active (newest) buffer
+   first.
+5. A `ProvideMemory` without exactly one descriptor and a stale
+   `can_expand_block_capacity` doc claim were corrected.
+
+### 8. Root cause of each fixed mismatch
+
+1. `encode_accept_parcel_arrays` computed `pd_off = 0` for a fragment-backed
+   parcel but still appended the inline array; fixed by gating the append on
+   the fragment being absent.
+2. Empirical epoch behavior (the embedder's `IPCZ_MEMORY_FIXED_PARCEL_CAPACITY`)
+   overrides the general ipcz semantics; the court now seals what the epoch
+   actually does.
+3. The free-list head can validly be block 0 (empty list); the freed block
+   becomes the new head.
+4. Pool iteration order follows the official active-first hint.
+5. Dispatch validation and doc accuracy.
+
+### 9. Remaining unsupported behavior
+
+The `RequestMemory`/`ProvideMemory`/`AddBlockBuffer` round trip is
+implemented and unit-tested but not oracle-compared: its only reachable
+trigger in this epoch is `RouterLinkState` pool exhaustion (1484 blocks),
+which requires the proxy-bypass machinery (`BypassPeer` outbound /
+`AcceptBypassLink` inbound) — the next Phase 5 gate. Also remaining per
+`STATUS.md`: `BypassPeer`/`AcceptBypassLink` outbound, multi-subparcel and
+split parcels, multi-node graphs, node loss beyond the single link; Phase 6 C
+ABI export, Phase 7 mojom/bindings, concurrency/stress/fuzz sealing, other
+platforms.
+
+### 10. Next highest-value parity gate
+
+The proxy-bypass machinery (`BypassPeer` outbound / inbound `AcceptBypassLink`)
+— the prerequisite for the `RouterLinkState`-exhaustion court that seals the
+`RequestMemory`/`ProvideMemory` round trip differentially — then multi-node
+graphs.

@@ -106,6 +106,41 @@ impl SharedMemory {
         Ok(SharedMemory { fd: owned, size })
     }
 
+    /// Adopt a descriptor whose size is not known a priori.
+    ///
+    /// The object size is taken from the descriptor itself (`fstat`); this is
+    /// the receive side of an ipcz `AddBlockBuffer`, whose buffer size is only
+    /// knowable from the descriptor (the message carries the block size, not
+    /// the buffer size). The descriptor is validated to be a seekable
+    /// shared-memory object of non-zero size.
+    pub fn from_fd(fd: RawFd) -> io::Result<SharedMemory> {
+        if fd < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "negative descriptor",
+            ));
+        }
+        // SAFETY: the caller transfers ownership of a valid descriptor.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: `st` is a zeroed, valid output buffer for `fstat`.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fd is owned and valid; `st` points to writable storage.
+        let rc = unsafe { sys::fstat(fd, &mut st) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if st.st_size <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "descriptor is not a non-empty shared-memory object",
+            ));
+        }
+        Ok(SharedMemory {
+            fd: owned,
+            size: st.st_size as usize,
+        })
+    }
+
     /// The size of the memory object.
     pub fn size(&self) -> usize {
         self.size

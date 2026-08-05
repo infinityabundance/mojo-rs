@@ -456,10 +456,16 @@ pub enum Object {
 pub struct Parcel {
     /// The parcel's sequence number on its route.
     pub sequence_number: u64,
-    /// The application payload.
+    /// The application payload. When `fragment` is set the payload lives in
+    /// the shared-memory fragment (the `data` copy is kept for verification
+    /// but is not transmitted); otherwise it is transmitted inline.
     pub data: Vec<u8>,
     /// Attached objects (handles).
     pub objects: Vec<Object>,
+    /// The shared-memory fragment holding the payload, when the parcel data
+    /// was allocated from the link memory at `Put` time (`Parcel::AllocateData`
+    /// with a remote outward link).
+    pub fragment: Option<crate::ipcz::messages::FragmentDescriptor>,
 }
 
 /// A sequenced queue with out-of-order buffering and an optional final length
@@ -972,6 +978,7 @@ mod tests {
             sequence_number: 0,
             data: b"x".to_vec(),
             objects: Vec::new(),
+            fragment: None,
         };
         assert!(router.accept_inbound(parcel));
         let collected = router.collect_bridge();

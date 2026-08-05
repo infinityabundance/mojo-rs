@@ -106,7 +106,22 @@
    ],
    "id": "routing",
    "name": "Multi-node routing and port transfer",
-   "note": "Phase 5 seal: the native routing acceptor implements the non-broker ipcz Router state machine (terminal/proxy routers, decaying links, sequenced parcel queues, closure propagation, WithLocalPeer deserialization, SerializeNewRouterAndConfigureProxy + BeginProxyingToNewRouter, AcceptBypassLink, StopProxying teardown, RouterLinkState TryLock/SetSideStable, and the full bridge chain: MergeRoute-equivalent setup, bridge-aware Flush/StopProxyingToLocalPeer/AcceptRouteClosureFrom, and MaybeStartBridgeBypass/StartBridgeBypassFromLocalPeer for all three cases). The acceptor-initiated bridge bypass is reproduced message-for-message (BypassPeerWithLink(1->14), FlushRouter(14), StopProxyingToLocalPeer(14, 0); transfer-back on sublink 15, descriptor new=16) and the official broker's event stream is byte-identical to the oracle-acceptor baseline; both processes exit 0. Not yet implemented: RequestMemory/ProvideMemory, multi-node graphs, multi-subparcel/split parcels, node loss beyond the single link. Reproduce: scripts/run_routing_court.sh",
+   "note": "Phase 5 seal: the native routing acceptor implements the non-broker ipcz Router state machine (terminal/proxy routers, decaying links, sequenced parcel queues, closure propagation, WithLocalPeer deserialization, SerializeNewRouterAndConfigureProxy + BeginProxyingToNewRouter, AcceptBypassLink, StopProxying teardown, RouterLinkState TryLock/SetSideStable, and the full bridge chain: MergeRoute-equivalent setup, bridge-aware Flush/StopProxyingToLocalPeer/AcceptRouteClosureFrom, and MaybeStartBridgeBypass/StartBridgeBypassFromLocalPeer for all three cases). The acceptor-initiated bridge bypass is reproduced message-for-message (BypassPeerWithLink(1->14), FlushRouter(14), StopProxyingToLocalPeer(14, 0); transfer-back on sublink 15, descriptor new=16) and the official broker's event stream is byte-identical to the oracle-acceptor baseline; both processes exit 0. Not yet implemented: multi-node graphs, multi-subparcel/split parcels, node loss beyond the single link, and the RequestMemory/ProvideMemory round trip (implemented and unit-tested, but its only reachable trigger in this epoch — RouterLinkState pool exhaustion — requires the proxy-bypass machinery, the next gate). Reproduce: scripts/run_routing_court.sh",
+   "status": "Oracle-compared"
+  },
+  {
+   "evidence": [
+    "evidence/memory/<stamp>/baseline/broker.events",
+    "evidence/memory/<stamp>/interop/broker.events",
+    "evidence/memory/<stamp>/interop/acceptor.events",
+    "evidence/memory/<stamp>/interop/wire/broker-to-acceptor.bin",
+    "evidence/memory/<stamp>/interop/wire/acceptor-to-broker.bin",
+    "evidence/manifests/memory-<stamp>.json",
+    "courts/curated/phase5-memory-court.md"
+   ],
+   "id": "routing.memory-expansion",
+   "name": "Parcel-fragment allocation and free-list reuse (memory court)",
+   "note": "Phase 5 memory court: the native memory-acceptor's parcel-fragment allocation, 256-byte pool exhaustion (inline fallback), and LIFO free-list reuse are byte-observable on the acceptor->broker wire and match the baseline byte-for-byte (modulo node names and per-link sequence numbers); the broker's event streams are byte-identical. The pinned mojo embedder sets IPCZ_MEMORY_FIXED_PARCEL_CAPACITY (crbug.com/40876289), disabling parcel-data expansion, so the RequestMemory/ProvideMemory/AddBlockBuffer round trip is implemented and unit-tested but not differentially triggered in this epoch (its only reachable trigger is RouterLinkState pool exhaustion, which requires the proxy-bypass machinery). Reproduce: scripts/run_memory_court.sh",
    "status": "Oracle-compared"
   },
   {

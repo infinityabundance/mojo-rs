@@ -845,6 +845,14 @@ pub fn decode_message(payload: &[u8], num_fds: usize) -> Result<DecodedMessage, 
             if fields_end < fields + 8 {
                 return Err(WireError::ShortParams);
             }
+            // V0: `{ size u32, buffer u32 }` — `buffer` is the index of the
+            // buffer's driver object in the message's driver-object array
+            // (exactly one object, at index 0).
+            let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            let buffer = f_u32(4)?;
+            if buffer != 0 || driver_objects.len() != 1 || driver_objects[0].first_fd != 0 {
+                return Err(WireError::BadDriverObjects);
+            }
             DecodedMessage::ProvideMemory(MemoryRequest { size: f_u32(0)? })
         }
         other => DecodedMessage::Unknown(other),
@@ -996,7 +1004,14 @@ fn encode_accept_parcel_arrays(
         let _ = elem;
         o
     };
-    let pd_off = next(data.len(), 1);
+    // The inline data array is only allocated when the data does NOT live in a
+    // shared-memory fragment (the official encoder leaves `parcel_data` null
+    // in that case; a receiver presented with both prefers the fragment).
+    let pd_off = if parcel_fragment.is_some() {
+        0
+    } else {
+        next(data.len(), 1)
+    };
     let ht_off = next(handle_types.len() * 4, 4);
     let nr_off = next(
         new_routers.iter().map(Vec::len).sum(),
@@ -1028,7 +1043,10 @@ fn encode_accept_parcel_arrays(
     fields.extend_from_slice(&0u32.to_le_bytes()); // first_object_index
     fields.extend_from_slice(&num_objects.to_le_bytes());
     b.append_params(&fields);
-    if !data.is_empty() {
+    // Inline parcel data is only appended when the data does not live in a
+    // shared-memory fragment (the official encoder allocates one or the
+    // other, never both).
+    if !data.is_empty() && parcel_fragment.is_none() {
         b.append_array(data, data.len() as u32);
     }
     if !handle_types.is_empty() {
@@ -1191,6 +1209,68 @@ pub fn encode_proxy_will_stop(sublink: u64, inbound_sequence_length: u64) -> Vec
     fields.extend_from_slice(&sublink.to_le_bytes());
     fields.extend_from_slice(&inbound_sequence_length.to_le_bytes());
     b.append_params(&fields);
+    b.build()
+}
+
+/// Encode an `AcceptParcel` with optional fragment-backed data and optional
+/// transferred portals (the general form; the fragment and the inline data
+/// array are mutually exclusive on the wire).
+pub fn encode_accept_parcel_full(
+    sublink: u64,
+    sequence_number: u64,
+    parcel_fragment: Option<FragmentDescriptor>,
+    data: &[u8],
+    handle_types: &[u32],
+    new_routers: &[Vec<u8>],
+    driver_data: &[Vec<u8>],
+) -> Vec<u8> {
+    encode_accept_parcel_arrays(
+        sublink,
+        sequence_number,
+        0,
+        1,
+        parcel_fragment,
+        data,
+        handle_types,
+        new_routers,
+        driver_data,
+    )
+}
+
+/// Encode `RequestMemory` (id 64): V0 `{ size u32, padding u32 }`.
+pub fn encode_request_memory(size: u32) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_REQUEST_MEMORY);
+    let mut fields = Vec::with_capacity(8);
+    fields.extend_from_slice(&size.to_le_bytes());
+    fields.extend_from_slice(&0u32.to_le_bytes()); // padding
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `ProvideMemory` (id 65): V0 `{ size u32, buffer u32 }` where
+/// `buffer` is the index of the buffer's driver object (0). The mojo driver
+/// serializes a memfd with zero data bytes; the descriptor travels with the
+/// message.
+pub fn encode_provide_memory(size: u32) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_PROVIDE_MEMORY);
+    let mut fields = Vec::with_capacity(8);
+    fields.extend_from_slice(&size.to_le_bytes());
+    fields.extend_from_slice(&0u32.to_le_bytes()); // buffer object index
+    b.append_params(&fields);
+    b.append_driver_objects(&[Vec::new()]);
+    b.build()
+}
+
+/// Encode `AddBlockBuffer` (id 14): V0 `{ id u64, block_size u32, buffer u32 }`
+/// with the buffer's driver object (one memfd, index 0).
+pub fn encode_add_block_buffer(id: u64, block_size: u32, buffer_index: u32) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_ADD_BLOCK_BUFFER);
+    let mut fields = Vec::with_capacity(16);
+    fields.extend_from_slice(&id.to_le_bytes());
+    fields.extend_from_slice(&block_size.to_le_bytes());
+    fields.extend_from_slice(&buffer_index.to_le_bytes());
+    b.append_params(&fields);
+    b.append_driver_objects(&[Vec::new()]);
     b.build()
 }
 

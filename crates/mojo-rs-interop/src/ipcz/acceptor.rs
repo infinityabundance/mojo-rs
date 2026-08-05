@@ -451,11 +451,8 @@ impl Acceptor {
                     .ok_or(AcceptorError::Unexpected("AddBlockBuffer missing buffer"))?
                     .try_dup()?;
                 let fd = fd.into_raw_fd();
-                self.memory_mut()?.add_block_buffer(
-                    b.buffer_id,
-                    fd,
-                    block_size_for(b.block_size),
-                )?;
+                self.memory_mut()?
+                    .add_block_buffer(b.buffer_id, fd, b.block_size)?;
                 Ok(())
             }
             DecodedMessage::AcceptParcel(p) => self.on_accept_parcel(p, msg.fds),
@@ -839,13 +836,7 @@ impl Acceptor {
     }
 }
 
-/// The block size backing an AddBlockBuffer (rounded to the block allocator
-/// granularity; the acceptor only uses the buffer for fragment storage).
-fn block_size_for(block_size: u32) -> usize {
-    // The buffer size must be a multiple of the block size; the driver object
-    // for AddBlockBuffer is the memfd itself (its size is authoritative).
-    block_size as usize
-}
+/// The block size backing an AddBlockBuffer.
 
 /// Parse the Connect greeting's link-memory driver object: a serialized
 /// `SharedBuffer` (ObjectHeader{8, type=1} + BufferHeader{32}).

@@ -195,8 +195,67 @@ Real bugs found and fixed during this cycle (each preserved in
   link before `MaybeFinishDecay`) — fixed with a regression test.
 
 Not yet implemented (documented scope boundary): `BypassPeer`/
-`AcceptBypassLink` outbound, `RequestMemory`/`ProvideMemory`, multi-subparcel
-and split parcels, multi-node graphs, and node loss beyond the single link.
+`AcceptBypassLink` outbound, multi-subparcel and split parcels, multi-node
+graphs, and node loss beyond the single link.
+
+### Phase 5 memory court — parcel-fragment allocation and free-list reuse
+
+The memory court (`scripts/run_memory_court.sh`) runs the official broker
+(`invite-broker-memory`) against the official oracle acceptor (baseline) and
+against the native Rust `memory-acceptor` (interop), both through the
+wire-relay man-in-the-middle:
+
+1. the broker transfers `B` through the bootstrap pipe and writes `w1` on `A`;
+2. the acceptor sends `m0..m8` (9 × 200-byte parcels) on `B'` — the primary
+   buffer's 256-byte block pool holds exactly 8 allocable blocks, so `m8`'s
+   fragment allocation fails and `m8` travels inline;
+3. the acceptor sends a `sync` marker; the broker reads `m0..m8` only after
+   receiving it, freeing the blocks (LIFO free-list);
+4. the acceptor sends the transfer-back; the broker extracts `B''` and does a
+   `w2` round trip, then sends `w3`;
+5. the acceptor sends `m9`/`m10` on the bootstrap — fragment-backed from the
+   **freed primary blocks** (m9 reuses block 8 at offset 98048, m10 reuses
+   block 7 at 97792);
+6. the broker reads `m9`/`m10`, then closes everything (`RouteClosed`
+   propagation).
+
+The equivalence relations, strongest first: the broker's event stream is
+BYTE-IDENTICAL between the baseline and the interop run; the acceptor→broker
+wire (decoded by `wire-dump`, normalized only for node names and per-link
+sequence numbers) is IDENTICAL — including every fragment descriptor and
+offset; all four processes exit 0. The court has passed repeatedly
+(3+ consecutive runs).
+
+The native now allocates parcel data into shared-memory fragments at put time
+(remote primary link) exactly like the oracle — the earlier routing-court
+normalization "the oracle fragments, the native inlines" is obsolete for the
+acceptor's parcels. One residual remains there: the 64-byte free-list
+interleaving can differ by one block (baseline r1 at 1152 vs interop r1 at
+1280 in the routing court) because the native does not free a bypassed link's
+`RouterLinkState` when its decay completes (the official frees it). The
+offset difference is allocation-order dependent and normalized; the memory
+court's 64-block allocations matched exactly because the preceding allocation
+order coincided.
+
+**Epoch discovery**: the pinned mojo embedder sets
+`IPCZ_MEMORY_FIXED_PARCEL_CAPACITY` (`mojo/core/ipcz_api.cc`, TODO
+crbug.com/40876289), so `allow_memory_expansion_for_parcel_data_` is false:
+parcel-data-driven block-capacity expansion is DISABLED in this epoch (the
+baseline confirms — no `RequestMemory`/`ProvideMemory`/`AddBlockBuffer`
+traffic appears). The native mirrors this: `write_parcel_fragment_or_inline`
+falls back to inline data without lobbying. The `RequestMemory` send path
+(`pending_memory_requests_` FIFO), the `ProvideMemory` receive path
+(share-then-register ordering), `AddBlockBuffer` in both directions, and the
+shared-header buffer-id allocation are implemented and unit-tested, but no
+sealed court triggers them in this epoch: the only reachable trigger is
+`RouterLinkState` pool exhaustion (the unconditional lobby in
+`TryAllocateRouterLinkState`, 1484 blocks), which requires the proxy-bypass
+machinery (`BypassPeer` outbound / `AcceptBypassLink` inbound) — the next
+Phase 5 gate, which the exhaustion court will seal.
+
+Evidence: `evidence/memory/<stamp>/` (events, wire captures, byte-identical
+broker streams), `evidence/manifests/memory-<stamp>.json`, and the casefile
+`courts/curated/phase5-memory-court.md`.
 
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
@@ -260,11 +319,14 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 
 - Routing / port transfer (Phase 5): the remaining portal state machines —
   `BypassPeer`/`AcceptBypassLink` outbound, node loss (`RouteDisconnected`)
-  beyond the single-link case, `RequestMemory`/`ProvideMemory`, multi-node
-  graphs, and portal transfer under load. The native routing acceptor
-  currently seals the WithLocalPeer transfer, the proxy serialization path,
-  the acceptor-initiated bridge bypass (both directions), `StopProxying`
-  teardown, and closure propagation over a single NodeLink.
+  beyond the single-link case, the `RequestMemory`/`ProvideMemory` round trip
+  (implemented and unit-tested; its only reachable trigger in this epoch is
+  `RouterLinkState` pool exhaustion, which requires the proxy-bypass
+  machinery), multi-node graphs, and portal transfer under load. The native
+  routing acceptor currently seals the WithLocalPeer transfer, the proxy
+  serialization path, the acceptor-initiated bridge bypass (both directions),
+  `StopProxying` teardown, closure propagation over a single NodeLink, and
+  the parcel-fragment allocator (memory court).
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 
@@ -283,6 +345,10 @@ written reason here.
 - `scripts/run_routing_court.sh` — Phase 5 routing seal (official broker ⇄
   native routing acceptor; portal transfer in both directions + proxy bypass;
   byte-identical broker events).
+- `scripts/run_memory_court.sh` — Phase 5 memory court (official broker ⇄
+  native memory acceptor; parcel-fragment allocation, pool exhaustion,
+  free-list reuse; byte-identical broker events + wire-identical
+  acceptor→broker captures).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

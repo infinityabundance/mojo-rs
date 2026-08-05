@@ -1332,3 +1332,102 @@ broker/referrer roles and the introduction machinery (ids 10–13), or the
 native broker side of a referral (Rust referrer A → C++ oracle B), which
 reuses the entire wire layer. After that the directive sequence continues at
 Phase 6 (C ABI export).
+
+## Cycle 2026-08-05 — Phase 5 multi-node referral court: the native referrer A (second mixed-language pairing)
+
+### 1. What was actually implemented
+
+* The referrer role (`RoutingAcceptor::run_3node_a` + the `3node-referrer`
+  binary): the native node A — the Connect handshake WITHOUT the
+  shared-memory client send (the official referrer transmits `ReferNonBroker`
+  first), the `ReferNonBroker` send with the 16-byte `Transport` object,
+  `NonBrokerReferralAccepted` acceptance (A↔B link adoption,
+  `EstablishWaitingRouters` on the referrer link, the service portal 0 and the
+  a2b attachment bridge on portal 1), the transfer-y receipt, the re-transfer
+  with `proxy_peer_node_name` = the broker, the un-consumed `hello`
+  forwarding, and the acceptor-side bootstrap bridge bypass with the
+  waiting-bit wakeup.
+* `scripts/run_3node_court.sh` now runs THREE configurations: baseline (all
+  official), interop-b (native B), and interop-a (native A), comparing the
+  broker's and the counterpart node's event streams byte-identically plus the
+  structural wire comparison for both pairings.
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/{routing,router,messages,link_memory}.rs`,
+`crates/mojo-rs-interop/src/bin/{3node-referrer,wire-relay,wire-dump}.rs`,
+`scripts/run_3node_court.sh`, `courts/curated/phase5-multinode-court.md`,
+`STATUS.md`, `atlas/feature-matrix.json`, `WORKLOG.md`.
+
+### 3. Compatibility claims now supported
+
+Both mixed-language pairings of the multi-node referral court are sealed:
+the native B is wire-indistinguishable from the official B, and the native A
+from the official A. The broker's and the counterpart node's event streams
+are byte-identical in both pairings; all four captured wire directions are
+structurally identical. All sealed courts continue to pass (system 26/26,
+routing, memory, exhaust, interop, invite, bypass, 3node); 161 workspace
+tests pass.
+
+### 4. Courts run
+
+`run_court.sh system` (26/26), `run_routing_court.sh`, `run_memory_court.sh`,
+`run_exhaust_court.sh`, `run_interop_court.sh`, `run_invite_court.sh`,
+`run_bypass_court.sh`, `run_3node_court.sh` (both pairings) — all PASS.
+
+### 5–8. Residuals, mismatches, root causes, fixes
+
+1. **`encode_transport_object` 20 vs 16 bytes**: a spurious
+   `TransportHeader.size` field made the `ReferNonBroker` transport object
+   unreadable (the broker's `OnReferNonBroker` silently dropped the referral);
+   the official `TransportHeader` is `{destination_type u32, 4 flag bytes}`.
+2. **Referrer send order**: the official referrer transmits `ReferNonBroker`
+   (seq 0) BEFORE the shared-memory client handshake (seq 1); the Connect
+   handshake for the referrer skips the client send.
+3. **Bypass lock source**: `serialize_router` recorded only the low half of
+   the broker's name in `allowed_bypass_request_source`; the broker's
+   `CanNodeRequestBypass` compares the full 16-byte NodeName, so the referred
+   node's `AcceptBypassLink` would be rejected. The lock now records the
+   serialization TARGET's full name (`remote_name_for(link_id)`), and
+   `write_allowed_bypass_source`/`read_allowed_bypass_source` handle the full
+   NodeName.
+4. **Per-link memory scope**: `put`'s payload-fragment allocation and
+   `serialize_router`'s sublink allocation used the broker memory; the a2b
+   chain's collapse made the attachment's outward remote, so the transfer-y2b
+   fragment was allocated from the wrong buffer (B received an empty payload).
+   Both now use the target link's memory; `transmit_parcel` sends on the
+   link's own channel.
+5. **The un-consumed `hello`**: the forwarded parcel was delivered to the
+   terminal portal and lost when Y' became a proxy; the official's app never
+   reads it. The keep-queued flush (a `process_accept_parcel_keep_queued`
+   variant) leaves it in the route's queue, so the descriptor's
+   `next_incoming_sequence_number` stays at the unconsumed count and the
+   proxy forwards it.
+6. **`GetCurrentSequenceLength`**: the native counted only the popped span;
+   the official advances at append (contiguous pushed span). The decay checks
+   (and the side-B stable marks that unblock the re-transfer's bypass lock)
+   depend on it.
+7. **The bootstrap bridge bypass / closure**: the native A's bypass flush
+   could not fire the waiting-bit wakeup (no decay completes in it), so the
+   broker's second-stage bypass stalled and the pipe_a closure never arrived;
+   a forced attachment flush after the stable marks sends the `FlushRouter`
+   wakeup. The closure predicate is evaluated per message because the bypass
+   migrates the attachment's sublink.
+8. **`bootstrap_rid` overwrite**: the a2b bridge setup reassigned the shared
+   `bootstrap_rid`; the referrer saves/restores the pipe_a attachment identity.
+
+### 9. Remaining unsupported behavior
+
+Per `STATUS.md`: `BypassPeer` outbound over a newly `EstablishLink`-ed link,
+`BypassPeerWithNewLocalLink`, the broker-side referral roles, introductions
+(ids 10–13), broker-to-broker connect, node loss beyond a single link,
+multi-node graphs beyond one referral, split/multi-subparcel parcels; Phase 6
+C ABI export, Phase 7 mojom/bindings, stress/fuzz, other platforms.
+
+### 10. Next highest-value parity gate
+
+The introduction machinery (ids 10–13: `RequestIntroduction`,
+`AcceptIntroduction`, `RejectIntroduction`, `RequestIndirectIntroduction`) —
+the `EstablishLink` path for `BypassPeer` when the bypass target has no direct
+link — and the broker-side referral roles. After that the directive sequence
+continues at Phase 6 (C ABI export).

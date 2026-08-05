@@ -1,16 +1,20 @@
-# Casefile: Phase 5 multi-node referral court — broker + referrer A + referred B, outbound AcceptBypassLink
+# Casefile: Phase 5 multi-node referral court — broker + referrer A + referred B, outbound AcceptBypassLink (both mixed-language pairings)
 
 **Case id**: ROUTING.MULTI_NODE.001
 **Court**: 3node
 **Reference**: Chromium `151.0.7922.105` (`bfa3579138998e2fbb981725570fa588c5b6f8cd`)
-**Status**: sealed — the referred node B (the native `3node-acceptor`) completes
-the full referral handshake, the broker↔B link adoption, the referrer (A↔B)
-link adoption with its initial portals, the re-transfer of a portal through the
-b2a pipe, the **outbound** `AcceptBypassLink` (`Router::BypassPeer` →
-`BypassPeerWithNewRemoteLink`), and the X↔Y' round trip ("hello"/"world"). The
-broker's and A's event streams are byte-identical to the all-official baseline;
-all four captured wire directions are structurally identical (node-name GUIDs
-normalized).
+**Status**: sealed — BOTH mixed-language pairings run against the all-official
+baseline: (a) interop-b: official broker + official referrer A + native
+referred B (`3node-acceptor`); (b) interop-a: official broker + native
+referrer A (`3node-referrer`) + official referred B. The native node
+completes the full referral handshake, the broker/referrer link adoptions
+with their initial portals, the re-transfer of a portal through the b2a/a2b
+pipe, the **outbound** `AcceptBypassLink` (`Router::BypassPeer` →
+`BypassPeerWithNewRemoteLink`) or the **referrer** serialization
+(`proxy_peer_node_name` = the broker), and the X↔Y' round trip
+("hello"/"world"). In both pairings the broker's AND the counterpart node's
+event streams are byte-identical to the baseline, and all four captured wire
+directions are structurally identical (node-name GUIDs normalized).
 
 ## Preconditions
 
@@ -75,7 +79,7 @@ The oracle B's event stream (the reference for the native's op sequence):
 message("hello"), result("world"), message(peer closure, FAILED_PRECONDITION),
 close result, lifecycle.
 
-## Candidate behavior (interop)
+## Candidate behavior (interop-b — native B)
 
 The native `3node-acceptor` implements `NodeConnectorForReferredNonBroker` +
 `Invitation::Accept` (INHERIT_BROKER):
@@ -103,16 +107,58 @@ The native `3node-acceptor` implements `NodeConnectorForReferredNonBroker` +
   link's received length), then `RouteClosed(12, 1)` → peer closure;
 - closes b2a and Y'' locally.
 
+## Candidate behavior (interop-a — native A)
+
+The native `3node-referrer` implements the referrer role
+(`NodeConnectorForReferrer` + `Invitation::Send` with SHARE_BROKER):
+
+- the Connect handshake WITHOUT the shared-memory client handshake (the
+  official referrer transmits `ReferNonBroker` before the client parcel:
+  baseline wire seq 0 = ReferNonBroker, seq 1 = the client parcel);
+- `ReferNonBroker{referral_id=0, num_initial_portals=2, transport}` with the
+  referral transport endpoint boxed as a 16-byte `Transport` object
+  (`ObjectHeader{size=8, type=kTransport}` + `TransportHeader{destination_type=
+  kNonBroker, ...}` — the far end is the referred node);
+- `NonBrokerReferralAccepted` acceptance: the A<->B link adoption (transport +
+  buffer driver objects), `EstablishWaitingRouters` on the A<->B link (side A;
+  the service portal 0 + the a2b attachment bridge on portal 1), and the
+  side-A stable marks;
+- the transfer-y receipt over pipe_a, and the re-transfer of Y' through the
+  a2b pipe with `proxy_peer_node_name` = the broker and
+  `proxy_peer_sublink` = A's Y' outward sublink (12): the bypass lock records
+  the FULL `NodeName` of the serialization target (the broker's
+  `CanNodeRequestBypass` validates it against the shared state), so B's
+  `AcceptBypassLink` is accepted by the broker and the proxy chain collapses
+  exactly like the baseline;
+- the forwarded `hello` is accepted without the terminal portal delivery (the
+  official's app never reads it): it stays in the route's inbound queue, the
+  descriptor's `next_incoming_sequence_number` stays at the unconsumed count,
+  the sub-13 decay (and the side-B stable mark on sub 12) complete in its
+  flush, and the proxy's flush forwards it to B;
+- the bootstrap route's bridge bypass is initiated by this side (the
+  `mark_bootstrap_link_stable` + flush after the transfer), collapsing the
+  chain; the attachment's forced flush fires the waiting-bit wakeup
+  (`FlushRouter`), so the broker's second-stage bypass completes and the
+  pipe_a closure (`RouteClosed`) arrives on the migrated sublink.
+
+The a-to-broker wire reproduces the baseline's full sequence
+(`ConnectReply`, `ReferNonBroker`, shared-memory client + `RouteClosed(0,1)`,
+`BypassPeerWithLink(1→14)`, `FlushRouter(14)`,
+`StopProxyingToLocalPeer(14, out_len)`, ...), and the broker-to-a wire ends
+with `StopProxyingToLocalPeer(1,1)`, `BypassPeerWithLink(14→15)`,
+`StopProxying(12,1,0)`, `RouteClosed(15,1)` — byte-identical message
+structures to the baseline.
+
 ## Equivalence relations
 
-1. The broker's event stream is **byte-identical** between the baseline and the
-   interop run (it cannot distinguish the native B from the official one).
-2. A's event stream is **byte-identical** between the two runs.
+1. The broker's event stream is **byte-identical** between the baseline and each
+   interop run (it cannot distinguish the native node from the official one).
+2. In interop-b, A's event stream is **byte-identical**; in interop-a, B's is.
 3. All four captured wire directions are **structurally identical** (decoded
    message sequences, message ids, sequence numbers, sublinks, fragment
    descriptors `{0,1088,64}` / `{0,1152,64}`, handle counts) modulo the
    node-name GUIDs, which are normalized.
-4. The native B verifies the transfer payload (`transfer-y2b`), the `hello`
+4. The native node verifies the transfer payload (`transfer-y2b`), the `hello`
    payload, delivers `world`, and observes peer closure (exit 0).
 
 ## Normalizers
@@ -137,5 +183,34 @@ The native `3node-acceptor` implements `NodeConnectorForReferredNonBroker` +
   already did); without it, the broker's subsequent parcels on sublink 12 would
   be classified "parcel for unbound sublink".
 - `LINK_MEMORY.SCOPE.PER_LINK_FRAGMENTS`: parcel fragments are resolved against
-  the link they arrived on (`memory_for(link_id)`) — each NodeLink has its own
-  primary buffer with its own buffer id 0.
+  the link they arrived on (`memory_for(link_id)`) and payload fragments are
+  allocated from the link they will be transmitted on (`put`'s
+  `write_parcel_fragment_or_inline` now takes the target link) — each NodeLink
+  has its own primary buffer with its own buffer id 0.
+- `REFERRER.ORDERING.REFER_BEFORE_CLIENT`: the referrer transmits
+  `ReferNonBroker` before the shared-memory client handshake (baseline wire:
+  ReferNonBroker seq 0, client seq 1); the Connect handshake for the referrer
+  role skips the client send, which follows the referral.
+- `REFERRER.ALLOWED_BYPASS_SOURCE.FULL_NAME`: the bypass lock records the FULL
+  16-byte `NodeName` of the serialization target
+  (`RouterLinkState::allowed_bypass_request_source` is a NodeName); the broker's
+  `CanNodeRequestBypass` validates it, so a truncated (low-half-only) write
+  would reject the referred node's `AcceptBypassLink` and leave the proxy
+  chain intact.
+- `REFERRER.UNCONSUMED_HELLO`: the forwarded `hello` is accepted WITHOUT the
+  terminal portal delivery (the official's app never reads it), so the
+  descriptor's `next_incoming_sequence_number` stays at the unconsumed count
+  and the parcel remains in the route's queue for the proxy to forward.
+- `QUEUE.LENGTH.CONTIGUOUS_PUSHED`: `GetCurrentSequenceLength` counts the
+  contiguous PUSHED span (popped count + buffered run), not just the popped
+  count — the official's `SequencedQueue::MaybeAdvanceCurrent` advances at
+  append, and the decay checks depend on it (the side-B stable mark on the
+  transferred link's state completes in the same flush as the parcel that
+  triggers it).
+- `TRANSMIT.PARCEL.PER_LINK_CHANNEL`: `transmit_parcel` sends over the link's
+  own channel (`send_link_message_on(link.link_id, ...)`) — a parcel on the
+  A<->B link must not ride the broker channel.
+- `CLOSURE.WAIT.MIGRATING_SUBLINK`: the pipe_a closure arrives on the
+  attachment's CURRENT primary sublink (the bootstrap bridge bypass and the
+  broker's second stage migrate it), so the closure predicate is evaluated per
+  message rather than captured once.

@@ -1,0 +1,4 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"result","op_id":2,"result":"MOJO_RESULT_OK","seq":3}
+{"event":"message","handles":1,"op_id":3,"payload_hex":"","result":"MOJO_RESULT_OK","seq":4}

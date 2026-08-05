@@ -113,6 +113,10 @@ impl std::error::Error for RoutingError {}
 /// The negotiated initial portal count (max attachments + 1 internal portal,
 /// matching the official invitation acceptance).
 const ACCEPTOR_INITIAL_PORTALS: u32 = 8;
+/// The initial portal count the referrer assumes for the A<->B link (one
+/// attachment + the internal portal, matching `Invitation::Send`'s
+/// `num_attachments_ + 1`).
+const REFERRER_INITIAL_PORTALS: u32 = 2;
 /// The bootstrap pipe sublink (initial portal 1).
 const BOOTSTRAP_SUBLINK: u64 = 1;
 /// Router identities for local-only routers (bridge-chain routers have no
@@ -157,6 +161,23 @@ pub struct RoutingAcceptor {
     /// The shared-memory-service client transport's local endpoint (held for
     /// the process lifetime, matching the official `Broker` client).
     shm_client_fd: Option<OwnedFd>,
+    /// The referral transport endpoint (the referrer role's socket-b fd),
+    /// boxed into `ReferNonBroker` and handed to the broker.
+    referral_transport: Option<OwnedFd>,
+    /// Driver objects received in parcels (e.g. the referred node's shared
+    /// memory client transport), held for the process lifetime.
+    held_driver_fds: Vec<OwnedFd>,
+    /// The waiting routers of the referral (`EstablishWaitingRouters`): the
+    /// A<->B link's initial portals before `NonBrokerReferralAccepted`.
+    waiting_routers: Vec<u64>,
+    /// The a2b attachment router (the referrer's bootstrap pipe to B).
+    a2b_rid: Option<u64>,
+    /// Whether the broker's `NonBrokerReferralAccepted` was processed.
+    referral_reply_seen: bool,
+    /// Suppress the terminal portal delivery for one flush (a parcel that
+    /// must remain in the inbound queue for forwarding when the router
+    /// becomes a proxy).
+    keep_queued_flush: bool,
     /// The next identity for local-only routers.
     next_rid: u64,
     /// In-flight `RequestMemory` requests by buffer size, FIFO per size
@@ -220,6 +241,12 @@ impl RoutingAcceptor {
             local_name: NodeName::invalid(),
             bootstrap_rid: 0,
             shm_client_fd: None,
+            referral_transport: None,
+            held_driver_fds: Vec::new(),
+            waiting_routers: Vec::new(),
+            a2b_rid: None,
+            referral_reply_seen: false,
+            keep_queued_flush: false,
             next_rid: LOCAL_RID_BASE,
             pending_memory_requests: HashMap::new(),
             capacity_pending: HashSet::new(),
@@ -227,6 +254,17 @@ impl RoutingAcceptor {
             events: Vec::new(),
             event_seq: 0,
         })
+    }
+
+    /// Start the referrer role (`invite-node-a-3node`): the broker link on
+    /// `fd` plus the referral transport endpoint `referral_fd` (boxed into
+    /// `ReferNonBroker` for the broker).
+    pub fn new_referrer(fd: RawFd, referral_fd: RawFd) -> Result<RoutingAcceptor, RoutingError> {
+        let mut acceptor = RoutingAcceptor::new(fd)?;
+        // SAFETY: the caller transferred ownership of the inherited referral
+        // endpoint fd; no other owner exists.
+        acceptor.referral_transport = Some(unsafe { OwnedFd::from_raw_fd(referral_fd) });
+        Ok(acceptor)
     }
 
     /// Emit an event.
@@ -255,12 +293,19 @@ impl RoutingAcceptor {
 
     /// Emit a `message` event with a payload and handle count.
     fn emit_message(&mut self, op_id: u64, payload: &[u8], handles: usize) {
+        self.emit_message_result(op_id, payload, handles, "MOJO_RESULT_OK")
+    }
+
+    /// Emit a `message` event with a payload, handle count, and result (the
+    /// oracle's `RecvPayload` at peer closure reports the stale payload
+    /// buffer).
+    fn emit_message_result(&mut self, op_id: u64, payload: &[u8], handles: usize, result: &str) {
         self.event_seq += 1;
         self.events.push(Event {
             seq: self.event_seq,
             op_id,
             event: EventKind::Message,
-            result: "MOJO_RESULT_OK".to_string(),
+            result: result.to_string(),
             handle: None,
             payload_hex: Some(hex::encode(payload)),
             handles: Some((0..handles).map(|i| format!("h{i}")).collect()),
@@ -1059,6 +1104,32 @@ impl RoutingAcceptor {
 
     /// Complete the Connect handshake and establish the initial portals.
     fn connect(&mut self) -> Result<(), RoutingError> {
+        self.connect_handshake()?;
+        // The internal portal 0 carries the shared-memory-service client
+        // handshake (`BaseSharedMemoryService::CreateClient`): a boxed
+        // Transport endpoint is `Put` on portal 0, then the portal closes.
+        // Reproduced byte-exactly (golden fixture `acceptor-to-broker.bin`
+        // messages 1-2) so the routing wire capture matches the baseline.
+        //
+        // NOTE on the referrer role: the official referrer transmits its
+        // `ReferNonBroker` greeting BEFORE the client handshake (the wire
+        // shows seq 0 = ReferNonBroker, seq 1 = the client parcel), so the
+        // client send is deferred there (`connect_without_shm`).
+        self.send_shared_memory_client()?;
+        self.connect_finalize()?;
+        Ok(())
+    }
+
+    /// The Connect handshake without the shared-memory client handshake (the
+    /// referrer role defers it until after the `ReferNonBroker` greeting).
+    fn connect_without_shm(&mut self) -> Result<(), RoutingError> {
+        self.connect_handshake()?;
+        self.connect_finalize()
+    }
+
+    /// The Connect handshake: receive the broker's greeting, adopt the link
+    /// memory, reply, and establish the initial portals.
+    fn connect_handshake(&mut self) -> Result<(), RoutingError> {
         let msg = self
             .channel
             .recv()?
@@ -1104,23 +1175,24 @@ impl RoutingAcceptor {
             self.owners.insert((LINK_ID_BROKER, sublink), sublink);
             self.routers.insert(sublink, router);
         }
-        // The internal portal 0 carries the shared-memory-service client
-        // handshake (`BaseSharedMemoryService::CreateClient`): a boxed
-        // Transport endpoint is `Put` on portal 0, then the portal closes.
-        // Reproduced byte-exactly (golden fixture `acceptor-to-broker.bin`
-        // messages 1-2) so the routing wire capture matches the baseline.
-        self.send_shared_memory_client()?;
-        // `Invitation::Accept` then merges each attachment slot onto its
-        // initial portal (`OpenPortals` + `MergePortals(portals[i+1],
-        // bridge)`). The bootstrap pipe (initial portal 1) therefore becomes a
-        // three-router bridge chain:
-        //
-        //   attachment (app-facing) ⟷ R_bridge ⟷ [bridge edge] ⟷ R_remote ⟷
-        //   [NodeLink sublink 1] ⟷ broker
-        //
-        // The broker's end mirrors the chain, so both ends independently run
-        // bridge bypass (`MaybeStartBridgeBypass`) to collapse it.
-        //
+        self.connect_finalize()?;
+        Ok(())
+    }
+
+    /// The Connect-handshake tail shared by both roles: the bootstrap
+    /// attachment bridge on the initial portal 1 and the initial flush.
+    ///
+    /// `Invitation::Accept` merges each attachment slot onto its initial
+    /// portal (`OpenPortals` + `MergePortals(portals[i+1], bridge)`). The
+    /// bootstrap pipe (initial portal 1) therefore becomes a three-router
+    /// bridge chain:
+    ///
+    ///   attachment (app-facing) ⟷ R_bridge ⟷ [bridge edge] ⟷ R_remote ⟷
+    ///   [NodeLink sublink 1] ⟷ broker
+    ///
+    /// The broker's end mirrors the chain, so both ends independently run
+    /// bridge bypass (`MaybeStartBridgeBypass`) to collapse it.
+    fn connect_finalize(&mut self) -> Result<(), RoutingError> {
         // NOTE on the side-B stable marks: the official non-broker marks its
         // initial links stable when the Connect handshake completes. The
         // baseline wire shows the oracle acceptor *winning* the sub-1 bypass
@@ -1130,12 +1202,14 @@ impl RoutingAcceptor {
         // that observable ordering by marking the initial links stable at the
         // same point in the exchange (just before the first parcel arrives),
         // not at Connect time.
-        self.setup_bootstrap_bridge()?;
+        self.setup_bootstrap_bridge(BOOTSTRAP_SUBLINK)?;
         self.router_flush(BOOTSTRAP_SUBLINK, false)?;
         Ok(())
     }
 
     /// Mark this side stable on the initial portal links of the given NodeLink
+    /// (the official `SetOutwardLink`'s `MarkSideStable` for the initial
+    /// routers, side B). Timed to match the oracle's observable ordering: on
     /// (the official `SetOutwardLink`'s `MarkSideStable` for the initial
     /// routers, side B). Timed to match the oracle's observable ordering: on
     /// the broker link, after the broker has processed the Connect reply (so
@@ -1158,6 +1232,21 @@ impl RoutingAcceptor {
             };
             self.memory_for(link_id)?.set_side_stable(state, false)?;
         }
+        Ok(())
+    }
+
+    /// Mark this side stable on the bootstrap portal's link only (portal 1).
+    /// The shared-memory client portal (portal 0) is not marked: the official
+    /// service portal's closure behavior on this node differs from the
+    /// routing courts' (the client handshake is transmitted after the
+    /// referral), and marking it would elicit a spurious `RouteClosed(0, 0)`.
+    fn mark_bootstrap_link_stable(&mut self) -> Result<(), RoutingError> {
+        let state = FragmentDescriptor {
+            buffer_id: 0,
+            offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(1) as u32,
+            size: ROUTER_LINK_STATE_SIZE as u32,
+        };
+        self.memory()?.set_side_stable(state, false)?;
         Ok(())
     }
 
@@ -1280,7 +1369,7 @@ impl RoutingAcceptor {
         // Step 5: the shared-memory client on portal 0, and the bootstrap
         // attachment bridge on portal 1.
         self.send_shared_memory_client_on(LINK_ID_DIRECT)?;
-        self.setup_bootstrap_bridge()?;
+        self.setup_bootstrap_bridge(BOOTSTRAP_SUBLINK)?;
         // Side-B stable marks on the referrer link's initial portals
         // (`SetOutwardLink`'s `MarkSideStable` at establishment).
         self.mark_initial_links_stable_on(LINK_ID_DIRECT)?;
@@ -1391,17 +1480,304 @@ impl RoutingAcceptor {
         Ok(())
     }
 
+    /// The referrer's referral send (`NodeConnectorForReferrer::Connect` +
+    /// `Invitation::Send` with `SHARE_BROKER`): the native node A refers B to
+    /// its broker.
+    ///
+    /// A's invitation-2 has one attachment (the a2b pipe), so the A<->B link
+    /// assumes two initial portals (the internal portal 0 + the a2b
+    /// attachment portal 1). The referral transport's far end is the referred
+    /// node (destination `kNonBroker`); the endpoint fd travels inside the
+    /// message. The two waiting routers receive their outward links when the
+    /// broker's `NonBrokerReferralAccepted` arrives.
+    fn referral_send(&mut self) -> Result<(), RoutingError> {
+        let referral_fd = self
+            .referral_transport
+            .as_ref()
+            .ok_or(RoutingError::Unexpected("no referral transport"))?;
+        let obj = messages::encode_transport_object(1); // destination kNonBroker
+        let msg = messages::encode_refer_non_broker(0, REFERRER_INITIAL_PORTALS, obj);
+        self.send_link_message_with_fds(msg, &[referral_fd.as_raw_fd()])?;
+        // The referral consumes the transport endpoint (the official connector
+        // `TakeDriverObject`s it into the message).
+        self.referral_transport = None;
+
+        // The waiting routers for the A<->B link. The broker link's initial
+        // portals already occupy rids 0/1, so these get LOCAL identities.
+        let service_rid = self.next_rid;
+        self.next_rid += 1;
+        let a2b_remote_rid = self.next_rid;
+        self.next_rid += 1;
+        self.routers.insert(service_rid, Router::bare());
+        self.routers.insert(a2b_remote_rid, Router::bare());
+        self.waiting_routers = vec![service_rid, a2b_remote_rid];
+        Ok(())
+    }
+
+    /// `AcceptConnection({.link = referrer_link, .broker = broker_link},
+    /// num_remote_portals)` on the referrer: adopt the A<->B link from the
+    /// `NonBrokerReferralAccepted` driver objects (transport + buffer) and
+    /// establish the waiting routers on it. Portal 0 is the shared-memory
+    /// SERVICE portal (it waits for the referred node's client handshake);
+    /// portal 1 carries the a2b attachment bridge.
+    fn on_non_broker_referral_accepted(
+        &mut self,
+        a: messages::NonBrokerReferralAccepted,
+        fds: Vec<OwnedFd>,
+    ) -> Result<(), RoutingError> {
+        if self.referral_reply_seen {
+            return Err(RoutingError::BadParcel("duplicate referral reply"));
+        }
+        if a.num_initial_portals > MAX_INITIAL_PORTALS as u32 {
+            return Err(RoutingError::BadParcel("excessive initial portals"));
+        }
+        let transport_fd = fds
+            .get(a.transport_index as usize)
+            .ok_or(RoutingError::BadParcel(
+                "referrer transport index out of range",
+            ))?
+            .try_dup()?;
+        let buffer_fd = fds
+            .get(a.buffer_index as usize)
+            .ok_or(RoutingError::BadParcel(
+                "referrer buffer index out of range",
+            ))?
+            .try_dup()?;
+
+        self.referrer_name = a.name;
+        let direct_channel = Channel::adopt(transport_fd.into_raw_fd())?;
+        let direct_memory = LinkMemory::adopt_primary(buffer_fd.into_raw_fd())?;
+        self.direct = Some(DirectLink {
+            channel: direct_channel,
+            memory: direct_memory,
+            remote_name: a.name,
+            next_link_seq: 0,
+        });
+
+        // `EstablishWaitingRouters(referrer_link, min(num_remote, waiting))`:
+        // the waiting routers get outward links on the A<->B link (side A,
+        // initial link states).
+        let service_rid = self.waiting_routers[0];
+        let a2b_remote_rid = self.waiting_routers[1];
+        self.waiting_routers.clear();
+        let num_valid = (a.num_initial_portals as usize).min(MAX_INITIAL_PORTALS);
+        for i in 0..num_valid {
+            let rid = match i {
+                0 => service_rid,
+                1 => a2b_remote_rid,
+                _ => break, // surplus waiting routers do not exist
+            };
+            let sublink = i as u64;
+            let state = FragmentDescriptor {
+                buffer_id: 0,
+                offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(i) as u32,
+                size: ROUTER_LINK_STATE_SIZE as u32,
+            };
+            let link = Link::remote(
+                LINK_ID_DIRECT,
+                sublink,
+                LinkKind::Central,
+                LinkSide::A,
+                Some(state),
+            );
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("waiting router missing"))?;
+            router.outward.set_primary_link(link);
+            self.owners.insert((LINK_ID_DIRECT, sublink), rid);
+        }
+
+        // Portal 0 is the shared-memory SERVICE (`CreateService` waits for the
+        // client connection; nothing is transmitted). Portal 1 carries the a2b
+        // attachment bridge (`MergePortals(attachments[0], portals[1])`). The
+        // pipe_a attachment (the broker link's bootstrap) keeps its identity:
+        // `setup_bootstrap_bridge` reassigns `bootstrap_rid`, so save and
+        // restore it.
+        let pipe_a_rid = self.bootstrap_rid;
+        self.setup_bootstrap_bridge(a2b_remote_rid)?;
+        self.a2b_rid = Some(self.bootstrap_rid);
+        self.bootstrap_rid = pipe_a_rid;
+        // Side-A stable marks on the A<->B link's initial portals
+        // (`SetOutwardLink`'s `MarkSideStable` at establishment).
+        self.mark_initial_links_stable_on(LINK_ID_DIRECT)?;
+        self.referral_reply_seen = true;
+        self.router_flush(a2b_remote_rid, false)?;
+        Ok(())
+    }
+
+    /// The multi-node referral scenario from the REFERRER side
+    /// (`invite-node-a-3node`, the native `3node-referrer`): node A.
+    ///
+    /// A accepts invitation-1 from the broker (the standard Connect
+    /// handshake), refers B with `ReferNonBroker` (SHARE_BROKER), adopts the
+    /// A<->B link on `NonBrokerReferralAccepted`, receives the broker's
+    /// transfer-y over pipe_a, re-transfers Y' through the a2b pipe (the
+    /// proxy serialization with `proxy_peer_node_name` = the broker), sends
+    /// `done`, and observes peer closure.
+    ///
+    /// Event ops mirror `RunThreeNodeA`: 0 lifecycle, 1 accept, 2 extract,
+    /// 3 create invitation, 4 attach, 5 send invitation, 6 transfer message,
+    /// 7 re-transfer result, 8 done result, 9 closure message, 10 close
+    /// result, 11 lifecycle.
+    pub fn run_3node_a(&mut self) -> Result<(), RoutingError> {
+        self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        // The Connect handshake WITHOUT the shared-memory client handshake:
+        // the official referrer transmits `ReferNonBroker` before the client
+        // parcel (baseline wire: ReferNonBroker seq 0, client seq 1), so the
+        // client send is deferred until after the referral send below.
+        self.connect_without_shm()?;
+        self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
+
+        self.referral_send()?;
+        // The shared-memory client handshake follows the `ReferNonBroker`
+        // greeting (the baseline wire order).
+        self.send_shared_memory_client()?;
+        self.emit(3, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(4, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(5, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 1: the broker's transfer-y over pipe_a. It arrives before the
+        // referral reply (the broker sends it as soon as the invitation-1
+        // handshake completes, while the referral round trip takes longer);
+        // if the reply somehow arrives first it is dispatched (the flag
+        // avoids a second wait below).
+        let (transfer, transfer_fds) = self.recv_until(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.sublink == BOOTSTRAP_SUBLINK && p.handle_types.contains(&handle_type::PORTAL)
+            )
+        })?;
+        let y_identity;
+        let transfer_payload;
+        match transfer {
+            DecodedMessage::AcceptParcel(p) => {
+                let processed = self.process_accept_parcel(p, transfer_fds, LINK_ID_BROKER)?;
+                if processed.identities.len() != 1 {
+                    return Err(RoutingError::BadParcel(
+                        "expected exactly one transferred portal",
+                    ));
+                }
+                y_identity = processed.identities[0];
+                transfer_payload = processed.payload;
+            }
+            _ => return Err(RoutingError::Unexpected("transfer predicate misrouted")),
+        }
+        if transfer_payload != b"transfer-y" {
+            return Err(RoutingError::BadParcel("unexpected transfer payload"));
+        }
+        self.emit_message(6, &transfer_payload, 1);
+
+        // The transfer's arrival marks the point where the oracle's side-B
+        // stable marks on the broker link's initial portals become observable
+        // (the routing-court timing). Only the bootstrap portal (1) is
+        // marked: the broker's closure lock on the bootstrap link requires it,
+        // while the shared-memory client portal (0) must stay unmarked (see
+        // `mark_bootstrap_link_stable`). The flush lets this side win the
+        // bootstrap-route bridge-bypass lock, collapsing the chain exactly
+        // like the baseline; the attachment's forced flush then wakes the
+        // broker's waiting bypass attempt (the bypass's own flush cannot fire
+        // the waiting-bit wakeup — no decay completes in it).
+        self.mark_bootstrap_link_stable()?;
+        self.router_flush(BOOTSTRAP_SUBLINK, false)?;
+        self.router_flush(self.bootstrap_rid, true)?;
+
+        // Step 2: the referral reply. The forwarded `hello` (the broker sent
+        // it right after the transfer-y, so it precedes the reply in the
+        // socket) is accepted WITHOUT the terminal portal delivery: the
+        // official's app never reads it, so it stays in the route's inbound
+        // queue — the descriptor's `next_incoming_sequence_number` stays at
+        // the unconsumed count and the sub-13 decay (and the side-B stable
+        // mark on sub 12) complete in its flush, letting the re-transfer's
+        // bypass lock succeed. The proxy's flush then forwards the queued
+        // `hello` to B.
+        if !self.referral_reply_seen {
+            loop {
+                let msg = self
+                    .channel
+                    .recv()?
+                    .ok_or(RoutingError::Unexpected("peer closed during exchange"))?;
+                let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
+                if let DecodedMessage::NonBrokerReferralAccepted(a) = decoded {
+                    self.on_non_broker_referral_accepted(a, msg.fds)?;
+                    break;
+                }
+                if let DecodedMessage::AcceptParcel(p) = decoded {
+                    self.process_accept_parcel_keep_queued(p, msg.fds, LINK_ID_BROKER)?;
+                    continue;
+                }
+                self.dispatch(decoded, msg.fds, LINK_ID_BROKER)?;
+            }
+        }
+
+        // Step 3: re-transfer Y' through the a2b pipe to B.
+        let a2b_rid = self
+            .a2b_rid
+            .ok_or(RoutingError::Unexpected("a2b pipe not established"))?;
+        self.put(
+            a2b_rid,
+            b"transfer-y2b".to_vec(),
+            vec![Object::Router(y_identity)],
+        )?;
+        self.emit(7, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 4: the done marker on pipe_a (the broker waits for it).
+        self.put(self.bootstrap_rid, b"done".to_vec(), Vec::new())?;
+        self.emit(8, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 5: the broker closes pipe_a; observe peer closure. The
+        // bootstrap route's bridge bypass collapses the chain (this side
+        // initiates it after the stable marks; the broker's second stage
+        // migrates the attachment's sublink again), so the `RouteClosed`
+        // arrives on the attachment's CURRENT primary sublink — recomputed per
+        // message because the routing messages dispatched in between (the
+        // forwarded hello, the broker's bypass) migrate it. The closure
+        // reports the stale payload buffer ("transfer-y"), matching the
+        // oracle's `RecvPayload`.
+        let (rc, rc_fds) = loop {
+            let msg = self
+                .channel
+                .recv()?
+                .ok_or(RoutingError::Unexpected("peer closed during exchange"))?;
+            let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
+            // The routing messages dispatched below migrate the attachment's
+            // sublink; the closure arrives on the CURRENT primary.
+            let now = self.bootstrap_sublink()?;
+            if let DecodedMessage::RouteClosed(r) = &decoded {
+                if r.sublink == now {
+                    break (decoded, msg.fds);
+                }
+            }
+            self.dispatch(decoded, msg.fds, LINK_ID_BROKER)?;
+        };
+        if let DecodedMessage::RouteClosed(r) = rc {
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, LINK_ID_BROKER)?;
+        }
+        self.emit_message_result(9, b"transfer-y", 0, "MOJO_RESULT_FAILED_PRECONDITION");
+
+        // Step 6: close the local ends (pipe_a, then a2b). The peers may
+        // already be gone; a failed transmission on a broken transport is not
+        // an error at teardown.
+        self.close_route(self.bootstrap_rid)?;
+        self.close_route(a2b_rid)?;
+        self.emit(10, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(11, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        Ok(())
+    }
+
     /// Build the bootstrap bridge chain: the app-facing attachment router and
     /// the interior bridge router, linked to the initial portal 1 router
-    /// (`R_remote`, identity `BOOTSTRAP_SUBLINK`) by a local bridge link, and
-    /// to each other by a local central link.
+    /// (`R_remote`, identity `remote_rid`) by a local bridge link, and to each
+    /// other by a local central link.
     ///
     /// Mirrors `Invitation::Accept`'s per-attachment `OpenPortals` +
     /// `MergePortals(portals[i + 1], bridge)`: `OpenPortals` creates the
     /// attachment/bridge pair linked by a local central link (born stable);
     /// `MergeRoute` links the bridge router and the initial portal router with
     /// a local bridge link (born unstable).
-    fn setup_bootstrap_bridge(&mut self) -> Result<(), RoutingError> {
+    fn setup_bootstrap_bridge(&mut self, remote_rid: u64) -> Result<(), RoutingError> {
         let r_bridge_rid = self.next_rid;
         self.next_rid += 1;
         let attachment_rid = self.next_rid;
@@ -1422,7 +1798,7 @@ impl RoutingAcceptor {
         let (remote_bridge_link, bridge_bridge_link) = Link::local_pair(
             LinkKind::Bridge,
             LinkSide::A,
-            BOOTSTRAP_SUBLINK,
+            remote_rid,
             r_bridge_rid,
             false,
         );
@@ -1438,7 +1814,7 @@ impl RoutingAcceptor {
         {
             let r_remote = self
                 .routers
-                .get_mut(&BOOTSTRAP_SUBLINK)
+                .get_mut(&remote_rid)
                 .ok_or(RoutingError::Unexpected("bootstrap router missing"))?;
             r_remote.bridge = Some(Edge {
                 primary: Some(remote_bridge_link),
@@ -1580,10 +1956,9 @@ impl RoutingAcceptor {
                 MSG_ID_CONNECT_TO_REFERRED_NON_BROKER,
                 "referral acceptance not exercised by a sealed court",
             )),
-            DecodedMessage::NonBrokerReferralAccepted(_) => Err(RoutingError::Unsupported(
-                MSG_ID_NON_BROKER_REFERRAL_ACCEPTED,
-                "referral acceptance not exercised by a sealed court",
-            )),
+            DecodedMessage::NonBrokerReferralAccepted(a) => {
+                self.on_non_broker_referral_accepted(a, fds)
+            }
             DecodedMessage::NonBrokerReferralRejected(_) => Err(RoutingError::Unsupported(
                 MSG_ID_NON_BROKER_REFERRAL_REJECTED,
                 "referral rejection not exercised by a sealed court",
@@ -1728,13 +2103,33 @@ impl RoutingAcceptor {
     }
 
     /// Assemble an AcceptParcel (data + deserialized portals), route it to its
+    /// router, and flush WITHOUT delivering the parcel to the terminal portal:
+    /// the parcel stays in the inbound queue so it is forwarded when the
+    /// router becomes a proxy (the official's app never reads it). The
+    /// referrer's deferred `hello` uses this; the descriptor's
+    /// `next_incoming_sequence_number` then correctly reflects the unconsumed
+    /// count.
+    fn process_accept_parcel_keep_queued(
+        &mut self,
+        p: AcceptParcel,
+        fds: Vec<OwnedFd>,
+        link_id: u64,
+    ) -> Result<ProcessedParcel, RoutingError> {
+        debug_assert!(!self.keep_queued_flush);
+        self.keep_queued_flush = true;
+        let result = self.process_accept_parcel(p, fds, link_id);
+        self.keep_queued_flush = false;
+        result
+    }
+
+    /// Assemble an AcceptParcel (data + deserialized portals), route it to its
     /// router, and flush. Returns the payload and the new portal identities.
     /// `link_id` is the NodeLink the parcel arrived on (its sublink ids are
     /// scoped to that link).
     fn process_accept_parcel(
         &mut self,
         p: AcceptParcel,
-        fds: Vec<OwnedFd>,
+        mut fds: Vec<OwnedFd>,
         link_id: u64,
     ) -> Result<ProcessedParcel, RoutingError> {
         if p.num_subparcels == 0 || p.subparcel_index >= p.num_subparcels || p.num_subparcels > 16 {
@@ -1783,12 +2178,21 @@ impl RoutingAcceptor {
                     let obj = driver_refs
                         .next()
                         .ok_or(RoutingError::BadParcel("missing driver object"))?;
-                    let _ = obj;
-                    let _ = &fds;
-                    return Err(RoutingError::Unsupported(
-                        MSG_ID_ACCEPT_PARCEL,
-                        "driver objects not exercised by the routing court",
-                    ));
+                    // The object's descriptors are referenced by index; hold
+                    // them for the process lifetime (e.g. the referred node's
+                    // shared-memory client transport arrives on the service
+                    // portal). The object's inline serialization is not
+                    // interpreted.
+                    let first = obj.first_fd as usize;
+                    let count = obj.num_fds as usize;
+                    let end = first
+                        .checked_add(count)
+                        .ok_or(RoutingError::BadParcel("fd index overflow"))?;
+                    if end > fds.len() {
+                        return Err(RoutingError::BadParcel("driver object fd range"));
+                    }
+                    let mut held = fds.drain(first..end).collect::<Vec<_>>();
+                    self.held_driver_fds.append(&mut held);
                 }
                 handle_type::RELAYED_BOXED_DRIVER_OBJECT => {
                     is_split = true;
@@ -2222,8 +2626,9 @@ impl RoutingAcceptor {
         };
         // Lock the central link for proxy bypass, if possible. The lock also
         // records the allowed bypass request source (the remote peer on the
-        // locked link), matching `RemoteRouterLink::TryLockForBypass`.
-        let source = self.broker_name.low;
+        // serialization TARGET link, matching
+        // `RemoteRouterLink::TryLockForBypass(to_node_link.remote_node_name())`).
+        let source = self.remote_name_for(link_id)?;
         let locked = self.try_lock_link_for_bypass(&primary, source)?;
 
         // The WithLocalPeer path: the router's peer is on this node.
@@ -2243,7 +2648,9 @@ impl RoutingAcceptor {
         }
 
         let initiate_proxy_bypass = locked;
-        let new_sublink = self.memory()?.allocate_sublink_ids(1)?;
+        // The new sublink is allocated from the TARGET link's memory (each
+        // NodeLink has its own sublink id space).
+        let new_sublink = self.memory_mut_for(link_id)?.allocate_sublink_ids(1)?;
         let mut descriptor = RouterDescriptor {
             new_sublink,
             new_link_state_fragment: FragmentDescriptor::default(),
@@ -2337,8 +2744,8 @@ impl RoutingAcceptor {
             }
         }
         // A primary sublink for the new central link plus an adjacent decaying
-        // peripheral sublink.
-        let new_sublink = self.memory()?.allocate_sublink_ids(2)?;
+        // peripheral sublink, from the TARGET link's memory.
+        let new_sublink = self.memory_mut_for(link_id)?.allocate_sublink_ids(2)?;
         let decaying_sublink = new_sublink + 1;
         // Register the tentative routes on the NodeLink (adopted in
         // `begin_proxying` after transmission).
@@ -2515,8 +2922,13 @@ impl RoutingAcceptor {
     }
 
     /// `RouterLink::TryLockForBypass` on a link: lock the link state for a
-    /// bypass and record the allowed bypass request source.
-    fn try_lock_link_for_bypass(&mut self, link: &Link, source: u64) -> Result<bool, RoutingError> {
+    /// bypass and record the allowed bypass request source (the full NodeName,
+    /// validated by the peer's `CanNodeRequestBypass`).
+    fn try_lock_link_for_bypass(
+        &mut self,
+        link: &Link,
+        source: NodeName,
+    ) -> Result<bool, RoutingError> {
         if let Some(desc) = link.link_state {
             if !self.memory()?.try_lock_link_state(desc, link.side.is_a())? {
                 return Ok(false);
@@ -2530,7 +2942,7 @@ impl RoutingAcceptor {
             if !st.try_lock(link.side.is_a()) {
                 return Ok(false);
             }
-            st.allowed_bypass_source = source;
+            st.allowed_bypass_source = source.low;
             return Ok(true);
         }
         Ok(false)
@@ -2644,14 +3056,14 @@ impl RoutingAcceptor {
         let first_local_peer = first_link.local_peer;
         let second_local_peer = second_link.local_peer;
         let first_peer_node = if first_link.is_local() {
-            0
+            NodeName::invalid()
         } else {
-            self.broker_name.low
+            self.remote_name_for(first_link.link_id)?
         };
         let second_peer_node = if second_link.is_local() {
-            0
+            NodeName::invalid()
         } else {
-            self.broker_name.low
+            self.remote_name_for(second_link.link_id)?
         };
 
         // Lock both outward links for bypass (`TryLockForBypass`). On failure
@@ -2681,13 +3093,14 @@ impl RoutingAcceptor {
                 }
             }
             // The first link is remote (both are); ask its peer to bypass the
-            // proxy with a direct link to the second router's outward peer.
+            // proxy with a direct link to the second router's outward peer
+            // (over the second link's remote node).
             let target_sublink = second_link.sublink;
-            self.send_link_message(messages::encode_bypass_peer(
-                first_link.sublink,
-                self.broker_name,
-                target_sublink,
-            ))?;
+            let bypass_target = self.remote_name_for(second_link.link_id)?;
+            self.send_link_message_on(
+                first_link.link_id,
+                messages::encode_bypass_peer(first_link.sublink, bypass_target, target_sublink),
+            )?;
             return Ok(());
         }
 
@@ -2902,7 +3315,9 @@ impl RoutingAcceptor {
             .get(&local_peer)
             .map(|r| r.outbound_length())
             .unwrap_or(0);
-        let bypass_sublink = self.memory()?.allocate_sublink_ids(1)?;
+        let bypass_sublink = self
+            .memory_mut_for(remote_link.link_id)?
+            .allocate_sublink_ids(1)?;
 
         // Decay all five edges (the official order): the local peer's
         // outward, the other bridge router's outward, this bridge edge, this
@@ -2975,16 +3390,19 @@ impl RoutingAcceptor {
             edge.set_length_from_decaying_link(length_from_local_peer);
         }
 
-        // Notify the remote peer of the bypass, then let the local peer adopt
-        // the new central link.
-        self.send_link_message(messages::encode_bypass_peer_with_link(
-            remote_link.sublink,
-            bypass_sublink,
-            link_state,
-            length_from_local_peer,
-        ))?;
+        // Notify the remote peer of the bypass over ITS link, then let the
+        // local peer adopt the new central link.
+        self.send_link_message_on(
+            remote_link.link_id,
+            messages::encode_bypass_peer_with_link(
+                remote_link.sublink,
+                bypass_sublink,
+                link_state,
+                length_from_local_peer,
+            ),
+        )?;
         let new_link = Link::remote(
-            0,
+            remote_link.link_id,
             bypass_sublink,
             LinkKind::Central,
             LinkSide::A,
@@ -2992,7 +3410,7 @@ impl RoutingAcceptor {
         );
         self.set_outward_link(local_peer, &new_link)?;
         self.owners
-            .insert((LINK_ID_BROKER, bypass_sublink), local_peer);
+            .insert((remote_link.link_id, bypass_sublink), local_peer);
 
         self.router_flush(rid, false)?;
         self.router_flush(other_bridge, false)?;
@@ -3069,14 +3487,16 @@ impl RoutingAcceptor {
         };
 
         // Deliver contiguous inbound parcels to the terminal portal; drop a
-        // proxy with no links left.
+        // proxy with no links left. The portal delivery is suppressed for a
+        // keep-queued flush (a parcel that must remain in the inbound queue so
+        // it is forwarded when the router becomes a proxy).
         let mut drop = false;
         {
             let router = self
                 .routers
                 .get_mut(&rid)
                 .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
-            if router.inward.is_none() && router.portal.is_some() {
+            if !self.keep_queued_flush && router.inward.is_none() && router.portal.is_some() {
                 let mut delivered = Vec::new();
                 while let Some(parcel) = router.inbound.pop() {
                     delivered.push((parcel.data, parcel.objects));
@@ -3749,7 +4169,9 @@ impl RoutingAcceptor {
             &new_routers,
             &[],
         );
-        self.send_link_message(msg)?;
+        // The parcel travels over the NodeLink the link belongs to (each link
+        // has its own channel and sequence space).
+        self.send_link_message_on(link.link_id, msg)?;
         for (rid, d) in serialized {
             self.begin_proxying(rid, &d, link.link_id)?;
         }
@@ -3772,22 +4194,22 @@ impl RoutingAcceptor {
         data: Vec<u8>,
         objects: Vec<Object>,
     ) -> Result<Option<FragmentDescriptor>, RoutingError> {
-        let (seq, use_fragment) = {
+        let (seq, use_fragment, fragment_link) = {
             let router = self
                 .routers
                 .get(&rid)
                 .ok_or(RoutingError::BadParcel("put for unknown router"))?;
             let seq = router.outbound.current_sequence_number();
-            let use_fragment = !data.is_empty()
-                && router
-                    .outward
-                    .primary
-                    .as_ref()
-                    .is_some_and(|l| !l.is_local());
-            (seq, use_fragment)
+            let primary = router.outward.primary.as_ref();
+            let use_fragment = !data.is_empty() && primary.is_some_and(|l| !l.is_local());
+            // The payload fragment must come from the memory of the link the
+            // parcel will be transmitted on (each NodeLink has its own buffer
+            // id space).
+            let fragment_link = primary.map(|l| l.link_id).unwrap_or(LINK_ID_BROKER);
+            (seq, use_fragment, fragment_link)
         };
         let fragment = if use_fragment {
-            self.write_parcel_fragment_or_inline(&data)?
+            self.write_parcel_fragment_or_inline(&data, fragment_link)?
         } else {
             None
         };
@@ -3824,8 +4246,9 @@ impl RoutingAcceptor {
     fn write_parcel_fragment_or_inline(
         &mut self,
         data: &[u8],
+        link_id: u64,
     ) -> Result<Option<FragmentDescriptor>, RoutingError> {
-        match self.memory_mut()?.write_parcel_fragment(data) {
+        match self.memory_mut_for(link_id)?.write_parcel_fragment(data) {
             Ok(f) => Ok(Some(f)),
             Err(crate::ipcz::link_memory::LinkMemoryError::OutOfBounds) => Ok(None),
             Err(e) => Err(e.into()),

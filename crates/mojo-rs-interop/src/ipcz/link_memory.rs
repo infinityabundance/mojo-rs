@@ -678,32 +678,40 @@ impl LinkMemory {
         }
     }
 
-    /// Read the `allowed_bypass_request_source` NodeName of a link state.
+    /// Read the `allowed_bypass_request_source` NodeName of a link state (the
+    /// full 16-byte name: high at `LINK_ALLOWED_SOURCE_OFFSET`, low 8 bytes
+    /// after it — `RouterLinkState::allowed_bypass_request_source`).
     pub fn read_allowed_bypass_source(
         &self,
         desc: FragmentDescriptor,
-    ) -> Result<u64, LinkMemoryError> {
+    ) -> Result<crate::ipcz::messages::NodeName, LinkMemoryError> {
         let view = self.fragment(desc)?;
         let off = Self::LINK_ALLOWED_SOURCE_OFFSET;
-        let low = view.get(off..off + 8).ok_or(LinkMemoryError::OutOfBounds)?;
-        Ok(u64::from_le_bytes(
-            low.try_into().map_err(|_| LinkMemoryError::OutOfBounds)?,
-        ))
+        let high = view.get(off..off + 8).ok_or(LinkMemoryError::OutOfBounds)?;
+        let low = view
+            .get(off + 8..off + 16)
+            .ok_or(LinkMemoryError::OutOfBounds)?;
+        Ok(crate::ipcz::messages::NodeName {
+            high: u64::from_le_bytes(high.try_into().map_err(|_| LinkMemoryError::OutOfBounds)?),
+            low: u64::from_le_bytes(low.try_into().map_err(|_| LinkMemoryError::OutOfBounds)?),
+        })
     }
 
-    /// Write the `allowed_bypass_request_source` NodeName (low 64 bits are the
-    /// value compared against remote node names) of a link state.
+    /// Write the `allowed_bypass_request_source` NodeName (the full 16 bytes,
+    /// matching `RouterLinkState::allowed_bypass_request_source` — the peer
+    /// validates `CanNodeRequestBypass` against it).
     pub fn write_allowed_bypass_source(
         &mut self,
         desc: FragmentDescriptor,
-        value: u64,
+        value: crate::ipcz::messages::NodeName,
     ) -> Result<(), LinkMemoryError> {
         let view = self.fragment_mut(desc)?;
         let off = Self::LINK_ALLOWED_SOURCE_OFFSET;
         let slot = view
-            .get_mut(off..off + 8)
+            .get_mut(off..off + 16)
             .ok_or(LinkMemoryError::OutOfBounds)?;
-        slot.copy_from_slice(&value.to_le_bytes());
+        slot[..8].copy_from_slice(&value.high.to_le_bytes());
+        slot[8..].copy_from_slice(&value.low.to_le_bytes());
         Ok(())
     }
 

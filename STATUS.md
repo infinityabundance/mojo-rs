@@ -395,12 +395,25 @@ The native B implements `NodeConnectorForReferredNonBroker` +
   central sublink 12), `ProxyWillStop`, `RouteClosed` peer closure, and the
   local closes.
 
-Equivalence: the broker's AND A's event streams are BYTE-IDENTICAL between the
-baseline and the interop; all four captured wire directions (broker↔A both
-ways, broker↔B both ways via the referral transport) are structurally
-identical (decoded message sequences, ids, sequence numbers, sublinks,
-fragment descriptors) modulo the node-name GUIDs, which are normalized; all
-processes exit 0.
+The native `3node-referrer` implements the REFERRER side (interop-a: native
+A → official B): the Connect handshake without the client send (the official
+referrer transmits `ReferNonBroker` before the client parcel), the referral
+send with the 16-byte `Transport` object, `NonBrokerReferralAccepted`
+acceptance (A↔B link adoption, `EstablishWaitingRouters`, the service portal 0
+and the a2b attachment bridge on portal 1), the transfer-y receipt and the
+re-transfer with `proxy_peer_node_name` = the broker (the bypass lock records
+B's full `NodeName` in the shared state, so the broker's
+`CanNodeRequestBypass` accepts B's `AcceptBypassLink`), the un-consumed
+`hello` forwarded by the proxy, and the acceptor-side bootstrap bridge bypass
+with the waiting-bit wakeup that lets the broker's second stage and the
+pipe_a closure complete.
+
+Equivalence: in BOTH pairings the broker's AND the counterpart node's event
+streams are BYTE-IDENTICAL between the baseline and the interop; all four
+captured wire directions (broker↔A both ways, broker↔B both ways via the
+referral transport) are structurally identical (decoded message sequences,
+ids, sequence numbers, sublinks, fragment descriptors) modulo the node-name
+GUIDs, which are normalized; all processes exit 0.
 
 Bugs found and fixed while sealing this court:
 
@@ -415,9 +428,31 @@ Bugs found and fixed while sealing this court:
   link memory: each NodeLink has its own primary buffer with its own buffer id
   0, so parcels on the referrer link must resolve fragments against the
   referrer memory (the deferral queue is now keyed by `(link, buffer)`);
+  `put`'s payload-fragment allocation and `serialize_router`'s sublink
+  allocation now use the TARGET link's memory, and `transmit_parcel` sends on
+  the link's own channel;
 * `ProxyWillStop` (id 33) was previously rejected as unsupported; the multi-node
   court exercises it (the broker's response to B's `AcceptBypassLink`), so the
   `router_proxy_will_stop` state machine was implemented;
+* `encode_transport_object` carried a spurious `TransportHeader.size` field
+  (20 bytes vs the official 16: `ObjectHeader{size, type}` +
+  `TransportHeader{destination_type, 4 flag bytes}`), which made the
+  `ReferNonBroker` transport object unreadable and the referral fail silently;
+* the referrer's `ReferNonBroker` must precede the shared-memory client
+  handshake (the official wire order), and the bypass lock must record the
+  FULL `NodeName` of the serialization target (the broker's
+  `CanNodeRequestBypass` compares the full name in the shared state);
+* the forwarded `hello` was consumed into the terminal portal and lost when
+  Y' became a proxy — it is now accepted without the portal delivery, staying
+  in the route's queue (the official's app never reads it); this required
+  `ParcelQueue::get_current_sequence_length` to count the contiguous PUSHED
+  span (the official's `GetCurrentSequenceLength` advances at append), which
+  the decay checks and the side-B stable marks depend on;
+* the bootstrap bridge bypass needed a forced attachment flush after the
+  stable marks to fire the waiting-bit wakeup (`FlushRouter`), letting the
+  broker's second-stage bypass complete so the pipe_a closure arrives; the
+  closure predicate is evaluated per message because the bypass migrates the
+  attachment's sublink;
 * the wire-relay now tolerates EPIPE on forward (a node may exit right after
   its final messages, e.g. B's teardown `RouteClosed` after the broker exits),
   keeping the relay's exit status clean.
@@ -508,8 +543,9 @@ references to the oracle checkout. Evidence: `evidence/security/`.
   (memory court), the `AddBlockBuffer` receive side + cross-buffer fragment
   resolution (exhaustion court), the `RequestMemory`/`ProvideMemory`/
   `AddBlockBuffer` SEND side (bypass court), the `RouterLinkState` refcount
-  lifecycle, and the multi-node referral (broker + referrer A + referred B)
-  with the outbound `AcceptBypassLink` (3-node court).
+  lifecycle, and the multi-node referral in BOTH mixed-language pairings
+  (broker + referrer A + referred B; the outbound `AcceptBypassLink` and the
+  referrer-side serialization sealed by the 3-node court).
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 

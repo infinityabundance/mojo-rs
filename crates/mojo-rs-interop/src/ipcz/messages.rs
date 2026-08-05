@@ -1217,8 +1217,7 @@ pub fn encode_transport_object(destination_type: u32) -> Vec<u8> {
     let mut obj = Vec::with_capacity(16);
     obj.extend_from_slice(&8u32.to_le_bytes()); // ObjectHeader.size
     obj.extend_from_slice(&MOJO_OBJECT_TYPE_TRANSPORT.to_le_bytes());
-    obj.extend_from_slice(&8u32.to_le_bytes()); // TransportHeader.size
-    obj.extend_from_slice(&destination_type.to_le_bytes());
+    obj.extend_from_slice(&destination_type.to_le_bytes()); // TransportHeader.destination_type
     obj.extend_from_slice(&[0u8; 4]); // same_remote, peer_trusted, trusted_by_peer, reserved
     obj
 }

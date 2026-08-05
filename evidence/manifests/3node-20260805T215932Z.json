@@ -1,0 +1,94 @@
+{
+  "a_events_identical_interop_b": true,
+  "artifacts": {
+    "baseline/a.events": {
+      "bytes": 872,
+      "sha256": "181606424c8e22f86667a1e23bbe34cdecccd037e0ceef3dcd0a39a92f75da31"
+    },
+    "baseline/b.events": {
+      "bytes": 700,
+      "sha256": "e965f70f6678309ef3922880d1c2dabc25e2239a8098d160cb875f07bf1e9c79"
+    },
+    "baseline/broker.events": {
+      "bytes": 756,
+      "sha256": "19f4c9940655b1fbfe8263ef815a630709fd5dbdaa8c4165ead006a2b7cb0c97"
+    },
+    "interop-a/a.events": {
+      "bytes": 625,
+      "sha256": "30e0bc6aca0b1ab12b9ec810b9532b94025a6b26d78a91c7bbab076cc4f59238"
+    },
+    "interop-a/b.events": {
+      "bytes": 700,
+      "sha256": "e965f70f6678309ef3922880d1c2dabc25e2239a8098d160cb875f07bf1e9c79"
+    },
+    "interop-a/broker.events": {
+      "bytes": 756,
+      "sha256": "19f4c9940655b1fbfe8263ef815a630709fd5dbdaa8c4165ead006a2b7cb0c97"
+    },
+    "interop-b/a.events": {
+      "bytes": 872,
+      "sha256": "181606424c8e22f86667a1e23bbe34cdecccd037e0ceef3dcd0a39a92f75da31"
+    },
+    "interop-b/b.events": {
+      "bytes": 691,
+      "sha256": "c8ab7d4ea8936c84a1c09d916211a1cb8a81aed3d88e84b5090551801c6a9db9"
+    },
+    "interop-b/broker.events": {
+      "bytes": 756,
+      "sha256": "19f4c9940655b1fbfe8263ef815a630709fd5dbdaa8c4165ead006a2b7cb0c97"
+    }
+  },
+  "b_events_identical_interop_a": true,
+  "baseline": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0
+  },
+  "broker_events_identical_interop_a": true,
+  "broker_events_identical_interop_b": true,
+  "court": "3node",
+  "generated_at_utc": "20260805T215932Z",
+  "inputs": {
+    "native_3node_acceptor_binary": "e3379bc0cbbb165f99dfca5709cb801d43ed96e59b2fbad7d6ad914f737487ac",
+    "native_3node_referrer_binary": "793a8019752aec4aa236ccb86b69ab61e8bbe12b942eaee54ea4048d8f23f964",
+    "oracle_driver_binary": "bbae6e63b1521f387c740c119a011206d682fdbe7a77002de8d66bc8b8710f11",
+    "wire_dump_binary": "06f1dacabb41943b93a9ed5a376eacbfc0c4b44c415e191f03125e4838daeb1f",
+    "wire_relay_binary": "a6cdb88d79471f1c96dbdc8218e2048879c3c7be8d1e69b89007b97d802b7f0f"
+  },
+  "interop-a": {
+    "a_exit": 1,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0
+  },
+  "interop-b": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0
+  },
+  "referral_wire_identical_interop_a": true,
+  "referral_wire_identical_interop_b": true,
+  "schema_version": 1,
+  "status": "fail",
+  "wire_comparison_interop_a": {
+    "b-to-broker": {
+      "identical": true
+    },
+    "broker-to-b": {
+      "identical": true
+    }
+  },
+  "wire_comparison_interop_b": {
+    "b-to-broker": {
+      "identical": true
+    },
+    "broker-to-b": {
+      "identical": true
+    }
+  }
+}

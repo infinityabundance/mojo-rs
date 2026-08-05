@@ -4,9 +4,10 @@
 # A + referred B, with the referral transport captured by a man-in-the-middle
 # wire relay.
 #
-# Two runs, both through wire relays:
+# Three runs, all through wire relays:
 #   1. baseline:  official broker ⇄ official A ⇄ official B
-#   2. interop:   official broker ⇄ official A ⇄ native Rust B (3node-acceptor)
+#   2. interop-b: official broker ⇄ official A ⇄ native Rust B (3node-acceptor)
+#   3. interop-a: official broker ⇄ native Rust A (3node-referrer) ⇄ official B
 #
 # Topology and transports:
 #   broker ── relay1 ── A      (the broker↔A invitation-1 link)
@@ -17,16 +18,16 @@
 #                               CreatePair; its endpoints travel inside
 #                               `ConnectToReferredNonBroker` / `NonBrokerReferralAccepted`).
 #
-# The broker's and A's event streams must be IDENTICAL in both runs (the
-# broker cannot distinguish the native B from the official one). The referral
-# transport wire is compared structurally (decoded message sequences, node
-# names normalized). The Rust B must additionally verify the round trip and
-# exit 0.
+# Equivalence: the broker's and A's event streams must be IDENTICAL between
+# the baseline and interop-b; the broker's and B's event streams must be
+# IDENTICAL between the baseline and interop-a; the referral transport wire is
+# compared structurally (decoded message sequences, node names normalized).
+# The native node must additionally verify its exchange and exit 0.
 #
 # Evidence produced under evidence/3node/<stamp>/:
-#   baseline/{broker,a,b}.events            interop/{broker,a,b}.events
-#   baseline/wire/{broker-to-a,a-to-broker,broker-to-b,b-to-broker}.bin
-#   interop/wire/...                        (same four captures)
+#   baseline/{broker,a,b}.events            interop-b/{broker,a,b}.events
+#   interop-a/{broker,a,b}.events
+#   <tag>/wire/{broker-to-a,a-to-broker,broker-to-b,b-to-broker}.bin
 #   evidence/manifests/3node-<stamp>.json
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -42,29 +43,34 @@ mojo_rs_require_cmd python3
 ORACLE_DRIVER="${MOJO_RS_ORACLE_DRIVER:-$MOJO_RS_WORK_ROOT/oracle-build/out/Oracle/mojo_rs_oracle_driver}"
 [ -x "$ORACLE_DRIVER" ] || mojo_rs_fail "oracle driver missing: $ORACLE_DRIVER"
 
-mojo_rs_log "building the wire relay, wire-dump, and the native 3node acceptor"
+mojo_rs_log "building the wire relay, wire-dump, and the native 3node nodes"
 cargo build --quiet -p mojo-rs-interop --bin wire-relay
 cargo build --quiet -p mojo-rs-interop --bin wire-dump
 cargo build --quiet -p mojo-rs-interop --bin 3node-acceptor
+cargo build --quiet -p mojo-rs-interop --bin 3node-referrer
 RELAY="$MOJO_RS_REPO_ROOT/target/debug/wire-relay"
 DUMP="$MOJO_RS_REPO_ROOT/target/debug/wire-dump"
 B3="$MOJO_RS_REPO_ROOT/target/debug/3node-acceptor"
+A3="$MOJO_RS_REPO_ROOT/target/debug/3node-referrer"
 [ -x "$RELAY" ] || mojo_rs_fail "wire relay missing"
 [ -x "$DUMP" ] || mojo_rs_fail "wire-dump missing"
 [ -x "$B3" ] || mojo_rs_fail "3node acceptor missing"
+[ -x "$A3" ] || mojo_rs_fail "3node referrer missing"
 
 EVIDENCE_ROOT="${MOJO_RS_EVIDENCE_ROOT:-$MOJO_RS_REPO_ROOT/evidence}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$EVIDENCE_ROOT/3node/$STAMP"
-mkdir -p "$OUT/baseline/wire" "$OUT/interop/wire" "$EVIDENCE_ROOT/manifests"
+mkdir -p "$OUT/baseline/wire" "$OUT/interop-b/wire" "$OUT/interop-a/wire" \
+  "$EVIDENCE_ROOT/manifests"
 
-python3 - "$ORACLE_DRIVER" "$RELAY" "$DUMP" "$B3" "$OUT" "$STAMP" "$EVIDENCE_ROOT/manifests" <<'PYEOF'
-import hashlib, json, os, socket, subprocess, sys, re
+python3 - "$ORACLE_DRIVER" "$RELAY" "$DUMP" "$B3" "$A3" "$OUT" "$STAMP" \
+  "$EVIDENCE_ROOT/manifests" <<'PYEOF'
+import hashlib, json, os, re, socket, subprocess, sys
 
-driver, relay, dump, b3, out, stamp, manifests = sys.argv[1:]
+driver, relay, dump, b3, a3, out, stamp, manifests = sys.argv[1:]
 
-def run_three(b_cmd, tag):
-    """Run broker + A (oracle) against the given B command."""
+def run_three(a_cmd, b_cmd, tag):
+    """Run broker (oracle) against the given A and B commands."""
     # broker<->A transport: (broker_sock, relay1_a) and (relay1_b, a_broker_sock).
     broker_sock, relay1_a = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     relay1_b, a_broker_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -89,8 +95,8 @@ def run_three(b_cmd, tag):
         pass_fds=(relay2_a.fileno(), relay2_b.fileno()))
 
     a = subprocess.Popen(
-        [driver, "invite-node-a-3node", str(a_broker_sock.fileno()),
-         str(broker_ref_sock.fileno()), os.path.join(out, tag, "a.events")],
+        a_cmd + [str(a_broker_sock.fileno()), str(broker_ref_sock.fileno()),
+                 os.path.join(out, tag, "a.events")],
         pass_fds=(a_broker_sock.fileno(), broker_ref_sock.fileno()))
     b = subprocess.Popen(
         b_cmd + [str(b_sock.fileno()), os.path.join(out, tag, "b.events")],
@@ -132,44 +138,65 @@ def normalize_wire(path):
     # `current_peer_node=` (and `proxy_node=` inside descriptors) fields.
     return re.sub(r'(?<=[= ])[0-9a-f]{32}', '<name>', raw)
 
+def events_identical(base_path, int_path):
+    return (open(base_path, 'rb').read() == open(int_path, 'rb').read())
+
 # Baseline: all three nodes official.
 base_br, base_a_rc, base_b_rc, base_r1, base_r2 = run_three(
-    [driver, "invite-node-b-3node"], "baseline")
+    [driver, "invite-node-a-3node"], [driver, "invite-node-b-3node"], "baseline")
 
-# Interop: B is the native Rust 3node-acceptor.
-int_br, int_a_rc, int_b_rc, int_r1, int_r2 = run_three(
-    [b3], "interop")
+# Interop-b: B is the native Rust 3node-acceptor.
+intb_br, intb_a_rc, intb_b_rc, intb_r1, intb_r2 = run_three(
+    [driver, "invite-node-a-3node"], [b3], "interop-b")
 
-base_broker = os.path.join(out, "baseline", "broker.events")
-int_broker = os.path.join(out, "interop", "broker.events")
-base_a = os.path.join(out, "baseline", "a.events")
-int_a = os.path.join(out, "interop", "a.events")
+# Interop-a: A is the native Rust 3node-referrer.
+inta_br, inta_a_rc, inta_b_rc, inta_r1, inta_r2 = run_three(
+    [a3], [driver, "invite-node-b-3node"], "interop-a")
 
-broker_identical = (base_br == 0 and int_br == 0 and
-                    open(base_broker, 'rb').read() == open(int_broker, 'rb').read())
-a_identical = (base_a_rc == 0 and int_a_rc == 0 and
-               open(base_a, 'rb').read() == open(int_a, 'rb').read())
+def p(tag, name):
+    return os.path.join(out, tag, name)
 
-# Structural wire comparison of the referral transport (both directions):
-# decoded message sequences must match modulo node names.
-w = os.path.join(out, "interop", "wire")
-wb = os.path.join(out, "baseline", "wire")
-wire_ok = True
-wire_detail = {}
-for direction in ("broker-to-b", "b-to-broker"):
-    base_norm = normalize_wire(os.path.join(wb, direction + ".bin"))
-    int_norm = normalize_wire(os.path.join(w, direction + ".bin"))
-    same = base_norm == int_norm and base_norm != ""
-    wire_ok = wire_ok and same
-    wire_detail[direction] = {
-        "identical": same,
-        "baseline_decoded": base_norm,
-        "interop_decoded": int_norm,
-    }
+# Interop-b equivalence: broker + A event streams byte-identical.
+broker_identical_b = (base_br == 0 and intb_br == 0 and
+                      events_identical(p("baseline", "broker.events"),
+                                       p("interop-b", "broker.events")))
+a_identical_b = (base_a_rc == 0 and intb_a_rc == 0 and
+                 events_identical(p("baseline", "a.events"),
+                                  p("interop-b", "a.events")))
 
-ok = (broker_identical and a_identical and wire_ok and
-      base_b_rc == 0 and int_b_rc == 0 and base_r1 == 0 and int_r1 == 0 and
-      base_r2 == 0 and int_r2 == 0)
+# Interop-a equivalence: broker + B event streams byte-identical.
+broker_identical_a = (base_br == 0 and inta_br == 0 and
+                      events_identical(p("baseline", "broker.events"),
+                                       p("interop-a", "broker.events")))
+b_identical_a = (base_b_rc == 0 and inta_b_rc == 0 and
+                 events_identical(p("baseline", "b.events"),
+                                  p("interop-a", "b.events")))
+
+# Structural wire comparison of the referral transport (both directions) for
+# each interop run: decoded message sequences must match modulo node names.
+def wires_identical(tag):
+    ok = True
+    detail = {}
+    for direction in ("broker-to-b", "b-to-broker"):
+        base_norm = normalize_wire(os.path.join(out, "baseline", "wire", direction + ".bin"))
+        int_norm = normalize_wire(os.path.join(out, tag, "wire", direction + ".bin"))
+        same = base_norm == int_norm and base_norm != ""
+        ok = ok and same
+        detail[direction] = {"identical": same}
+    return ok, detail
+
+wire_ok_b, wire_detail_b = wires_identical("interop-b")
+wire_ok_a, wire_detail_a = wires_identical("interop-a")
+
+ok = (broker_identical_b and a_identical_b and broker_identical_a and
+      b_identical_a and wire_ok_b and wire_ok_a and
+      intb_b_rc == 0 and inta_a_rc == 0 and
+      base_r1 == 0 and base_r2 == 0 and
+      intb_r1 == 0 and intb_r2 == 0 and inta_r1 == 0 and inta_r2 == 0)
+
+def art(rel):
+    pth = os.path.join(out, rel)
+    return {"sha256": h(pth), "bytes": os.path.getsize(pth)}
 
 receipt = {
     "schema_version": 1,
@@ -178,26 +205,36 @@ receipt = {
     "status": "pass" if ok else "fail",
     "baseline": {"broker_exit": base_br, "a_exit": base_a_rc, "b_exit": base_b_rc,
                  "relay1_exit": base_r1, "relay2_exit": base_r2},
-    "interop": {"broker_exit": int_br, "a_exit": int_a_rc, "b_exit": int_b_rc,
-                "relay1_exit": int_r1, "relay2_exit": int_r2},
-    "broker_events_identical": broker_identical,
-    "a_events_identical": a_identical,
-    "referral_wire_identical": wire_ok,
+    "interop-b": {"broker_exit": intb_br, "a_exit": intb_a_rc, "b_exit": intb_b_rc,
+                  "relay1_exit": intb_r1, "relay2_exit": intb_r2},
+    "interop-a": {"broker_exit": inta_br, "a_exit": inta_a_rc, "b_exit": inta_b_rc,
+                  "relay1_exit": inta_r1, "relay2_exit": inta_r2},
+    "broker_events_identical_interop_b": broker_identical_b,
+    "a_events_identical_interop_b": a_identical_b,
+    "broker_events_identical_interop_a": broker_identical_a,
+    "b_events_identical_interop_a": b_identical_a,
+    "referral_wire_identical_interop_b": wire_ok_b,
+    "referral_wire_identical_interop_a": wire_ok_a,
     "artifacts": {
-        "baseline/broker.events": {"sha256": h(base_broker), "bytes": os.path.getsize(base_broker)},
-        "baseline/a.events": {"sha256": h(base_a), "bytes": os.path.getsize(base_a)},
-        "baseline/b.events": {"sha256": h(os.path.join(out, "baseline", "b.events")), "bytes": os.path.getsize(os.path.join(out, "baseline", "b.events"))},
-        "interop/broker.events": {"sha256": h(int_broker), "bytes": os.path.getsize(int_broker)},
-        "interop/a.events": {"sha256": h(int_a), "bytes": os.path.getsize(int_a)},
-        "interop/b.events": {"sha256": h(os.path.join(out, "interop", "b.events")), "bytes": os.path.getsize(os.path.join(out, "interop", "b.events"))},
+        "baseline/broker.events": art("baseline/broker.events"),
+        "baseline/a.events": art("baseline/a.events"),
+        "baseline/b.events": art("baseline/b.events"),
+        "interop-b/broker.events": art("interop-b/broker.events"),
+        "interop-b/a.events": art("interop-b/a.events"),
+        "interop-b/b.events": art("interop-b/b.events"),
+        "interop-a/broker.events": art("interop-a/broker.events"),
+        "interop-a/a.events": art("interop-a/a.events"),
+        "interop-a/b.events": art("interop-a/b.events"),
     },
     "inputs": {
         "oracle_driver_binary": h(driver),
         "wire_relay_binary": h(relay),
         "wire_dump_binary": h(dump),
         "native_3node_acceptor_binary": h(b3),
+        "native_3node_referrer_binary": h(a3),
     },
-    "wire_comparison": wire_detail,
+    "wire_comparison_interop_b": wire_detail_b,
+    "wire_comparison_interop_a": wire_detail_a,
 }
 mout = os.path.join(manifests, f"3node-{stamp}.json")
 with open(mout, 'w') as f:
@@ -205,10 +242,12 @@ with open(mout, 'w') as f:
 print(mout)
 if not ok:
     raise SystemExit(
-        f"3node court FAILED: broker-identical={broker_identical} "
-        f"a-identical={a_identical} wire={wire_ok} "
-        f"baseline=({base_br},{base_a_rc},{base_b_rc}) interop=({int_br},{int_a_rc},{int_b_rc})")
-print(f"3node court PASS: broker and A event streams byte-identical; "
-      f"referral wire structurally identical; "
-      f"broker={int_br} a={int_a_rc} native-b={int_b_rc}")
+        f"3node court FAILED: "
+        f"interop-b broker-identical={broker_identical_b} a-identical={a_identical_b} "
+        f"wire={wire_ok_b} native-b={intb_b_rc} "
+        f"interop-a broker-identical={broker_identical_a} b-identical={b_identical_a} "
+        f"wire={wire_ok_a} native-a={inta_a_rc}")
+print(f"3node court PASS: broker/A/B event streams byte-identical in both "
+      f"mixed pairings; referral wire structurally identical; "
+      f"interop-b native-b={intb_b_rc} interop-a native-a={inta_a_rc}")
 PYEOF

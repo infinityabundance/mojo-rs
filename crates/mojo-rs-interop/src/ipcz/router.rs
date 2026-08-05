@@ -515,10 +515,15 @@ impl ParcelQueue {
         self.current
     }
 
-    /// The number of contiguous elements received (== current for an ordered
-    /// stream).
+    /// The number of contiguous elements received (popped count plus the
+    /// contiguous buffered span — the official `GetCurrentSequenceLength`,
+    /// which advances when the next element is pushed, not when it is popped).
     pub fn get_current_sequence_length(&self) -> u64 {
-        self.current
+        let mut n = self.current;
+        while self.buffer.contains_key(&n) {
+            n += 1;
+        }
+        n
     }
 
     /// The final sequence length, if set.

@@ -94,10 +94,20 @@
       "status": "Oracle-compared"
     },
     {
-      "evidence": null,
+      "evidence": [
+        "evidence/routing/<stamp>/baseline/broker.events",
+        "evidence/routing/<stamp>/interop/broker.events",
+        "evidence/routing/<stamp>/interop/acceptor.events",
+        "evidence/routing/<stamp>/interop/wire/broker-to-acceptor.bin",
+        "evidence/routing/<stamp>/interop/wire/acceptor-to-broker.bin",
+        "evidence/manifests/routing-<stamp>.json",
+        "evidence/routing/WIRE-ANALYSIS.md",
+        "courts/curated/phase5-routing-bridge-bypass.md"
+      ],
       "id": "routing",
       "name": "Multi-node routing and port transfer",
-      "status": "Scaffolded"
+      "note": "Phase 5 partial seal: the native routing acceptor implements the non-broker ipcz Router state machine (terminal/proxy routers, decaying links, sequenced parcel queues, closure propagation, WithLocalPeer deserialization, SerializeNewRouterAndConfigureProxy + BeginProxyingToNewRouter, AcceptBypassLink, StopProxying teardown, RouterLinkState TryLock/SetSideStable). The official broker's event stream is byte-identical to the oracle-acceptor baseline for the portal-transfer-in-both-directions + proxy-bypass scenario; both processes exit 0. Not yet implemented: the acceptor-initiated bridge-bypass chain (BypassPeerWithLink outbound), RequestMemory/ProvideMemory, AcceptBypassLink outbound, multi-node graphs. Reproduce: scripts/run_routing_court.sh",
+      "status": "Oracle-compared"
     },
     {
       "evidence": null,

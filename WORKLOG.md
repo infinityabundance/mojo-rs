@@ -431,3 +431,134 @@ concurrency/stress/fuzz, other platforms.
 ### 10. Next highest-value parity gate
 
 Phase 5 routing (per the directive's sequence).
+
+## Cycle 2026-08-05 — Phase 5 routing seal (partial): portal transfer + proxy bypass
+
+### 1. What was actually implemented
+
+* `crates/mojo-rs-interop/src/ipcz/router.rs` (new): the ipcz `Router` state
+  machine for a non-broker node — `LinkKind`/`LinkSide`, `Edge` with primary
+  and decaying links (sequence-length bounds, deferred decay), `Parcel`,
+  `ParcelQueue` (sequenced out-of-order buffer + final length), `Portal`,
+  `Router` (terminal/proxy, collect/forward, decay finishing, side-stable
+  marking).
+* `crates/mojo-rs-interop/src/ipcz/routing.rs` (new): `RoutingAcceptor` — the
+  full non-broker node over one NodeLink: Connect handshake, the
+  shared-memory-service client handshake on portal 0 (byte-exact against the
+  golden fixture), `Router::Deserialize` (incl. `proxy_already_bypassed`
+  decaying-link setup), `SerializeNewRouterAndConfigureProxy` +
+  `BeginProxyingToNewRouter`, `AcceptBypassLink` semantics for the broker's
+  `BypassPeerWithLink`, `StopProxying` teardown, `RouteClosed` propagation,
+  `TryLockForClosure` via `RouterLinkState::TryLock`, parcel transmit with
+  portal serialization, per-link sequence numbering, `early_parcels`
+  buffering, deactivated-sublink message dropping (official `GetRouter`
+  semantics).
+* `crates/mojo-rs-interop/src/ipcz/link_memory.rs`: sublink allocation
+  (shared `next_sublink_id`), `RouterLinkState` fragment allocation,
+  `SetSideStable`/`TryLock`/`Unlock`/`ResetWaitingBit`/`read|write_link_status`
+  with correct CAS-refresh semantics; regression tests for every CAS loop.
+* `crates/mojo-rs-interop/src/ipcz/messages.rs`: `RouterDescriptor`
+  (96-byte wire layout, flag byte at offset 64), `BypassPeer`,
+  `AcceptBypassLink`, `StopProxying`, `ProxyWillStop` decode/encode; the
+  portal-0 AcceptParcel golden test; `FragmentDescriptor::default()` now
+  yields the null descriptor (`kInvalidBufferId`).
+* `src/bin/routing-acceptor.rs` (new binary), wired into Cargo.toml.
+* Oracle driver: `invite-broker-routing` / `invite-acceptor-routing` modes
+  (portal transfer both directions + proxy bypass + local re-extraction +
+  closure), logging-flags support, `RecvMessageWithHandle` diagnostics.
+* `scripts/run_routing_court.sh` (new): baseline (oracle⇄oracle) vs interop
+  (oracle⇄native) with byte-identical broker-event comparison and hashed
+  manifest.
+* `evidence/routing/WIRE-ANALYSIS.md`, `courts/curated/phase5-routing-bridge-bypass.md`.
+
+### 2. Which files changed
+
+See `git log --stat` for the cycle. Key files: the four ipcz modules above,
+the new binary, `oracle/driver/oracle_driver.cc`, `scripts/run_routing_court.sh`,
+`atlas/feature-matrix.json`, `STATUS.md`, `WORKLOG.md`.
+
+### 3. Compatibility claims now supported
+
+* Routing capability `Scaffolded` → `Oracle-compared` (feature-matrix).
+* Portal transfer in both directions (WithLocalPeer deserialization; proxy
+  serialization with central-link lock and `proxy_peer_*` recording).
+* Proxy bypass completion (`StopProxying` final-length bookkeeping, proxy
+  teardown) against the official broker's `BypassPeerWithNewLocalLink`.
+* `BypassPeerWithLink` adoption (`AcceptBypassLink` semantics) with
+  `StopProxyingToLocalPeer` reply and side-B stable marking.
+* Closure propagation (`RouteClosed` with exact sequence lengths) and
+  `TryLockForClosure` semantics.
+* The shared-memory-service client handshake on portal 0 — byte-identical
+  wire encoding (golden fixture).
+* `RouterDescriptor` and `RouterLinkState` wire layouts verified against the
+  pinned sources.
+
+### 4. Which courts were run
+
+* `scripts/run_routing_court.sh` — 4 consecutive PASS runs (byte-identical
+  broker events; broker=0, native acceptor=0).
+* `scripts/run_court.sh system` — 26/26 PASS (re-sealed after the changes).
+* `scripts/run_interop_court.sh` — PASS.
+* `scripts/run_invite_court.sh` — PASS.
+* `cargo test --workspace` — 33 suites, 0 failures (28 in mojo-rs-interop,
+  incl. the new CAS-loop and portal-0 golden tests).
+* `cargo clippy --workspace` — 0 errors. `cargo fmt --check` — clean.
+* `scripts/verify_no_oracle_dependency.sh` — PASS (2 binaries).
+
+### 5. Exact pass/fail counts
+
+Routing court: 4/4 PASS. System court: 26/26. Interop: 1/1. Invite: 1/1.
+Workspace tests: 33 suites / 0 failures.
+
+### 6. New residuals and evidence paths
+
+`evidence/routing/<stamp>/` (baseline + interop events and wire captures),
+`evidence/manifests/routing-<stamp>.json`, `evidence/routing/WIRE-ANALYSIS.md`,
+`courts/curated/phase5-routing-bridge-bypass.md`. Failed runs preserved:
+`20260805T054918Z`, `20260805T055902Z`, `20260805T060330Z` (forensic
+receipts).
+
+### 7. Every observed mismatch
+
+1. `w1` arrives on the DECAYING sublink (the broker's local peer forwards its
+   already-queued parcel over the decaying link), not on the central sublink.
+2. The broker's `BypassPeerWithLink` arrives AFTER `w1`; the transfer-back
+   must go out on the bootstrap router's migrated primary sublink.
+3. `RouterLinkState` CAS loops never refreshed `expected` (Rust semantics) —
+   spin-forever when the peer's bits were set.
+4. The transfer-back's peripheral descriptor carried a non-null
+   `new_link_state_fragment` — the broker's `Router::Deserialize` rejected it
+   and tore down the NodeLink.
+5. The oracle acceptor runs its own bridge-bypass chain; the native acceptor
+   replies only to the broker's bypass (documented, permitted divergence).
+
+### 8. Root cause of each fixed mismatch
+
+1. `SerializeNewRouterWithLocalPeer` forwards the local peer's queued parcels
+   over `new_decaying_sublink`; the court predicate and b1 sublink
+   bookkeeping now cover both sublinks.
+2. `MaybeStartBridgeBypass` fires on the broker's R_remote flush after the
+   transfer transmission; the acceptor must drain and process the bypass
+   before further bootstrap transmits.
+3. `compare_exchange_weak` does not update `expected` (unlike the C++
+   reference parameter); all four loops now refresh from `Err(actual)`.
+4. The official `FragmentDescriptor` default constructor sets
+   `buffer_id = kInvalidBufferId`; the Rust default now matches.
+5. Not a defect — the bridge chain is a documented scope boundary; sealed by
+   byte-identical broker events (same divergence as Phase 3).
+
+### 9. Remaining unsupported behavior
+
+Per the feature matrix: the acceptor-initiated bridge-bypass chain,
+`BypassPeer`/`AcceptBypassLink` outbound, `RequestMemory`/`ProvideMemory`,
+multi-subparcel/split parcels, node loss beyond the single link, multi-node
+graphs, Phase 6 C ABI export, Phase 7 mojom/bindings, stress/fuzz, other
+platforms.
+
+### 10. Next highest-value parity gate
+
+Per the directive's sequence: Phase 4 (data pipes and shared buffers) is
+sealed; the routing seal continues with the acceptor-initiated bridge bypass
+(the bridge chain `MaybeStartBridgeBypass`/`StartBridgeBypassFromLocalPeer`
+machinery) to remove the one documented wire divergence — then
+`RequestMemory`/`ProvideMemory` and multi-node graphs.

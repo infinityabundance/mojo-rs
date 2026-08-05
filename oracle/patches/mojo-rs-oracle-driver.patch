@@ -27,10 +27,10 @@ index 0000000000..91f5227bfe
 +}
 diff --git a/oracle_driver/oracle_driver.cc b/oracle_driver/oracle_driver.cc
 new file mode 100644
-index 0000000000..87dd4d4773
+index 0000000000..d71a6a50b6
 --- /dev/null
 +++ b/oracle_driver/oracle_driver.cc
-@@ -0,0 +1,1614 @@
+@@ -0,0 +1,1987 @@
 +// mojo_rs_oracle_driver — the oracle-side harness.
 +//
 +// Executes casefiles against the OFFICIAL pinned Mojo C API and emits events
@@ -1339,6 +1339,125 @@ index 0000000000..87dd4d4773
 +  return r;
 +}
 +
++// Send a payload (no handles) on a message pipe.
++MojoResult SendPayload(MojoHandle pipe, const std::string& payload) {
++  MojoMessageHandle message;
++  MojoResult r = MojoCreateMessage(nullptr, &message);
++  if (r != MOJO_RESULT_OK) {
++    return r;
++  }
++  void* buffer = nullptr;
++  uint32_t buffer_size = 0;
++  r = MojoAppendMessageData(message, static_cast<uint32_t>(payload.size()), nullptr, 0,
++                            nullptr, &buffer, &buffer_size);
++  if (r == MOJO_RESULT_OK && !payload.empty()) {
++    memcpy(buffer, payload.data(), payload.size());
++  }
++  if (r == MOJO_RESULT_OK) {
++    r = MojoWriteMessage(pipe, message, nullptr);
++  } else {
++    MojoDestroyMessage(message);
++  }
++  return r;
++}
++
++// Send a payload plus an attached message-pipe handle (portal transfer) on a
++// message pipe. The handle is consumed by the write on success.
++MojoResult SendMessageWithHandle(MojoHandle pipe,
++                                 const std::string& payload,
++                                 MojoHandle attached) {
++  MojoMessageHandle message;
++  MojoResult r = MojoCreateMessage(nullptr, &message);
++  if (r != MOJO_RESULT_OK) {
++    return r;
++  }
++  void* buffer = nullptr;
++  uint32_t buffer_size = 0;
++  r = MojoAppendMessageData(message, static_cast<uint32_t>(payload.size()), &attached, 1,
++                            nullptr, &buffer, &buffer_size);
++  if (r == MOJO_RESULT_OK && !payload.empty()) {
++    memcpy(buffer, payload.data(), payload.size());
++  }
++  if (r == MOJO_RESULT_OK) {
++    r = MojoWriteMessage(pipe, message, nullptr);
++  } else {
++    MojoDestroyMessage(message);
++  }
++  return r;
++}
++
++// Receive a payload (no handles) on a message pipe, polling on
++// MOJO_RESULT_SHOULD_WAIT up to a 10s deadline.
++MojoResult RecvPayload(MojoHandle pipe, std::string* payload) {
++  MojoMessageHandle message;
++  MojoResult r = MOJO_RESULT_SHOULD_WAIT;
++  const base::TimeTicks deadline = base::TimeTicks::Now() + base::Seconds(10);
++  while (r == MOJO_RESULT_SHOULD_WAIT && base::TimeTicks::Now() < deadline) {
++    r = MojoReadMessage(pipe, nullptr, &message);
++    if (r == MOJO_RESULT_SHOULD_WAIT) {
++      usleep(1000);
++    }
++  }
++  if (r != MOJO_RESULT_OK) {
++    return r;
++  }
++  uint32_t num_bytes = 0;
++  uint32_t num_handles = 0;
++  void* buffer = nullptr;
++  r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes, nullptr, &num_handles);
++  if (r == MOJO_RESULT_OK) {
++    payload->assign(static_cast<const char*>(buffer), num_bytes);
++  }
++  MojoDestroyMessage(message);
++  return r;
++}
++
++// Receive a payload plus exactly one attached message-pipe handle (portal
++// transfer), polling on MOJO_RESULT_SHOULD_WAIT up to a 10s deadline. The
++// extracted handle is returned in `out_handle` (never closed here).
++MojoResult RecvMessageWithHandle(MojoHandle pipe,
++                                 std::string* payload,
++                                 MojoHandle* out_handle) {
++  MojoMessageHandle message;
++  MojoResult r = MOJO_RESULT_SHOULD_WAIT;
++  const base::TimeTicks deadline = base::TimeTicks::Now() + base::Seconds(10);
++  while (r == MOJO_RESULT_SHOULD_WAIT && base::TimeTicks::Now() < deadline) {
++    r = MojoReadMessage(pipe, nullptr, &message);
++    if (r == MOJO_RESULT_SHOULD_WAIT) {
++      usleep(1000);
++    }
++  }
++  if (r != MOJO_RESULT_OK) {
++    fprintf(stderr, "RecvMessageWithHandle: MojoReadMessage -> %s\n",
++            ResultName(r).c_str());
++    MojoHandleSignalsState state = {0};
++    MojoQueryHandleSignalsState(pipe, &state);
++    fprintf(stderr, "  pipe signals: satisfied=%s satisfiable=%s\n",
++            SignalNames(state.satisfied_signals).DebugString().c_str(),
++            SignalNames(state.satisfiable_signals).DebugString().c_str());
++    return r;
++  }
++  uint32_t num_bytes = 0;
++  uint32_t num_handles = 0;
++  void* buffer = nullptr;
++  r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes, nullptr, &num_handles);
++  MojoHandle handle = MOJO_HANDLE_INVALID;
++  if (r == MOJO_RESULT_RESOURCE_EXHAUSTED && num_handles > 0) {
++    std::vector<MojoHandle> handles(num_handles);
++    r = MojoGetMessageData(message, nullptr, &buffer, &num_bytes, handles.data(),
++                           &num_handles);
++    if (r == MOJO_RESULT_OK) {
++      handle = handles[0];
++    }
++  }
++  if (r == MOJO_RESULT_OK) {
++    payload->assign(static_cast<const char*>(buffer), num_bytes);
++    *out_handle = handle;
++  }
++  MojoDestroyMessage(message);
++  return r;
++}
++
 +int RunBroker(int socket_fd, const char* events_path) {
 +  struct stat st;
 +  if (fstat(socket_fd, &st) != 0) {
@@ -1462,24 +1581,260 @@ index 0000000000..87dd4d4773
 +  return (r == MOJO_RESULT_OK) ? 0 : 1;
 +}
 +
++// ---------------------------------------------------------------------------
++// Phase 5 routing scenario (official broker and acceptor sides):
++//
++//   invite-broker-routing  <socket-fd> <events.jsonl>
++//   invite-acceptor-routing <socket-fd> <events.jsonl>
++//
++// Exercises portal transfer (endpoint migration) in both directions plus
++// proxy bypass:
++//   1. broker creates (A, B); sends B to the acceptor through the bootstrap
++//      pipe (the WithLocalPeer serialization path at the broker).
++//   2. broker writes "w1" on A -> routes over the wire to the acceptor's B'.
++//   3. acceptor writes "r1" on B' -> routes over the wire to the broker's A.
++//   4. acceptor sends B' back through the bootstrap pipe (the proxy
++//      serialization path at the acceptor; the broker completes the bypass
++//      with a local link and sends StopProxying to the acceptor's proxy).
++//   5. broker writes "w2" on A -> delivered locally to the re-extracted B''.
++//   6. broker closes A, B'', and the bootstrap pipe (RouteClosed propagation).
++// ---------------------------------------------------------------------------
++
++int RunRoutingBroker(int socket_fd, const char* events_path) {
++  mojo::core::Configuration config;
++  config.is_broker_process = true;
++  config.force_direct_shared_memory_allocation = true;
++  mojo::core::Init(config);
++
++  EventWriter writer(events_path);
++  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  base::DictValue extra;
++
++  MojoHandle invitation;
++  MojoResult r = MojoCreateInvitation(nullptr, &invitation);
++  writer.Emit(1, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  MojoHandle pipe;
++  r = MojoAttachMessagePipeToInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
++  writer.Emit(2, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
++  r = MojoSendInvitation(invitation, nullptr, &endpoint, nullptr, 0, nullptr);
++  writer.Emit(3, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  MojoHandle a, b;
++  r = MojoCreateMessagePipe(nullptr, &a, &b);
++  writer.Emit(4, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Transfer B to the acceptor through the bootstrap pipe.
++  r = SendMessageWithHandle(pipe, "transfer-b1", b);
++  writer.Emit(5, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // w1 routes over the wire to the acceptor's B'.
++  r = SendPayload(a, "w1");
++  writer.Emit(6, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  std::string payload;
++  r = RecvPayload(a, &payload);
++  base::DictValue recv_extra;
++  recv_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  writer.Emit(7, "message", ResultName(r), recv_extra);
++  if (r != MOJO_RESULT_OK || payload != "r1") {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // The acceptor sends B' back; the broker completes the bypass locally and
++  // extracts B''.
++  MojoHandle b2;
++  r = RecvMessageWithHandle(pipe, &payload, &b2);
++  base::DictValue back_extra;
++  back_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  back_extra.Set("handles", static_cast<int>(b2 != MOJO_HANDLE_INVALID ? 1 : 0));
++  writer.Emit(8, "message", ResultName(r), back_extra);
++  if (r != MOJO_RESULT_OK || payload != "transfer-back" ||
++      b2 == MOJO_HANDLE_INVALID) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // w2 routes locally from A to B'' (the bypass completed during the
++  // extraction above).
++  r = SendPayload(a, "w2");
++  writer.Emit(9, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++  r = RecvPayload(b2, &payload);
++  base::DictValue w2_extra;
++  w2_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  writer.Emit(10, "message", ResultName(r), w2_extra);
++  if (r != MOJO_RESULT_OK || payload != "w2") {
++    writer.WriteOut();
++    return 1;
++  }
++
++  MojoClose(a);
++  writer.Emit(11, "result", ResultName(MOJO_RESULT_OK), extra);
++  MojoClose(b2);
++  writer.Emit(12, "result", ResultName(MOJO_RESULT_OK), extra);
++  MojoClose(pipe);
++  writer.Emit(13, "result", ResultName(MOJO_RESULT_OK), extra);
++
++  writer.Emit(14, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return 0;
++}
++
++int RunRoutingAcceptor(int socket_fd, const char* events_path) {
++  mojo::core::Init();
++
++  EventWriter writer(events_path);
++  writer.Emit(0, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  base::DictValue extra;
++
++  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_fd);
++  MojoHandle invitation;
++  MojoResult r = MojoAcceptInvitation(&endpoint, nullptr, &invitation);
++  writer.Emit(1, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  MojoHandle pipe;
++  r = MojoExtractMessagePipeFromInvitation(invitation, "bootstrap", 9, nullptr, &pipe);
++  writer.Emit(2, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Receive B' (the transferred portal).
++  std::string payload;
++  MojoHandle b1;
++  r = RecvMessageWithHandle(pipe, &payload, &b1);
++  base::DictValue t_extra;
++  t_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  t_extra.Set("handles", static_cast<int>(b1 != MOJO_HANDLE_INVALID ? 1 : 0));
++  writer.Emit(3, "message", ResultName(r), t_extra);
++  if (r != MOJO_RESULT_OK || payload != "transfer-b1" ||
++      b1 == MOJO_HANDLE_INVALID) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Receive w1 over the wire.
++  r = RecvPayload(b1, &payload);
++  base::DictValue w1_extra;
++  w1_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  writer.Emit(4, "message", ResultName(r), w1_extra);
++  if (r != MOJO_RESULT_OK || payload != "w1") {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // r1 routes over the wire back to the broker's A.
++  r = SendPayload(b1, "r1");
++  writer.Emit(5, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // Transfer B' back through the bootstrap pipe (the proxy path).
++  r = SendMessageWithHandle(pipe, "transfer-back", b1);
++  writer.Emit(6, "result", ResultName(r), extra);
++  if (r != MOJO_RESULT_OK) {
++    writer.WriteOut();
++    return 1;
++  }
++
++  // The broker closes its bootstrap end: the read fails with
++  // FAILED_PRECONDITION (peer closed).
++  r = RecvPayload(pipe, &payload);
++  base::DictValue c_extra;
++  c_extra.Set("payload_hex", HexEncode(
++      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
++  writer.Emit(7, "message", ResultName(r), c_extra);
++
++  MojoClose(pipe);
++  MojoClose(invitation);
++  writer.Emit(8, "result", ResultName(MOJO_RESULT_OK), extra);
++  writer.Emit(9, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
++  writer.WriteOut();
++  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
++}
++
 +}  // namespace invite
 +
 +}  // namespace
 +
 +int main(int argc, char** argv) {
-+  if (argc < 2) {
++  // Optional leading `-v`/`--enable-logging` switches (used for debugging the
++  // ipcz state machine) are kept for `base::CommandLine::Init` but skipped
++  // when locating the positional command and arguments.
++  int pos = 1;
++  while (pos < argc && argv[pos][0] == '-') {
++    ++pos;
++  }
++  if (argc - pos < 1) {
 +    fprintf(stderr,
 +            "usage: mojo_rs_oracle_driver <baseline|invite-broker|invite-acceptor> ...\n");
 +    return 2;
 +  }
-+  std::string command = argv[1];
++  std::string command = argv[pos];
++  const int positional = argc - pos;
++  char** pos_argv = argv + (pos - 1);
++  pos_argv[0] = argv[0];
++  pos_argv[1] = argv[pos];
++  for (int i = 2; i < positional; ++i) {
++    pos_argv[i] = argv[pos + i - 1];
++  }
 +
 +  // Base-process plumbing required by Chromium's base library (shared memory
 +  // temp dirs, at-exit callbacks, message loop) before any Mojo IPC runs.
 +  base::CommandLine::Init(argc, argv);
 +  base::AtExitManager exit_manager;
 +
-+  if (command == "invite-broker" || command == "invite-acceptor") {
++  // Optional verbose ipcz tracing (MOJO_RS_ORACLE_VERBOSE=N): route DVLOG up
++  // to level N to stderr so the router state machine is observable. The
++  // per-file vlog level is driven by the `--v` switch via CommandLine.
++  if (const char* verbose = getenv("MOJO_RS_ORACLE_VERBOSE")) {
++    const int level = atoi(verbose);
++    logging::SetMinLogLevel(level > 0 ? -level : 0);
++  }
++
++  if (command == "invite-broker" || command == "invite-acceptor" ||
++      command == "invite-broker-routing" || command == "invite-acceptor-routing") {
 +    // The transport channel runs on a dedicated IO thread with an IO message
 +    // pump (the pump registers the IOWatcher the channel requires).
 +    base::Thread io_thread("mojo-rs-oracle-io");
@@ -1492,21 +1847,39 @@ index 0000000000..87dd4d4773
 +        io_thread.task_runner(),
 +        mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
 +    if (command == "invite-broker") {
-+      if (argc != 4) {
++      if (positional != 3) {
 +        fprintf(stderr,
 +                "usage: mojo_rs_oracle_driver invite-broker <socket-fd> <events.jsonl>\n");
 +        return 2;
 +      }
-+      int socket_fd = atoi(argv[2]);
-+      return invite::RunBroker(socket_fd, argv[3]);
++      int socket_fd = atoi(pos_argv[2]);
++      return invite::RunBroker(socket_fd, pos_argv[3]);
 +    }
-+    if (argc != 4) {
++    if (command == "invite-broker-routing") {
++      if (positional != 3) {
++        fprintf(stderr,
++                "usage: mojo_rs_oracle_driver invite-broker-routing <socket-fd> <events.jsonl>\n");
++        return 2;
++      }
++      int socket_fd = atoi(pos_argv[2]);
++      return invite::RunRoutingBroker(socket_fd, pos_argv[3]);
++    }
++    if (command == "invite-acceptor-routing") {
++      if (positional != 3) {
++        fprintf(stderr,
++                "usage: mojo_rs_oracle_driver invite-acceptor-routing <socket-fd> <events.jsonl>\n");
++        return 2;
++      }
++      int socket_fd = atoi(pos_argv[2]);
++      return invite::RunRoutingAcceptor(socket_fd, pos_argv[3]);
++    }
++    if (positional != 3) {
 +      fprintf(stderr,
 +              "usage: mojo_rs_oracle_driver invite-acceptor <socket-fd> <events.jsonl>\n");
 +      return 2;
 +    }
-+    int socket_fd = atoi(argv[2]);
-+    return invite::RunAcceptor(socket_fd, argv[3]);
++    int socket_fd = atoi(pos_argv[2]);
++    return invite::RunAcceptor(socket_fd, pos_argv[3]);
 +  }
 +
 +  // Register the C API thunks via the embedder. Embedders must NOT call

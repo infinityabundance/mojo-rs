@@ -11,4 +11,6 @@ pub mod acceptor;
 pub mod channel;
 pub mod link_memory;
 pub mod messages;
+pub mod router;
+pub mod routing;
 pub mod wire;

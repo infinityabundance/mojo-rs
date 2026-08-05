@@ -10,7 +10,7 @@
 use crate::ipcz::wire::{MessageBuilder, MessageHeader, WireError};
 
 /// A 128-bit ipcz node name (broker-assigned, unique per node).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NodeName {
     /// High 64 bits.
     pub high: u64,
@@ -23,11 +23,16 @@ impl NodeName {
     pub fn is_valid(self) -> bool {
         self.high != 0 || self.low != 0
     }
+
+    /// The all-zero (invalid) node name.
+    pub fn invalid() -> NodeName {
+        NodeName { high: 0, low: 0 }
+    }
 }
 
 /// A span of memory within a shared buffer owned by the link's `BufferPool`.
 /// Matches the ipcz `FragmentDescriptor` wire structure (16 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FragmentDescriptor {
     /// The shared buffer id (64-bit in this epoch).
     pub buffer_id: u64,
@@ -35,6 +40,19 @@ pub struct FragmentDescriptor {
     pub offset: u32,
     /// Fragment size in bytes.
     pub size: u32,
+}
+
+impl Default for FragmentDescriptor {
+    /// The official default constructor: a null descriptor
+    /// (`FragmentDescriptor()` in the pinned ipcz source defaults `buffer_id`
+    /// to `kInvalidBufferId`).
+    fn default() -> FragmentDescriptor {
+        FragmentDescriptor {
+            buffer_id: FragmentDescriptor::INVALID_BUFFER_ID,
+            offset: 0,
+            size: 0,
+        }
+    }
 }
 
 impl FragmentDescriptor {
@@ -119,6 +137,117 @@ pub struct AcceptParcelDriverObjects {
     pub driver_objects: Vec<DriverObjectRef>,
 }
 
+/// The serialized representation of a Router sent in a parcel
+/// (`ipcz/router_descriptor.h`, 96 bytes). When a portal is transferred to a
+/// new node, this describes the new Router that will back the portal at its
+/// new location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RouterDescriptor {
+    /// If the peer is already closed, the total number of parcels sent from
+    /// that end.
+    pub closed_peer_sequence_length: u64,
+    /// A new sublink on the transmitting NodeLink for the new router.
+    pub new_sublink: u64,
+    /// The `RouterLinkState` fragment for the new central link (when
+    /// `proxy_already_bypassed`).
+    pub new_link_state_fragment: FragmentDescriptor,
+    /// A second new sublink used as a peripheral decaying link (when
+    /// `proxy_already_bypassed`).
+    pub new_decaying_sublink: u64,
+    /// The sequence number of the next outbound parcel this router can
+    /// produce.
+    pub next_outgoing_sequence_number: u64,
+    /// The sequence number of the next inbound parcel this router expects.
+    pub next_incoming_sequence_number: u64,
+    /// The total length of the parcel sequence expected on the decaying link
+    /// (when `proxy_already_bypassed`).
+    pub decaying_incoming_sequence_length: u64,
+    /// Whether the other end of the route is already known to be closed.
+    pub peer_closed: bool,
+    /// Whether the sender bypassed the usual peripheral-link-first process
+    /// (`proxy_already_bypassed`).
+    pub proxy_already_bypassed: bool,
+    /// When set, the deserializing node must immediately initiate proxy
+    /// bypass against `proxy_peer_node_name` on `proxy_peer_sublink`.
+    pub proxy_peer_node_name: NodeName,
+    /// The sublink of the link to bypass (with `proxy_peer_node_name`).
+    pub proxy_peer_sublink: u64,
+}
+
+impl RouterDescriptor {
+    /// The serialized size of a RouterDescriptor (96 bytes).
+    pub const SIZE: usize = 96;
+
+    /// Decode a RouterDescriptor from its exact 96-byte serialized form.
+    pub fn decode(b: &[u8]) -> Result<RouterDescriptor, WireError> {
+        if b.len() != Self::SIZE {
+            return Err(WireError::BadArray);
+        }
+        Ok(RouterDescriptor {
+            closed_peer_sequence_length: le_u64(&b[0..8])?,
+            new_sublink: le_u64(&b[8..16])?,
+            new_link_state_fragment: FragmentDescriptor {
+                buffer_id: le_u64(&b[16..24])?,
+                offset: le_u32(&b[24..28])?,
+                size: le_u32(&b[28..32])?,
+            },
+            new_decaying_sublink: le_u64(&b[32..40])?,
+            next_outgoing_sequence_number: le_u64(&b[40..48])?,
+            next_incoming_sequence_number: le_u64(&b[48..56])?,
+            decaying_incoming_sequence_length: le_u64(&b[56..64])?,
+            // Byte 64: bit 0 = peer_closed, bit 1 = proxy_already_bypassed,
+            // then 7 reserved bytes.
+            peer_closed: b[64] & 1 != 0,
+            proxy_already_bypassed: b[64] & 2 != 0,
+            proxy_peer_node_name: NodeName {
+                high: le_u64(&b[72..80])?,
+                low: le_u64(&b[80..88])?,
+            },
+            proxy_peer_sublink: le_u64(&b[88..96])?,
+        })
+    }
+
+    /// Encode this descriptor into its exact 96-byte serialized form.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(Self::SIZE);
+        b.extend_from_slice(&self.closed_peer_sequence_length.to_le_bytes());
+        b.extend_from_slice(&self.new_sublink.to_le_bytes());
+        b.extend_from_slice(&self.new_link_state_fragment.buffer_id.to_le_bytes());
+        b.extend_from_slice(&self.new_link_state_fragment.offset.to_le_bytes());
+        b.extend_from_slice(&self.new_link_state_fragment.size.to_le_bytes());
+        b.extend_from_slice(&self.new_decaying_sublink.to_le_bytes());
+        b.extend_from_slice(&self.next_outgoing_sequence_number.to_le_bytes());
+        b.extend_from_slice(&self.next_incoming_sequence_number.to_le_bytes());
+        b.extend_from_slice(&self.decaying_incoming_sequence_length.to_le_bytes());
+        let mut flags = 0u8;
+        if self.peer_closed {
+            flags |= 1;
+        }
+        if self.proxy_already_bypassed {
+            flags |= 2;
+        }
+        b.push(flags);
+        b.extend_from_slice(&[0u8; 7]); // reserved0
+        b.extend_from_slice(&self.proxy_peer_node_name.high.to_le_bytes());
+        b.extend_from_slice(&self.proxy_peer_node_name.low.to_le_bytes());
+        b.extend_from_slice(&self.proxy_peer_sublink.to_le_bytes());
+        debug_assert_eq!(b.len(), Self::SIZE);
+        b
+    }
+}
+
+/// `HandleType` values (ipcz/handle_type.h).
+pub mod handle_type {
+    /// A portal handle consumes the next `RouterDescriptor` in the parcel.
+    pub const PORTAL: u32 = 0;
+    /// A box handle consumes the next driver object in the parcel.
+    pub const BOXED_DRIVER_OBJECT: u32 = 1;
+    /// A placeholder for a box handle in a split parcel transmission.
+    pub const RELAYED_BOXED_DRIVER_OBJECT: u32 = 2;
+    /// A placeholder for a box handle with associated subparcels.
+    pub const BOXED_SUBPARCEL: u32 = 3;
+}
+
 /// `RouteClosed` (id 22): a route endpoint observed peer closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteClosed {
@@ -146,6 +275,64 @@ pub struct BypassPeerWithLink {
     /// The `RouterLinkState` fragment for the new central link.
     pub new_link_state_fragment: FragmentDescriptor,
     /// The sequence length already sent by the initiator.
+    pub inbound_sequence_length: u64,
+}
+
+/// `BypassPeer` (id 30): a proxy asks its inward peer to establish a direct
+/// link to the proxy's outward peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BypassPeer {
+    /// Identifies the router to receive this message.
+    pub sublink: u64,
+    /// The name of the node where the bypass target (the proxy's outward
+    /// peer) lives.
+    pub bypass_target_node: NodeName,
+    /// The sublink used to route between the recipient's outward peer and
+    /// that router's own outward peer (the link to be bypassed).
+    pub bypass_target_sublink: u64,
+}
+
+/// `AcceptBypassLink` (id 31): a new direct central link to the targeted
+/// router, replacing its existing link to the proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptBypassLink {
+    /// Identifies the node of the targeted router's own outward peer, as well
+    /// as the sublink their nodes use to route between those routers.
+    pub current_peer_node: NodeName,
+    /// The sublink of the link to be replaced.
+    pub current_peer_sublink: u64,
+    /// The length of the parcel sequence routed to the proxy before the
+    /// bypass; the final length of the sequence to be routed from the proxy
+    /// before the old link is dropped.
+    pub inbound_sequence_length_from_bypassed_link: u64,
+    /// A new sublink on the transmitting NodeLink for the direct link.
+    pub new_sublink: u64,
+    /// The shared memory location of the new link's `RouterLinkState`.
+    pub new_link_state_fragment: FragmentDescriptor,
+}
+
+/// `StopProxying` (id 32): a bypassed proxy receives the final sequence
+/// lengths of parcels routed through it in either direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopProxying {
+    /// Identifies the router to receive this message.
+    pub sublink: u64,
+    /// The final sequence length of inbound parcels expected from the
+    /// outward peer.
+    pub inbound_sequence_length: u64,
+    /// The final sequence length of outbound parcels expected from the
+    /// inward peer.
+    pub outbound_sequence_length: u64,
+}
+
+/// `ProxyWillStop` (id 33): the final inbound sequence length a router can
+/// expect from its outward peer (a proxy that will stop forwarding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyWillStop {
+    /// Identifies the router to receive this message.
+    pub sublink: u64,
+    /// The final sequence length of inbound parcels expected from the
+    /// outward peer.
     pub inbound_sequence_length: u64,
 }
 
@@ -200,6 +387,14 @@ pub enum DecodedMessage {
     RouteClosed(RouteClosed),
     /// `RouteDisconnected` (id 23).
     RouteDisconnected(RouteDisconnected),
+    /// `BypassPeer` (id 30).
+    BypassPeer(BypassPeer),
+    /// `AcceptBypassLink` (id 31).
+    AcceptBypassLink(AcceptBypassLink),
+    /// `StopProxying` (id 32).
+    StopProxying(StopProxying),
+    /// `ProxyWillStop` (id 33).
+    ProxyWillStop(ProxyWillStop),
     /// `BypassPeerWithLink` (id 34).
     BypassPeerWithLink(BypassPeerWithLink),
     /// `StopProxyingToLocalPeer` (id 35).
@@ -234,6 +429,14 @@ pub const MSG_ID_BYPASS_PEER_WITH_LINK: u8 = 34;
 pub const MSG_ID_STOP_PROXYING_TO_LOCAL_PEER: u8 = 35;
 /// `FlushRouter` — route state flush.
 pub const MSG_ID_FLUSH_ROUTER: u8 = 36;
+/// `BypassPeer` — request a peer router to bypass a proxy.
+pub const MSG_ID_BYPASS_PEER: u8 = 30;
+/// `AcceptBypassLink` — accept a new direct central link.
+pub const MSG_ID_ACCEPT_BYPASS_LINK: u8 = 31;
+/// `StopProxying` — final sequence lengths for a bypassed proxy.
+pub const MSG_ID_STOP_PROXYING: u8 = 32;
+/// `ProxyWillStop` — a proxy will stop forwarding inbound parcels.
+pub const MSG_ID_PROXY_WILL_STOP: u8 = 33;
 /// `RequestMemory` — request a new shared buffer.
 pub const MSG_ID_REQUEST_MEMORY: u8 = 64;
 /// `ProvideMemory` — provide a new shared buffer.
@@ -259,10 +462,10 @@ pub fn message_id_name(id: u8) -> &'static str {
         MSG_ID_ACCEPT_PARCEL_DRIVER_OBJECTS => "AcceptParcelDriverObjects",
         MSG_ID_ROUTE_CLOSED => "RouteClosed",
         MSG_ID_ROUTE_DISCONNECTED => "RouteDisconnected",
-        30 => "BypassPeer",
-        31 => "AcceptBypassLink",
-        32 => "StopProxying",
-        33 => "ProxyWillStop",
+        MSG_ID_BYPASS_PEER => "BypassPeer",
+        MSG_ID_ACCEPT_BYPASS_LINK => "AcceptBypassLink",
+        MSG_ID_STOP_PROXYING => "StopProxying",
+        MSG_ID_PROXY_WILL_STOP => "ProxyWillStop",
         MSG_ID_BYPASS_PEER_WITH_LINK => "BypassPeerWithLink",
         MSG_ID_STOP_PROXYING_TO_LOCAL_PEER => "StopProxyingToLocalPeer",
         MSG_ID_FLUSH_ROUTER => "FlushRouter",
@@ -576,6 +779,47 @@ pub fn decode_message(payload: &[u8], num_fds: usize) -> Result<DecodedMessage, 
                 inbound_sequence_length: f_u64(32)?,
             })
         }
+        MSG_ID_BYPASS_PEER => {
+            if fields_end < fields + 32 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::BypassPeer(BypassPeer {
+                sublink: f_u64(0)?,
+                bypass_target_node: f_node(16)?, // reserved0 u64 at offset 8
+                bypass_target_sublink: f_u64(24)?,
+            })
+        }
+        MSG_ID_ACCEPT_BYPASS_LINK => {
+            if fields_end < fields + 48 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::AcceptBypassLink(AcceptBypassLink {
+                current_peer_node: f_node(0)?,
+                current_peer_sublink: f_u64(16)?,
+                inbound_sequence_length_from_bypassed_link: f_u64(24)?,
+                new_sublink: f_u64(32)?,
+                new_link_state_fragment: f_frag(40)?,
+            })
+        }
+        MSG_ID_STOP_PROXYING => {
+            if fields_end < fields + 24 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::StopProxying(StopProxying {
+                sublink: f_u64(0)?,
+                inbound_sequence_length: f_u64(8)?,
+                outbound_sequence_length: f_u64(16)?,
+            })
+        }
+        MSG_ID_PROXY_WILL_STOP => {
+            if fields_end < fields + 16 {
+                return Err(WireError::ShortParams);
+            }
+            DecodedMessage::ProxyWillStop(ProxyWillStop {
+                sublink: f_u64(0)?,
+                inbound_sequence_length: f_u64(8)?,
+            })
+        }
         MSG_ID_STOP_PROXYING_TO_LOCAL_PEER => {
             if fields_end < fields + 16 {
                 return Err(WireError::ShortParams);
@@ -655,33 +899,7 @@ pub fn encode_connect_from_non_broker_to_broker(
     b.build()
 }
 
-/// Precompute the payload-relative offsets of the parcel-data and
-/// handle-types arrays for an `AcceptParcel`, given the fixed 72-byte params
-/// (8-byte StructHeader + 64-byte V0 fields) and the array contents.
-///
-/// Arrays are laid out contiguously after the params, 8-byte aligned, in
-/// allocation order; a zero-length array is encoded as offset 0.
-fn accept_parcel_array_offsets(data: &[u8], handle_types: &[u32]) -> (u32, u32) {
-    use crate::ipcz::wire::MESSAGE_HEADER_SIZE;
-    use crate::ipcz::wire::align8;
-    let mut off = align8(MESSAGE_HEADER_SIZE + 72);
-    let pd = if data.is_empty() {
-        0
-    } else {
-        let o = off as u32;
-        off += align8(8 + data.len());
-        o
-    };
-    let ht = if handle_types.is_empty() {
-        0
-    } else {
-        let o = off as u32;
-        off += align8(8 + handle_types.len() * 4);
-        o
-    };
-    (pd, ht)
-}
-
+/// Encode `ConnectFromNonBrokerToBroker` (V0 + features array).
 /// Encode an `AcceptParcel` with inline parcel data.
 ///
 /// `handle_types` are the `HandleType` values (u32); `driver_data` are the
@@ -693,21 +911,118 @@ pub fn encode_accept_parcel_inline(
     handle_types: &[u32],
     driver_data: &[Vec<u8>],
 ) -> Vec<u8> {
-    let (pd_off, ht_off) = accept_parcel_array_offsets(data, handle_types);
+    encode_accept_parcel_arrays(
+        sublink,
+        sequence_number,
+        0,
+        1,
+        None,
+        data,
+        handle_types,
+        &[],
+        driver_data,
+    )
+}
+
+/// Encode an `AcceptParcel` whose data lives in a shared-memory fragment
+/// (the link-memory mailbox path). `parcel_fragment` must be non-null.
+pub fn encode_accept_parcel_fragment(
+    sublink: u64,
+    sequence_number: u64,
+    parcel_fragment: FragmentDescriptor,
+    handle_types: &[u32],
+    driver_data: &[Vec<u8>],
+) -> Vec<u8> {
+    encode_accept_parcel_arrays(
+        sublink,
+        sequence_number,
+        0,
+        1,
+        Some(parcel_fragment),
+        &[],
+        handle_types,
+        &[],
+        driver_data,
+    )
+}
+
+/// Encode an `AcceptParcel` that transfers one or more portals: `new_routers`
+/// holds the serialized `RouterDescriptor`s (one per `handle_type == PORTAL`),
+/// each exactly `RouterDescriptor::SIZE` bytes.
+pub fn encode_accept_parcel_with_portals(
+    sublink: u64,
+    sequence_number: u64,
+    data: &[u8],
+    handle_types: &[u32],
+    new_routers: &[Vec<u8>],
+    driver_data: &[Vec<u8>],
+) -> Vec<u8> {
+    encode_accept_parcel_arrays(
+        sublink,
+        sequence_number,
+        0,
+        1,
+        None,
+        data,
+        handle_types,
+        new_routers,
+        driver_data,
+    )
+}
+
+/// The general `AcceptParcel` encoder: params-first layout with the parcel
+/// data, handle types, and new-routers arrays allocated in order after the
+/// 72-byte params, matching the official byte-exact encoding.
+fn encode_accept_parcel_arrays(
+    sublink: u64,
+    sequence_number: u64,
+    subparcel_index: u32,
+    num_subparcels: u32,
+    parcel_fragment: Option<FragmentDescriptor>,
+    data: &[u8],
+    handle_types: &[u32],
+    new_routers: &[Vec<u8>],
+    driver_data: &[Vec<u8>],
+) -> Vec<u8> {
+    use crate::ipcz::wire::MESSAGE_HEADER_SIZE;
+    use crate::ipcz::wire::align8;
+    let mut off = align8(MESSAGE_HEADER_SIZE + 72);
+    let mut next = |len: usize, elem: u32| -> u32 {
+        if len == 0 {
+            return 0;
+        }
+        let o = off as u32;
+        off += align8(8 + len);
+        let _ = elem;
+        o
+    };
+    let pd_off = next(data.len(), 1);
+    let ht_off = next(handle_types.len() * 4, 4);
+    let nr_off = next(
+        new_routers.iter().map(Vec::len).sum(),
+        RouterDescriptor::SIZE as u32,
+    );
     let mut b = MessageBuilder::new(MSG_ID_ACCEPT_PARCEL);
     let mut fields = Vec::with_capacity(64);
     fields.extend_from_slice(&sublink.to_le_bytes());
     fields.extend_from_slice(&sequence_number.to_le_bytes());
-    fields.extend_from_slice(&0u32.to_le_bytes()); // subparcel_index
-    fields.extend_from_slice(&1u32.to_le_bytes()); // num_subparcels
-    // Null parcel fragment: buffer id = u64::MAX, offset = 0, size = 0
-    // (FragmentDescriptor is exactly 16 bytes).
-    fields.extend_from_slice(&FragmentDescriptor::INVALID_BUFFER_ID.to_le_bytes());
-    fields.extend_from_slice(&0u32.to_le_bytes());
-    fields.extend_from_slice(&0u32.to_le_bytes());
+    fields.extend_from_slice(&subparcel_index.to_le_bytes());
+    fields.extend_from_slice(&num_subparcels.to_le_bytes());
+    match parcel_fragment {
+        Some(frag) => {
+            fields.extend_from_slice(&frag.buffer_id.to_le_bytes());
+            fields.extend_from_slice(&frag.offset.to_le_bytes());
+            fields.extend_from_slice(&frag.size.to_le_bytes());
+        }
+        None => {
+            fields.extend_from_slice(&FragmentDescriptor::INVALID_BUFFER_ID.to_le_bytes());
+            fields.extend_from_slice(&0u32.to_le_bytes());
+            fields.extend_from_slice(&0u32.to_le_bytes());
+        }
+    }
     fields.extend_from_slice(&pd_off.to_le_bytes());
     fields.extend_from_slice(&ht_off.to_le_bytes());
-    fields.extend_from_slice(&0u32.to_le_bytes()); // new_routers
+    fields.extend_from_slice(&nr_off.to_le_bytes());
     fields.extend_from_slice(&0u32.to_le_bytes()); // padding
     let num_objects = driver_data.len() as u32;
     fields.extend_from_slice(&0u32.to_le_bytes()); // first_object_index
@@ -723,46 +1038,12 @@ pub fn encode_accept_parcel_inline(
         }
         b.append_array(&bytes, handle_types.len() as u32);
     }
-    if !driver_data.is_empty() {
-        b.append_driver_objects(driver_data);
-    }
-    b.build()
-}
-
-/// Encode an `AcceptParcel` whose data lives in a shared-memory fragment
-/// (the link-memory mailbox path). `parcel_fragment` must be non-null.
-pub fn encode_accept_parcel_fragment(
-    sublink: u64,
-    sequence_number: u64,
-    parcel_fragment: FragmentDescriptor,
-    handle_types: &[u32],
-    driver_data: &[Vec<u8>],
-) -> Vec<u8> {
-    let (_, ht_off) = accept_parcel_array_offsets(&[], handle_types);
-    let mut b = MessageBuilder::new(MSG_ID_ACCEPT_PARCEL);
-    let mut fields = Vec::with_capacity(64);
-    fields.extend_from_slice(&sublink.to_le_bytes());
-    fields.extend_from_slice(&sequence_number.to_le_bytes());
-    fields.extend_from_slice(&0u32.to_le_bytes()); // subparcel_index
-    fields.extend_from_slice(&1u32.to_le_bytes()); // num_subparcels
-    fields.extend_from_slice(&parcel_fragment.buffer_id.to_le_bytes());
-    fields.extend_from_slice(&parcel_fragment.offset.to_le_bytes());
-    fields.extend_from_slice(&parcel_fragment.size.to_le_bytes());
-    // parcel_data: none (data is in the fragment).
-    fields.extend_from_slice(&0u32.to_le_bytes());
-    fields.extend_from_slice(&ht_off.to_le_bytes());
-    fields.extend_from_slice(&0u32.to_le_bytes()); // new_routers
-    fields.extend_from_slice(&0u32.to_le_bytes()); // padding
-    let num_objects = driver_data.len() as u32;
-    fields.extend_from_slice(&0u32.to_le_bytes()); // first_object_index
-    fields.extend_from_slice(&num_objects.to_le_bytes());
-    b.append_params(&fields);
-    if !handle_types.is_empty() {
-        let mut bytes = Vec::with_capacity(handle_types.len() * 4);
-        for t in handle_types {
-            bytes.extend_from_slice(&t.to_le_bytes());
+    if !new_routers.is_empty() {
+        let mut bytes = Vec::with_capacity(new_routers.len() * RouterDescriptor::SIZE);
+        for r in new_routers {
+            bytes.extend_from_slice(r);
         }
-        b.append_array(&bytes, handle_types.len() as u32);
+        b.append_array(&bytes, new_routers.len() as u32);
     }
     if !driver_data.is_empty() {
         b.append_driver_objects(driver_data);
@@ -844,6 +1125,70 @@ pub fn encode_bypass_peer_with_link(
     fields.extend_from_slice(&new_link_state_fragment.buffer_id.to_le_bytes());
     fields.extend_from_slice(&new_link_state_fragment.offset.to_le_bytes());
     fields.extend_from_slice(&new_link_state_fragment.size.to_le_bytes());
+    fields.extend_from_slice(&inbound_sequence_length.to_le_bytes());
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `BypassPeer` (id 30). `reserved0` must be zero.
+pub fn encode_bypass_peer(
+    sublink: u64,
+    bypass_target_node: NodeName,
+    bypass_target_sublink: u64,
+) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_BYPASS_PEER);
+    let mut fields = Vec::with_capacity(32);
+    fields.extend_from_slice(&sublink.to_le_bytes());
+    fields.extend_from_slice(&0u64.to_le_bytes()); // reserved0
+    fields.extend_from_slice(&bypass_target_node.high.to_le_bytes());
+    fields.extend_from_slice(&bypass_target_node.low.to_le_bytes());
+    fields.extend_from_slice(&bypass_target_sublink.to_le_bytes());
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `AcceptBypassLink` (id 31).
+pub fn encode_accept_bypass_link(
+    current_peer_node: NodeName,
+    current_peer_sublink: u64,
+    inbound_sequence_length_from_bypassed_link: u64,
+    new_sublink: u64,
+    new_link_state_fragment: FragmentDescriptor,
+) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_ACCEPT_BYPASS_LINK);
+    let mut fields = Vec::with_capacity(48);
+    fields.extend_from_slice(&current_peer_node.high.to_le_bytes());
+    fields.extend_from_slice(&current_peer_node.low.to_le_bytes());
+    fields.extend_from_slice(&current_peer_sublink.to_le_bytes());
+    fields.extend_from_slice(&inbound_sequence_length_from_bypassed_link.to_le_bytes());
+    fields.extend_from_slice(&new_sublink.to_le_bytes());
+    fields.extend_from_slice(&new_link_state_fragment.buffer_id.to_le_bytes());
+    fields.extend_from_slice(&new_link_state_fragment.offset.to_le_bytes());
+    fields.extend_from_slice(&new_link_state_fragment.size.to_le_bytes());
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `StopProxying` (id 32).
+pub fn encode_stop_proxying(
+    sublink: u64,
+    inbound_sequence_length: u64,
+    outbound_sequence_length: u64,
+) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_STOP_PROXYING);
+    let mut fields = Vec::with_capacity(24);
+    fields.extend_from_slice(&sublink.to_le_bytes());
+    fields.extend_from_slice(&inbound_sequence_length.to_le_bytes());
+    fields.extend_from_slice(&outbound_sequence_length.to_le_bytes());
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `ProxyWillStop` (id 33).
+pub fn encode_proxy_will_stop(sublink: u64, inbound_sequence_length: u64) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_PROXY_WILL_STOP);
+    let mut fields = Vec::with_capacity(16);
+    fields.extend_from_slice(&sublink.to_le_bytes());
     fields.extend_from_slice(&inbound_sequence_length.to_le_bytes());
     b.append_params(&fields);
     b.build()
@@ -964,6 +1309,27 @@ mod tests {
             }
             other => panic!("expected AcceptParcel, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn encode_portal0_accept_parcel_matches_capture() {
+        // The oracle acceptor's shared-memory-service client handshake: an
+        // AcceptParcel on the internal portal 0 carrying a boxed Transport
+        // endpoint (one descriptor).
+        let mut obj = Vec::new();
+        obj.extend_from_slice(&8u32.to_le_bytes()); // ObjectHeader.size
+        obj.extend_from_slice(&0u32.to_le_bytes()); // ObjectHeader.type = kTransport
+        obj.extend_from_slice(&1u32.to_le_bytes()); // TransportHeader.destination_type
+        obj.extend_from_slice(&[0u8; 4]); // same_remote, peer_trusted, trusted_by_peer, reserved
+        let encoded = encode_accept_parcel_inline(0, 0, &[], &[1], &[obj]);
+        let data = fixture("acceptor-to-broker.bin");
+        let msgs = parse_stream(&data).unwrap();
+        let mut captured = msgs[1].payload.clone();
+        set_message_sequence_number(&mut captured, 0);
+        assert_eq!(
+            encoded, captured,
+            "portal-0 AcceptParcel must be byte-identical to the oracle's"
+        );
     }
 
     #[test]

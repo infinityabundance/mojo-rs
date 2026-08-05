@@ -485,6 +485,22 @@ impl Acceptor {
                 Ok(())
             }
             DecodedMessage::FlushRouter(_) => Ok(()),
+            DecodedMessage::BypassPeer(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_BYPASS_PEER,
+                "BypassPeer not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::AcceptBypassLink(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_ACCEPT_BYPASS_LINK,
+                "AcceptBypassLink not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::StopProxying(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_STOP_PROXYING,
+                "StopProxying not supported by the Phase 3 acceptor",
+            )),
+            DecodedMessage::ProxyWillStop(_) => Err(AcceptorError::Unsupported(
+                crate::ipcz::messages::MSG_ID_PROXY_WILL_STOP,
+                "ProxyWillStop not supported by the Phase 3 acceptor",
+            )),
             DecodedMessage::RequestMemory(_) => Err(AcceptorError::Unsupported(
                 crate::ipcz::messages::MSG_ID_REQUEST_MEMORY,
                 "RequestMemory not supported by the Phase 3 acceptor",

@@ -1,0 +1,15 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"result","op_id":2,"result":"MOJO_RESULT_OK","seq":3}
+{"event":"result","op_id":3,"result":"MOJO_RESULT_OK","seq":4}
+{"event":"result","op_id":4,"result":"MOJO_RESULT_OK","seq":5}
+{"event":"result","op_id":5,"result":"MOJO_RESULT_OK","seq":6}
+{"event":"result","op_id":6,"result":"MOJO_RESULT_OK","seq":7}
+{"event":"message","op_id":7,"payload_hex":"7231","result":"MOJO_RESULT_OK","seq":8}
+{"event":"message","handles":1,"op_id":8,"payload_hex":"7472616e736665722d6261636b","result":"MOJO_RESULT_OK","seq":9}
+{"event":"result","op_id":9,"result":"MOJO_RESULT_OK","seq":10}
+{"event":"message","op_id":10,"payload_hex":"7732","result":"MOJO_RESULT_OK","seq":11}
+{"event":"result","op_id":11,"result":"MOJO_RESULT_OK","seq":12}
+{"event":"result","op_id":12,"result":"MOJO_RESULT_OK","seq":13}
+{"event":"result","op_id":13,"result":"MOJO_RESULT_OK","seq":14}
+{"event":"lifecycle","op_id":14,"result":"MOJO_RESULT_OK","seq":15}

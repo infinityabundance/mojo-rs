@@ -234,7 +234,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mojo-rs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mojo-rs-bindings",
  "mojo-rs-c-api",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-bindings"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mojo-rs-core",
  "mojo-rs-wire",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-c-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mojo-rs-core",
  "mojo-rs-platform",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-casefile"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -274,14 +274,14 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-codegen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mojo-rs-mojom",
 ]
 
 [[package]]
 name = "mojo-rs-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "loom",
  "mojo-rs-platform",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-interop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "libc",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-io"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mojo-rs-core",
  "mojo-rs-platform",
@@ -311,11 +311,11 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-mojom"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "mojo-rs-oracle"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "mojo-rs-casefile",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "libc",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-system"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mojo-rs-core",
  "mojo-rs-platform",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-test-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "mojo-rs-casefile",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "mojo-rs-wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "proptest",

@@ -108,6 +108,76 @@ The native side implements, against the pinned ipcz sources:
 
 ## Sealed
 
+### Phase 5 routing seal (partial) — portal transfer in both directions + proxy bypass
+
+The routing court (`scripts/run_routing_court.sh`) runs the official broker
+(`invite-broker-routing`) against the official oracle acceptor (baseline) and
+against the native Rust `routing-acceptor` (interop), both through the
+wire-relay man-in-the-middle:
+
+1. the broker creates a message pipe `(A, B)` and sends `B` through the
+   bootstrap pipe (the `SerializeNewRouterWithLocalPeer` path — the new
+   router is created on the acceptor with a central link plus a decaying
+   peripheral link and a shared `RouterLinkState`);
+2. the broker writes `w1` on `A` — routed over the wire (via the decaying
+   link, because the parcel was queued when the pair was split);
+3. the acceptor writes `r1` on `B'` — routed back to the broker's `A`;
+4. the acceptor sends `B'` back through the bootstrap pipe (the
+   `SerializeNewRouterAndConfigureProxy` path — locking the central link,
+   recording the proxy peer, and leaving a proxy behind); the broker
+   deserializes `B''`, completes the bypass with a new local link
+   (`BypassPeerWithNewLocalLink`), and sends `StopProxying` to the acceptor's
+   proxy;
+5. the broker writes `w2` on `A` — delivered locally to `B''`;
+6. the broker closes `A`, `B''`, and the bootstrap pipe — closure
+   propagates (`RouteClosed`).
+
+The broker's event stream is BYTE-IDENTICAL between the baseline and the
+interop run (15 events: invitation, transfer, `w1`, `r1`, `transfer-back`
+with one extracted handle, `w2`, closes, lifecycle); both processes exit 0.
+
+Wire residuals vs the baseline are documented in
+`evidence/routing/WIRE-ANALYSIS.md` and the curated casefile
+`courts/curated/phase5-routing-bridge-bypass.md`: the oracle acceptor runs
+its own bridge-chain bypass (`BypassPeerWithLink` outbound), the native
+acceptor replies only to the broker's bypass. Normalized: node names, sublink
+ids, per-direction link sequence numbers.
+
+The native routing acceptor (`crates/mojo-rs-interop/src/ipcz/{router,routing}.rs`)
+implements the non-broker ipcz `Router` state machine against the pinned
+sources: terminal/proxy routers, decaying links with sequence-length bounds,
+sequenced parcel queues, `Router::Deserialize` (including the
+`proxy_already_bypassed` setup), `SerializeNewRouterAndConfigureProxy` +
+`BeginProxyingToNewRouter`, `AcceptBypassLink` semantics for the broker's
+`BypassPeerWithLink`, `StopProxying` teardown, `RouteClosed` propagation, and
+the shared `RouterLinkState` compare-exchange loops
+(`TryLock`/`SetSideStable`/`Unlock`/`ResetWaitingBit`, each verified against
+`router_link_state.cc` and with regression tests). Also sealed: the
+shared-memory-service client handshake on the internal portal 0 (byte-exact
+against the golden fixture) and the `RouterDescriptor` wire layout
+(96 bytes; `proxy_already_bypassed`/`peer_closed` flag byte at offset 64).
+
+Real bugs found and fixed during this cycle (each preserved in
+`evidence/routing/`):
+- the `RouterLinkState` compare-exchange loops never refreshed `expected`
+  from the CAS result (Rust's CAS does not update the argument, unlike C++'s
+  reference parameter) — would spin forever when the peer had set bits;
+- the transfer-back descriptor carried a non-null `new_link_state_fragment`
+  (`FragmentDescriptor::default()` was `{0,0,0}` instead of
+  `{kInvalidBufferId,0,0}`) — the broker's `Router::Deserialize` rejected the
+  peripheral link and tore down the NodeLink;
+- `w1` arrives on the decaying sublink (the broker's local peer forwards its
+  queued parcel over the decaying link), not on the central sublink — the
+  court's receive predicate and the sublink bookkeeping now handle both;
+- the bootstrap router's primary sublink migrates on the broker's bypass —
+  the transfer-back and the `RouteClosed` wait must follow the current
+  primary sublink.
+
+Not yet implemented (documented scope boundary for this phase): the
+acceptor-initiated bridge-bypass chain, `BypassPeer`/`AcceptBypassLink`
+outbound, `RequestMemory`/`ProvideMemory`, multi-subparcel and split
+parcels, and multi-node graphs.
+
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
 streams for every case in `courts/system/`:
@@ -168,12 +238,14 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 
 ## Not yet sealed (next gates)
 
-- Routing / port transfer (Phase 5): the full portal state machines —
-  portal transfer through parcels (RouterDescriptor), proxy bypass
-  (BypassPeer/AcceptBypassLink), node loss (RouteDisconnected), multi-node
-  graphs, and the remaining NodeLink message types (RequestMemory,
-  ProvideMemory, AddBlockBuffer beyond the primary buffer). The Phase 3
-  acceptor covers the direct central-link subset.
+- Routing / port transfer (Phase 5): the remaining portal state machines —
+  the acceptor-initiated bridge-bypass chain, `BypassPeer`/`AcceptBypassLink`
+  outbound, node loss (`RouteDisconnected`) beyond the single-link case,
+  `RequestMemory`/`ProvideMemory`, multi-node graphs, and portal transfer
+  under load. The native routing acceptor currently seals the
+  WithLocalPeer transfer, the proxy serialization path, the broker's
+  `BypassPeerWithLink` adoption, `StopProxying` teardown, and closure
+  propagation over a single NodeLink.
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 
@@ -189,6 +261,9 @@ written reason here.
 - `scripts/run_invite_court.sh` — official invitation flow + wire capture.
 - `scripts/run_interop_court.sh` — Phase 3 interop seal (official broker ⇄
   native acceptor).
+- `scripts/run_routing_court.sh` — Phase 5 routing seal (official broker ⇄
+  native routing acceptor; portal transfer in both directions + proxy bypass;
+  byte-identical broker events).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

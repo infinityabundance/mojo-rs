@@ -23,7 +23,7 @@
 //! descriptor is a `LinkMemoryError`, never an out-of-bounds access.
 
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use mojo_rs_platform::shm::{Access, Mapping, SharedMemory};
 
@@ -223,6 +223,261 @@ impl LinkMemory {
     /// `RefCountedFragment` ref_count).
     pub const LINK_STATUS_OFFSET: usize = 4;
 
+    /// The offset of `allowed_bypass_request_source` within a
+    /// `RouterLinkState` (NodeName, 16 bytes, at offset 8).
+    pub const LINK_ALLOWED_SOURCE_OFFSET: usize = 8;
+
+    /// Allocate `count` contiguous sublink ids from the shared header
+    /// allocator (`NodeLinkMemory::AllocateSublinkIds`: atomic fetch_add on
+    /// `PrimaryBufferHeader.next_sublink_id`). Both sides allocate from the
+    /// same counter, so ids never collide.
+    pub fn allocate_sublink_ids(&self, count: u64) -> Result<u64, LinkMemoryError> {
+        let view = self.fragment(FragmentDescriptor {
+            buffer_id: PRIMARY_BUFFER_ID,
+            offset: 8, // PrimaryBufferHeader.next_sublink_id
+            size: 8,
+        })?;
+        // SAFETY: the header word is 8-byte aligned within the mapping and
+        // shared with the peer process; all access is atomic on both sides.
+        let counter = unsafe { AtomicU64::from_ptr(view.as_ptr() as *mut u64) };
+        Ok(counter.fetch_add(count, Ordering::Relaxed))
+    }
+
+    /// Allocate a 64-byte block and initialize it as a fresh `RouterLinkState`
+    /// (all zeros; `RouterLinkState::Initialize`). Returns the descriptor, or
+    /// None when the allocator is exhausted.
+    pub fn try_allocate_link_state(&mut self) -> Result<FragmentDescriptor, LinkMemoryError> {
+        let block = self.alloc_64_block()?;
+        let view = self.fragment_mut(block)?;
+        // RouterLinkState::Initialize default-constructs the struct: status 0
+        // and zeroed reserved fields (a zeroed block is exactly that).
+        for b in view.iter_mut() {
+            *b = 0;
+        }
+        Ok(block)
+    }
+
+    /// The official `RouterLinkState::SetSideStable`: OR the side's stable bit
+    /// into the status word with compare-exchange semantics.
+    pub fn set_side_stable(
+        &self,
+        desc: FragmentDescriptor,
+        side_a: bool,
+    ) -> Result<(), LinkMemoryError> {
+        let bit = if side_a {
+            RouterLinkStatus::SIDE_A_STABLE
+        } else {
+            RouterLinkStatus::SIDE_B_STABLE
+        };
+        let view = self.fragment(desc)?;
+        // SAFETY: the status word is 8-byte aligned within the mapping and
+        // shared with the peer; all access is atomic on both sides.
+        let status =
+            unsafe { AtomicU32::from_ptr(view.as_ptr().add(Self::LINK_STATUS_OFFSET) as *mut u32) };
+        // `SetSideStable`: compare-exchange with the `expected` value updated
+        // from the observed status on each failure (Rust's CAS does not update
+        // the `expected` argument, unlike C++'s reference parameter).
+        let mut expected = 0u32;
+        loop {
+            match status.compare_exchange_weak(
+                expected,
+                expected | bit,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    expected = actual;
+                    // Another (possibly concurrent) operation already set our
+                    // stable bit; nothing left to do.
+                    if (expected & bit) != 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The official `RouterLinkState::TryLock` (mirrors the compare-exchange
+    /// loop exactly: lock when both sides are stable and unlocked; set the
+    /// waiting bit when the other side is still unstable).
+    pub fn try_lock_link_state(
+        &self,
+        desc: FragmentDescriptor,
+        side_a: bool,
+    ) -> Result<bool, LinkMemoryError> {
+        use RouterLinkStatus as S;
+        let (this_stable, other_stable, locked_by_this, locked_either, this_waiting) = if side_a {
+            (
+                S::SIDE_A_STABLE,
+                S::SIDE_B_STABLE,
+                S::LOCKED_BY_SIDE_A,
+                S::LOCKED_BY_SIDE_A | S::LOCKED_BY_SIDE_B,
+                S::SIDE_A_WAITING,
+            )
+        } else {
+            (
+                S::SIDE_B_STABLE,
+                S::SIDE_A_STABLE,
+                S::LOCKED_BY_SIDE_B,
+                S::LOCKED_BY_SIDE_A | S::LOCKED_BY_SIDE_B,
+                S::SIDE_B_WAITING,
+            )
+        };
+        let view = self.fragment(desc)?;
+        // SAFETY: the status word is 8-byte aligned within the mapping and
+        // shared with the peer; all access is atomic on both sides.
+        let status =
+            unsafe { AtomicU32::from_ptr(view.as_ptr().add(Self::LINK_STATUS_OFFSET) as *mut u32) };
+        // `TryLock`: `expected` is refreshed from the observed status on every
+        // failed CAS, exactly like the C++ reference parameter.
+        let mut expected = S::STABLE;
+        let mut desired_bit = locked_by_this;
+        loop {
+            match status.compare_exchange_weak(
+                expected,
+                expected | desired_bit,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    expected = actual;
+                    if (expected & locked_either) != 0 || (expected & this_stable) == 0 {
+                        return Ok(false);
+                    }
+                    if desired_bit == locked_by_this && (expected & other_stable) == 0 {
+                        // Trying to lock, but the other side isn't stable yet:
+                        // set our waiting bit instead.
+                        desired_bit = this_waiting;
+                    } else if desired_bit == this_waiting && (expected & S::STABLE) == S::STABLE {
+                        // Waiting, and the other side is now stable: go back to
+                        // trying to lock the link.
+                        desired_bit = locked_by_this;
+                    }
+                }
+            }
+        }
+        Ok(desired_bit == locked_by_this)
+    }
+
+    /// The official `RouterLinkState::Unlock`: clear the side's lock bit while
+    /// the link is stable.
+    pub fn unlock_link_state(
+        &self,
+        desc: FragmentDescriptor,
+        side_a: bool,
+    ) -> Result<(), LinkMemoryError> {
+        use RouterLinkStatus as S;
+        let locked_by_this = if side_a {
+            S::LOCKED_BY_SIDE_A
+        } else {
+            S::LOCKED_BY_SIDE_B
+        };
+        let view = self.fragment(desc)?;
+        // SAFETY: as in try_lock_link_state.
+        let status =
+            unsafe { AtomicU32::from_ptr(view.as_ptr().add(Self::LINK_STATUS_OFFSET) as *mut u32) };
+        // `Unlock`: refresh `expected` from the observed status each failure.
+        let mut expected = S::STABLE | locked_by_this;
+        let mut desired = S::STABLE;
+        loop {
+            match status.compare_exchange_weak(
+                expected,
+                desired,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    expected = actual;
+                    // Someone else already unlocked (or never locked) the link.
+                    if (expected & locked_by_this) == 0 {
+                        break;
+                    }
+                    desired = expected & !locked_by_this;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The official `RouterLinkState::ResetWaitingBit`: clear `side`'s waiting
+    /// bit when the link is stable, unlocked, and the bit is set.
+    pub fn reset_waiting_bit(
+        &self,
+        desc: FragmentDescriptor,
+        side_a: bool,
+    ) -> Result<bool, LinkMemoryError> {
+        use RouterLinkStatus as S;
+        let this_waiting = if side_a {
+            S::SIDE_A_WAITING
+        } else {
+            S::SIDE_B_WAITING
+        };
+        let locked_either = S::LOCKED_BY_SIDE_A | S::LOCKED_BY_SIDE_B;
+        let view = self.fragment(desc)?;
+        // SAFETY: as in try_lock_link_state.
+        let status =
+            unsafe { AtomicU32::from_ptr(view.as_ptr().add(Self::LINK_STATUS_OFFSET) as *mut u32) };
+        // `ResetWaitingBit`: refresh `expected` from the observed status each
+        // failure.
+        let mut expected = S::STABLE | this_waiting;
+        let mut desired = S::STABLE;
+        loop {
+            match status.compare_exchange_weak(
+                expected,
+                desired,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(true),
+                Err(actual) => {
+                    expected = actual;
+                    if (expected & S::STABLE) != S::STABLE
+                        || (expected & this_waiting) == 0
+                        || (expected & locked_either) != 0
+                    {
+                        // Not stable, not waiting, or already locked: nothing
+                        // to change.
+                        return Ok(false);
+                    }
+                    desired = expected & !this_waiting;
+                }
+            }
+        }
+    }
+
+    /// Read the `allowed_bypass_request_source` NodeName of a link state.
+    pub fn read_allowed_bypass_source(
+        &self,
+        desc: FragmentDescriptor,
+    ) -> Result<u64, LinkMemoryError> {
+        let view = self.fragment(desc)?;
+        let off = Self::LINK_ALLOWED_SOURCE_OFFSET;
+        let low = view.get(off..off + 8).ok_or(LinkMemoryError::OutOfBounds)?;
+        Ok(u64::from_le_bytes(
+            low.try_into().map_err(|_| LinkMemoryError::OutOfBounds)?,
+        ))
+    }
+
+    /// Write the `allowed_bypass_request_source` NodeName (low 64 bits are the
+    /// value compared against remote node names) of a link state.
+    pub fn write_allowed_bypass_source(
+        &mut self,
+        desc: FragmentDescriptor,
+        value: u64,
+    ) -> Result<(), LinkMemoryError> {
+        let view = self.fragment_mut(desc)?;
+        let off = Self::LINK_ALLOWED_SOURCE_OFFSET;
+        let slot = view
+            .get_mut(off..off + 8)
+            .ok_or(LinkMemoryError::OutOfBounds)?;
+        slot.copy_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
     /// Read the status field of a `RouterLinkState` fragment.
     pub fn read_link_status(
         &self,
@@ -363,7 +618,7 @@ impl LinkMemory {
         front_new[0..2].copy_from_slice(&version.to_le_bytes());
         // Relative from front's successor (block 1) to next_abs.
         front_new[2..4].copy_from_slice(&(next_abs as i16).wrapping_sub(1).to_le_bytes());
-        let mut front_view = self.fragment_mut(FragmentDescriptor {
+        let front_view = self.fragment_mut(FragmentDescriptor {
             buffer_id: PRIMARY_BUFFER_ID,
             offset: region as u32,
             size: 4,
@@ -491,5 +746,109 @@ mod tests {
         // The next allocation pops the second block.
         let d2 = mem.write_parcel_fragment(b"x").unwrap();
         assert_eq!(d2.offset, 0x480);
+    }
+
+    /// A link-state fragment at the first allocable 64-byte block.
+    fn state_desc() -> FragmentDescriptor {
+        FragmentDescriptor {
+            buffer_id: 0,
+            offset: (BLOCK_ALLOCATOR_64_OFFSET) as u32,
+            size: ROUTER_LINK_STATE_SIZE as u32,
+        }
+    }
+
+    #[test]
+    fn set_side_stable_or_into_peer_bits() {
+        // Regression: `SetSideStable` must OR its bit into whatever status the
+        // peer already wrote. The pre-fix loop kept `expected` pinned at 0 and
+        // would spin forever when the peer's stable bit was already set.
+        let (_keep, fd) = fresh_buffer();
+        let mem = LinkMemory::adopt_primary(fd).unwrap();
+        let d = state_desc();
+        // The peer (side A) set its stable bit first.
+        mem.set_side_stable(d, true).unwrap();
+        assert_eq!(
+            mem.read_link_status(d).unwrap().value(),
+            RouterLinkStatus::SIDE_A_STABLE
+        );
+        // Our side B set must succeed and preserve side A's bit.
+        mem.set_side_stable(d, false).unwrap();
+        let s = mem.read_link_status(d).unwrap();
+        assert!(s.side_a_stable());
+        assert!(s.side_b_stable());
+        assert_eq!(s.value(), RouterLinkStatus::STABLE);
+    }
+
+    #[test]
+    fn try_lock_requires_stable_and_excludes_peer() {
+        let (_keep, fd) = fresh_buffer();
+        let mem = LinkMemory::adopt_primary(fd).unwrap();
+        let d = state_desc();
+        // Unstable link: TryLock must fail immediately (side not stable), and
+        // must NOT set any bits.
+        assert!(!mem.try_lock_link_state(d, true).unwrap());
+        assert_eq!(mem.read_link_status(d).unwrap().value(), 0);
+        // Stabilize both sides.
+        mem.set_side_stable(d, true).unwrap();
+        mem.set_side_stable(d, false).unwrap();
+        // Side A locks.
+        assert!(mem.try_lock_link_state(d, true).unwrap());
+        let locked = mem.read_link_status(d).unwrap();
+        assert_eq!(
+            locked.value() & RouterLinkStatus::LOCKED_BY_SIDE_A,
+            RouterLinkStatus::LOCKED_BY_SIDE_A
+        );
+        // Side B cannot lock while A holds it.
+        assert!(!mem.try_lock_link_state(d, false).unwrap());
+        // A unlocks; B locks.
+        mem.unlock_link_state(d, true).unwrap();
+        assert_eq!(
+            mem.read_link_status(d).unwrap().value(),
+            RouterLinkStatus::STABLE
+        );
+        assert!(mem.try_lock_link_state(d, false).unwrap());
+        mem.unlock_link_state(d, false).unwrap();
+    }
+
+    #[test]
+    fn try_lock_sets_waiting_bit_when_peer_unstable() {
+        let (_keep, fd) = fresh_buffer();
+        let mem = LinkMemory::adopt_primary(fd).unwrap();
+        let d = state_desc();
+        // Our side (A) is stable; the peer (B) is not.
+        mem.set_side_stable(d, true).unwrap();
+        assert!(!mem.try_lock_link_state(d, true).unwrap());
+        // The waiting bit is set and the lock is not.
+        let s = mem.read_link_status(d).unwrap();
+        assert_eq!(
+            s.value(),
+            RouterLinkStatus::SIDE_A_STABLE | RouterLinkStatus::SIDE_A_WAITING
+        );
+        // The peer stabilizes; resetting our waiting bit succeeds.
+        mem.set_side_stable(d, false).unwrap();
+        assert!(mem.reset_waiting_bit(d, true).unwrap());
+        assert_eq!(
+            mem.read_link_status(d).unwrap().value(),
+            RouterLinkStatus::STABLE
+        );
+        // Now we can lock.
+        assert!(mem.try_lock_link_state(d, true).unwrap());
+        mem.unlock_link_state(d, true).unwrap();
+    }
+
+    #[test]
+    fn reset_waiting_bit_refuses_when_not_waiting_or_locked() {
+        let (_keep, fd) = fresh_buffer();
+        let mem = LinkMemory::adopt_primary(fd).unwrap();
+        let d = state_desc();
+        // Stable but not waiting: nothing to reset.
+        mem.set_side_stable(d, true).unwrap();
+        mem.set_side_stable(d, false).unwrap();
+        assert!(!mem.reset_waiting_bit(d, true).unwrap());
+        // Locked: nothing to reset.
+        assert!(mem.try_lock_link_state(d, true).unwrap());
+        assert!(!mem.reset_waiting_bit(d, true).unwrap());
+        assert!(!mem.reset_waiting_bit(d, false).unwrap());
+        mem.unlock_link_state(d, true).unwrap();
     }
 }

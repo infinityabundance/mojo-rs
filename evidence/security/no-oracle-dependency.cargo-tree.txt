@@ -1,30 +1,30 @@
-mojo-rs v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs)
-├── mojo-rs-bindings v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-bindings)
-│   ├── mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core)
-│   │   └── mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform)
+mojo-rs v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs)
+├── mojo-rs-bindings v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-bindings)
+│   ├── mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core)
+│   │   └── mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform)
 │   │       └── libc v0.2.189
-│   └── mojo-rs-wire v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-wire)
-├── mojo-rs-c-api v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-c-api)
-│   ├── mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
-│   └── mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
-├── mojo-rs-codegen v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-codegen)
-│   └── mojo-rs-mojom v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-mojom)
-├── mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
-├── mojo-rs-io v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-io)
-│   ├── mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
-│   └── mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
-├── mojo-rs-mojom v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-mojom)
-├── mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
-├── mojo-rs-system v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-system)
-│   ├── mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
-│   └── mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
-└── mojo-rs-wire v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-wire)
+│   └── mojo-rs-wire v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-wire)
+├── mojo-rs-c-api v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-c-api)
+│   ├── mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
+│   └── mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
+├── mojo-rs-codegen v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-codegen)
+│   └── mojo-rs-mojom v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-mojom)
+├── mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
+├── mojo-rs-io v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-io)
+│   ├── mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
+│   └── mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
+├── mojo-rs-mojom v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-mojom)
+├── mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
+├── mojo-rs-system v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-system)
+│   ├── mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
+│   └── mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
+└── mojo-rs-wire v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-wire)
 
-mojo-rs-bindings v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-bindings) (*)
+mojo-rs-bindings v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-bindings) (*)
 
-mojo-rs-c-api v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-c-api) (*)
+mojo-rs-c-api v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-c-api) (*)
 
-mojo-rs-casefile v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile)
+mojo-rs-casefile v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile)
 ├── serde v1.0.229
 │   ├── serde_core v1.0.229
 │   └── serde_derive v1.0.229 (proc-macro)
@@ -54,36 +54,36 @@ mojo-rs-casefile v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-cas
             ├── generic-array v0.14.7 (*)
             └── typenum v1.20.1
 
-mojo-rs-codegen v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-codegen) (*)
+mojo-rs-codegen v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-codegen) (*)
 
-mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
+mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
 
-mojo-rs-interop v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-interop)
+mojo-rs-interop v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-interop)
 ├── hex v0.4.3
 ├── libc v0.2.189
-├── mojo-rs-bindings v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-bindings) (*)
-├── mojo-rs-casefile v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile) (*)
-├── mojo-rs-core v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
-├── mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
-├── mojo-rs-system v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-system) (*)
+├── mojo-rs-bindings v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-bindings) (*)
+├── mojo-rs-casefile v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile) (*)
+├── mojo-rs-core v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-core) (*)
+├── mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
+├── mojo-rs-system v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-system) (*)
 └── serde_json v1.0.151 (*)
 
-mojo-rs-io v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-io) (*)
+mojo-rs-io v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-io) (*)
 
-mojo-rs-mojom v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-mojom)
+mojo-rs-mojom v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-mojom)
 
-mojo-rs-oracle v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-oracle)
+mojo-rs-oracle v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-oracle)
 ├── libc v0.2.189
-└── mojo-rs-casefile v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile) (*)
+└── mojo-rs-casefile v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile) (*)
 
-mojo-rs-platform v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
+mojo-rs-platform v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-platform) (*)
 
-mojo-rs-system v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-system) (*)
+mojo-rs-system v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-system) (*)
 
-mojo-rs-test-support v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-test-support)
+mojo-rs-test-support v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-test-support)
 ├── hex v0.4.3
-├── mojo-rs-casefile v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile) (*)
+├── mojo-rs-casefile v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-casefile) (*)
 ├── serde v1.0.229 (*)
 └── serde_json v1.0.151 (*)
 
-mojo-rs-wire v0.2.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-wire)
+mojo-rs-wire v0.3.0 (/run/media/one/1tb_kingston1/mojo-rs/crates/mojo-rs-wire)

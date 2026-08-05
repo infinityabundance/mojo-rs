@@ -23,5 +23,9 @@ libc = { workspace = true }
 name = "candidate-harness"
 path = "src/bin/candidate-harness.rs"
 
+[[bin]]
+name = "routing-acceptor"
+path = "src/bin/routing-acceptor.rs"
+
 [lints]
 workspace = true

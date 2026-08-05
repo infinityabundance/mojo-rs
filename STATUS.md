@@ -1,6 +1,6 @@
 # mojo-rs — Implementation Status
 
-Status as of: 2026-08-04 (epoch 1, Chromium 151.0.7922.105, commit
+Status as of: 2026-08-05 (epoch 1, Chromium 151.0.7922.105, commit
 bfa3579138998e2fbb981725570fa588c5b6f8cd, CoreIpcz architecture).
 
 The capability ladder (atlas/feature-matrix.json) is authoritative. A status
@@ -16,6 +16,62 @@ below is a CLAIM only when the cited evidence exists and verifies.
   still a claim only with its cited evidence.
 
 ## Sealed
+
+### Phase 4 differential parity seal — data pipes and shared buffers
+
+The system court now runs **26 cases**; all produce BYTE-IDENTICAL event
+streams between the official oracle and the native candidate. The 16 Phase 4
+cases seal data pipes and shared buffers on the Mojo API surface:
+
+| Case | Coverage | Residuals |
+|---|---|---|
+| DATA_PIPE.CREATE.001 | defaults, option validation, initial signals | 0 |
+| DATA_PIPE.WRITE_READ.002 | one-phase FIFO, signal transitions | 0 |
+| DATA_PIPE.ALL_OR_NONE.003 | all-or-none write, OUT_OF_RANGE/SHOULD_WAIT | 0 |
+| DATA_PIPE.ELEMENT_SIZE.004 | element alignment, flush-before-check order | 0 |
+| DATA_PIPE.TWO_PHASE.005 | begin/end write+read, zero-commit, end-without-begin | 0 |
+| DATA_PIPE.BUSY.006 | BUSY during two-phase, zero-consume | 0 |
+| DATA_PIPE.PEEK_QUERY_DISCARD.007 | QUERY/PEEK/DISCARD, invalid combos | 0 |
+| DATA_PIPE.SIGNALS.008 | WRITABLE/READABLE/NEW_DATA_READABLE transitions | 0 |
+| DATA_PIPE.PEER_CLOSE.009 | closure, buffered-data readability, failed ops | 0 |
+| DATA_PIPE.TRAP.010 | trap fires, arm-failure blocking events, 0-signal | 0 |
+| SHARED_BUFFER.CREATE.001 | create/info, zero-size, signal-query rejection | 0 |
+| SHARED_BUFFER.DUPLICATE.002 | duplicate, shared pages across handles | 0 |
+| SHARED_BUFFER.MAP_UNMAP.003 | map/unmap, range errors, unaligned offsets | 0 |
+| SHARED_BUFFER.CROSS_HANDLE.004 | cross-handle page visibility | 0 |
+| SHARED_BUFFER.MODE_STATE.005 | Writable→Unsafe/ReadOnly state machine | 0 |
+| SHARED_BUFFER.INFO.006 | info on originals/duplicates, i32::MAX bound | 0 |
+
+The candidate implementation (`mojo-rs-core` `data_pipe.rs`, `ring_buffer.rs`,
+`shared_buffer.rs`) mirrors the pinned `ipcz_driver/data_pipe.{h,cc}`,
+`ring_buffer.{h,cc}`, `shared_buffer.{h,cc}` and the C entries in
+`core_ipcz.cc` operation-for-operation: the two-ring-per-pair model (each
+endpoint owns a mapping of the shared region), control-message flushes that
+skip zero counts (parcel presence is the signal), the latched
+`has_new_data`, the region-mode state machine (Writable → Unsafe/ReadOnly on
+first duplicate, then immutable), and `MapAt` failure semantics reported as
+RESOURCE_EXHAUSTED.
+
+Oracle-verified behavior corrections found while sealing this phase:
+- Misaligned reads still flush the peer update before the element-size check
+  fails (the data is available to the next aligned read).
+- `MojoArmTrap` returns OK when the trap is already armed; the driver's
+  blocking-event plumbing now fills and emits immediate events on a failed
+  arm.
+- Signal queries on shared buffers (and other boxed driver objects that are
+  not data pipes) return MOJO_RESULT_INVALID_ARGUMENT.
+- `get_buffer_info` reports the region size on originals and duplicates;
+  zero-size and >i32::MAX creates are RESOURCE_EXHAUSTED.
+
+Evidence: `evidence/oracle/system/*`, `evidence/candidate/system/*`
+(byte-identical), `evidence/diffs/system/*`, manifests under
+`evidence/manifests/system-*.json` (verified by `scripts/run_court.sh verify`).
+
+`mojo-rs-system` now exposes the idiomatic safe Rust API for both
+capabilities: ownership-enforcing producer/consumer endpoints, RAII
+two-phase transactions (a dropped transaction cancels with a zero-length
+commit), and RAII shared-buffer mappings (unmap-on-drop; writes are `unsafe`
+because shared memory is inherently aliased across handles/processes).
 
 ### Phase 3 interop seal — bidirectional official C++ ⇄ native Rust transfer
 
@@ -117,17 +173,21 @@ references to the oracle checkout. Evidence: `evidence/security/`.
   graphs, and the remaining NodeLink message types (RequestMemory,
   ProvideMemory, AddBlockBuffer beyond the primary buffer). The Phase 3
   acceptor covers the direct central-link subset.
-- Data pipes, shared buffers (Mojo API surface), C ABI export, mojom
-  toolchain, bindings, concurrency/stress, fuzzing, other platforms.
+- C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
+  concurrency/stress/fuzz sealing, other platforms.
 
 Every phase gate in the master directive §14 applies; a waived gate requires a
 written reason here.
 
 ## Receipts and reproduction
 
-- `scripts/run_court.sh system` — sealed 10-case court (oracle baseline,
-  candidate baseline, byte-identity, hashed manifest).
+- `scripts/run_court.sh system` — sealed 26-case court (message pipes,
+  signals, traps, waits, handle lifecycle, platform handles, data pipes,
+  shared buffers; oracle baseline, candidate baseline, byte-identity, hashed
+  manifest).
 - `scripts/run_invite_court.sh` — official invitation flow + wire capture.
+- `scripts/run_interop_court.sh` — Phase 3 interop seal (official broker ⇄
+  native acceptor).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

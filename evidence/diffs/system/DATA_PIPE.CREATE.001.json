@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.CREATE.001",
+  "status": "pass",
+  "oracle_events": 10,
+  "candidate_events": 10,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "00e4feb3bf479212b520b2b2165348e5a8ed2d2a970ba8ad00c077313e282f59",
+    "candidate_events_sha256": "00e4feb3bf479212b520b2b2165348e5a8ed2d2a970ba8ad00c077313e282f59"
+  }
+}

@@ -1,0 +1,10 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"data","handle":"p","num_bytes":3,"op_id":2,"payload_hex":"","result":"MOJO_RESULT_INVALID_ARGUMENT","seq":3}
+{"event":"data","handle":"p","num_bytes":4,"op_id":3,"payload_hex":"01020304","result":"MOJO_RESULT_OK","seq":4}
+{"event":"data","handle":"c","num_bytes":2,"op_id":4,"payload_hex":"","result":"MOJO_RESULT_INVALID_ARGUMENT","seq":5}
+{"event":"data","handle":"c","num_bytes":4,"op_id":5,"payload_hex":"01020304","result":"MOJO_RESULT_OK","seq":6}
+{"event":"data","handle":"p","num_bytes":5,"op_id":6,"payload_hex":"","result":"MOJO_RESULT_INVALID_ARGUMENT","seq":7}
+{"event":"result","handle":"p","op_id":7,"result":"MOJO_RESULT_OK","seq":8}
+{"event":"result","handle":"c","op_id":8,"result":"MOJO_RESULT_OK","seq":9}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":10}

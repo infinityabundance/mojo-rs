@@ -1,0 +1,16 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"data","handle":"p","num_bytes":2,"op_id":2,"payload_hex":"0a0b","result":"MOJO_RESULT_OK","seq":3}
+{"event":"result","handle":"p","op_id":3,"result":"MOJO_RESULT_OK","seq":4}
+{"event":"signals","handle":"c","op_id":4,"result":"MOJO_RESULT_OK","seq":5,"signals":{"satisfiable":["READABLE","PEER_CLOSED","NEW_DATA_READABLE"],"satisfied":["READABLE","PEER_CLOSED","NEW_DATA_READABLE"]}}
+{"event":"data","handle":"c","num_bytes":2,"op_id":5,"payload_hex":"0a0b","result":"MOJO_RESULT_OK","seq":6}
+{"event":"signals","handle":"c","op_id":6,"result":"MOJO_RESULT_OK","seq":7,"signals":{"satisfiable":["PEER_CLOSED"],"satisfied":["PEER_CLOSED"]}}
+{"event":"data","handle":"c","num_bytes":4,"op_id":7,"payload_hex":"","result":"MOJO_RESULT_FAILED_PRECONDITION","seq":8}
+{"event":"result","op_id":8,"result":"MOJO_RESULT_OK","seq":9}
+{"event":"result","handle":"c2","op_id":9,"result":"MOJO_RESULT_OK","seq":10}
+{"event":"signals","handle":"p2","op_id":10,"result":"MOJO_RESULT_OK","seq":11,"signals":{"satisfiable":["PEER_CLOSED"],"satisfied":["PEER_CLOSED"]}}
+{"event":"data","handle":"p2","num_bytes":1,"op_id":11,"payload_hex":"","result":"MOJO_RESULT_FAILED_PRECONDITION","seq":12}
+{"event":"data","handle":"p2","num_bytes":0,"op_id":12,"payload_hex":"","result":"MOJO_RESULT_FAILED_PRECONDITION","seq":13}
+{"event":"result","handle":"p2","op_id":13,"result":"MOJO_RESULT_OK","seq":14}
+{"event":"result","handle":"c","op_id":14,"result":"MOJO_RESULT_OK","seq":15}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":16}

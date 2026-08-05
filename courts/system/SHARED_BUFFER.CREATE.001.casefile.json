@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.CREATE.001",
+  "court": "shared-buffer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["shared_buffer", "signals"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "shared_buffer_create", "args": {"num_bytes": 4096}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b0"]}},
+    {"id": 2, "op": "get_buffer_info", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "shared_buffer_create", "args": {"num_bytes": 0}, "expect": {"result": "MOJO_RESULT_RESOURCE_EXHAUSTED", "produce": ["b1"]}},
+    {"id": 4, "op": "query_signals_state", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 5, "op": "close", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "get_buffer_info", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}}
+  ],
+  "expected_contract": {
+    "note": "create reports its size via get_buffer_info; zero-size create is RESOURCE_EXHAUSTED; signal queries on a shared buffer are INVALID_ARGUMENT (boxed driver object, not a data pipe); closed handles are INVALID_ARGUMENT"
+  },
+  "normalizers": []
+}

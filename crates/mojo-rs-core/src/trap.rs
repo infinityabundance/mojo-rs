@@ -158,11 +158,14 @@ impl Trap {
     /// Arm the trap. If any trigger is already satisfied (or unsatisfiable),
     /// returns `CoreError::FailedPrecondition` and delivers the immediate
     /// events through the callback. Mirrors the official `MojoTrap::Arm`:
-    /// the trap becomes armed only if every trigger could be installed.
+    /// the trap becomes armed only if every trigger could be installed, and
+    /// re-arming an already-armed trap returns `Ok` (the official epoch's
+    /// `MojoTrap::Arm` returns `MOJO_RESULT_OK` when `armed_` is already
+    /// true).
     pub fn arm(&self) -> CoreResult<()> {
         let mut inner = self.inner.lock().map_err(|_| CoreError::Internal)?;
         if inner.armed {
-            return Err(CoreError::FailedPrecondition);
+            return Ok(());
         }
         // Evaluate every trigger against its dispatcher's current state.
         let mut immediate = Vec::new();

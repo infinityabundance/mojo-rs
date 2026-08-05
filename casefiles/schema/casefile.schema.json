@@ -66,7 +66,7 @@
           "close",
           "platform_handle_wrap", "platform_handle_unwrap", "wrap_platform_shared_memory_region", "unwrap_platform_shared_memory_region",
           "data_pipe_create", "write_data", "read_data", "begin_write_data", "end_write_data", "begin_read_data", "end_read_data",
-          "shared_buffer_create", "duplicate_buffer_handle", "map_buffer", "unmap_buffer", "get_buffer_info",
+          "shared_buffer_create", "duplicate_buffer_handle", "map_buffer", "unmap_buffer", "get_buffer_info", "read_mapping",
           "create_invitation", "attach_message_pipe_to_invitation", "extract_message_pipe_from_invitation",
           "send_invitation", "accept_invitation",
           "set_quota", "query_quota",

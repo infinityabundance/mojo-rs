@@ -48,6 +48,8 @@
 #include "mojo/public/c/system/platform_handle.h"
 #include "mojo/public/c/system/trap.h"
 #include "mojo/public/c/system/types.h"
+#include "mojo/public/c/system/buffer.h"
+#include "mojo/public/c/system/data_pipe.h"
 
 namespace {
 
@@ -208,6 +210,15 @@ struct Harness {
   // Per-trap event queues, filled by the trap callback.
   std::map<std::string, std::vector<MojoTrapEvent>> trap_events;
   std::mutex trap_mutex;
+
+  // Mapped shared-buffer regions: token -> (address as uintptr_t, requested
+  // length). The address itself is nondeterministic and never emitted into
+  // events; uintptr_t keeps the chromium rawptr plugin satisfied.
+  struct MappedBuffer {
+    uintptr_t address;
+    size_t num_bytes;
+  };
+  std::map<std::string, MappedBuffer> mapped_buffers;
 
   MojoResult GetHandle(const std::string& token, MojoHandle* out) const {
     auto it = tokens.find(token);
@@ -582,6 +593,415 @@ MojoResult OpPlatformHandleUnwrap(Harness* h,
   return r;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4: data pipes (MojoCreateDataPipe/MojoWriteData/MojoReadData and the
+// two-phase variants). Every op emits the post-call `num_bytes` (the official
+// modifies it only on success paths) and the actual bytes for data-bearing
+// outcomes. Flag names: ALL_OR_NONE (write/read), QUERY/DISCARD/PEEK (read).
+// ---------------------------------------------------------------------------
+
+MojoWriteDataFlags ParseWriteDataFlags(const base::DictValue& args) {
+  MojoWriteDataFlags flags = MOJO_WRITE_DATA_FLAG_NONE;
+  const base::ListValue* fl = args.FindList("flags");
+  if (fl) {
+    for (const auto& f : *fl) {
+      if (f.GetString() == "ALL_OR_NONE") flags |= MOJO_WRITE_DATA_FLAG_ALL_OR_NONE;
+    }
+  }
+  return flags;
+}
+
+MojoReadDataFlags ParseReadDataFlags(const base::DictValue& args) {
+  MojoReadDataFlags flags = MOJO_READ_DATA_FLAG_NONE;
+  const base::ListValue* fl = args.FindList("flags");
+  if (fl) {
+    for (const auto& f : *fl) {
+      if (f.GetString() == "ALL_OR_NONE") flags |= MOJO_READ_DATA_FLAG_ALL_OR_NONE;
+      if (f.GetString() == "QUERY") flags |= MOJO_READ_DATA_FLAG_QUERY;
+      if (f.GetString() == "DISCARD") flags |= MOJO_READ_DATA_FLAG_DISCARD;
+      if (f.GetString() == "PEEK") flags |= MOJO_READ_DATA_FLAG_PEEK;
+    }
+  }
+  return flags;
+}
+
+MojoResult OpDataPipeCreate(Harness* h,
+                            EventWriter* w,
+                            uint64_t op_id,
+                            const base::DictValue& args,
+                            const base::DictValue& expect) {
+  const bool has_element = args.contains("element_num_bytes");
+  const bool has_capacity = args.contains("capacity_num_bytes");
+  MojoCreateDataPipeOptions options = {.struct_size = sizeof(options),
+                                       .flags = MOJO_CREATE_DATA_PIPE_FLAG_NONE,
+                                       .element_num_bytes = 1,
+                                       .capacity_num_bytes = 0};
+  if (has_element) {
+    options.element_num_bytes = args.FindInt("element_num_bytes").value_or(1);
+  }
+  if (has_capacity) {
+    options.capacity_num_bytes = args.FindInt("capacity_num_bytes").value_or(0);
+  }
+  const MojoCreateDataPipeOptions* options_ptr =
+      (has_element || has_capacity) ? &options : nullptr;
+  MojoHandle producer, consumer;
+  MojoResult r = MojoCreateDataPipe(options_ptr, &producer, &consumer);
+  if (r == MOJO_RESULT_OK) {
+    const base::ListValue* produce = expect.FindList("produce");
+    if (produce && produce->size() == 2) {
+      h->tokens[(*produce)[0].GetString()] = producer;
+      h->tokens[(*produce)[1].GetString()] = consumer;
+    }
+  }
+  base::DictValue extra;
+  w->Emit(op_id, "result", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpWriteData(Harness* h,
+                       EventWriter* w,
+                       uint64_t op_id,
+                       const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    extra.Set("num_bytes", 0);
+    extra.Set("payload_hex", "");
+    w->Emit(op_id, "data", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  std::vector<uint8_t> elements =
+      HexDecode(args.FindString("elements_hex") ? *args.FindString("elements_hex") : "");
+  uint32_t num_bytes = static_cast<uint32_t>(elements.size());
+  MojoWriteDataOptions opts = {.struct_size = sizeof(opts),
+                               .flags = ParseWriteDataFlags(args)};
+  MojoResult r = MojoWriteData(handle, elements.data(), &num_bytes, &opts);
+  extra.Set("handle", *token);
+  extra.Set("num_bytes", static_cast<int>(num_bytes));
+  if (r == MOJO_RESULT_OK) {
+    // The written bytes are the first `num_bytes` of the input.
+    extra.Set("payload_hex", HexEncode(elements.data(), num_bytes));
+  } else {
+    extra.Set("payload_hex", "");
+  }
+  w->Emit(op_id, "data", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpBeginWriteData(Harness* h,
+                            EventWriter* w,
+                            uint64_t op_id,
+                            const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    extra.Set("num_bytes", 0);
+    extra.Set("payload_hex", "");
+    w->Emit(op_id, "data", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  void* buffer = nullptr;
+  uint32_t buffer_num_bytes = args.FindInt("hint").value_or(0);
+  MojoResult r = MojoBeginWriteData(handle, nullptr, &buffer, &buffer_num_bytes);
+  extra.Set("handle", *token);
+  extra.Set("num_bytes", static_cast<int>(buffer_num_bytes));
+  if (r == MOJO_RESULT_OK) {
+    std::vector<uint8_t> content =
+        HexDecode(args.FindString("content_hex") ? *args.FindString("content_hex") : "");
+    uint32_t n = std::min<uint32_t>(static_cast<uint32_t>(content.size()), buffer_num_bytes);
+    if (n > 0) {
+      memcpy(buffer, content.data(), n);
+    }
+    extra.Set("payload_hex", HexEncode(content.data(), n));
+  } else {
+    extra.Set("payload_hex", "");
+  }
+  w->Emit(op_id, "data", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpEndWriteData(Harness* h,
+                          EventWriter* w,
+                          uint64_t op_id,
+                          const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    w->Emit(op_id, "data", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  uint32_t produced = args.FindInt("num_bytes_produced").value_or(0);
+  MojoResult r = MojoEndWriteData(handle, produced, nullptr);
+  extra.Set("handle", *token);
+  w->Emit(op_id, "data", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpReadData(Harness* h,
+                      EventWriter* w,
+                      uint64_t op_id,
+                      const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    extra.Set("num_bytes", 0);
+    extra.Set("payload_hex", "");
+    w->Emit(op_id, "data", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  MojoReadDataFlags flags = ParseReadDataFlags(args);
+  const bool query = flags & MOJO_READ_DATA_FLAG_QUERY;
+  const bool discard = flags & MOJO_READ_DATA_FLAG_DISCARD;
+  uint32_t num_bytes = args.FindInt("num_bytes").value_or(0);
+  std::vector<uint8_t> buffer(num_bytes);
+  void* elements = (query || discard) ? nullptr : buffer.data();
+  MojoReadDataOptions opts = {.struct_size = sizeof(opts), .flags = flags};
+  MojoResult r = MojoReadData(handle, &opts, elements, &num_bytes);
+  extra.Set("handle", *token);
+  extra.Set("num_bytes", static_cast<int>(num_bytes));
+  if (r == MOJO_RESULT_OK) {
+    if (query || discard) {
+      extra.Set("payload_hex", "");
+    } else {
+      extra.Set("payload_hex", HexEncode(buffer.data(), num_bytes));
+    }
+  } else {
+    extra.Set("payload_hex", "");
+  }
+  w->Emit(op_id, "data", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpBeginReadData(Harness* h,
+                           EventWriter* w,
+                           uint64_t op_id,
+                           const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    extra.Set("num_bytes", 0);
+    extra.Set("payload_hex", "");
+    w->Emit(op_id, "data", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  const void* buffer = nullptr;
+  uint32_t buffer_num_bytes = 0;
+  MojoResult r = MojoBeginReadData(handle, nullptr, &buffer, &buffer_num_bytes);
+  extra.Set("handle", *token);
+  extra.Set("num_bytes", static_cast<int>(buffer_num_bytes));
+  if (r == MOJO_RESULT_OK) {
+    extra.Set("payload_hex",
+              HexEncode(static_cast<const uint8_t*>(buffer), buffer_num_bytes));
+  } else {
+    extra.Set("payload_hex", "");
+  }
+  w->Emit(op_id, "data", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpEndReadData(Harness* h,
+                         EventWriter* w,
+                         uint64_t op_id,
+                         const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    w->Emit(op_id, "data", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  uint32_t consumed = args.FindInt("num_bytes_consumed").value_or(0);
+  MojoResult r = MojoEndReadData(handle, consumed, nullptr);
+  extra.Set("handle", *token);
+  w->Emit(op_id, "data", ResultName(r), extra);
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: shared buffers (MojoCreateSharedBuffer/MojoDuplicateBufferHandle/
+// MojoMapBuffer/MojoUnmapBuffer/MojoGetBufferInfo). Mapped addresses are
+// nondeterministic; they are referenced by tokens and never emitted.
+// ---------------------------------------------------------------------------
+
+MojoResult OpSharedBufferCreate(Harness* h,
+                                EventWriter* w,
+                                uint64_t op_id,
+                                const base::DictValue& args,
+                                const base::DictValue& expect) {
+  uint64_t num_bytes = args.FindInt("num_bytes").value_or(0);
+  MojoHandle buffer;
+  MojoResult r = MojoCreateSharedBuffer(num_bytes, nullptr, &buffer);
+  if (r == MOJO_RESULT_OK) {
+    const base::ListValue* produce = expect.FindList("produce");
+    std::string token = (produce && !produce->empty()) ? (*produce)[0].GetString() : "b0";
+    h->tokens[token] = buffer;
+  }
+  base::DictValue extra;
+  w->Emit(op_id, "result", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpDuplicateBufferHandle(Harness* h,
+                                   EventWriter* w,
+                                   uint64_t op_id,
+                                   const base::DictValue& args,
+                                   const base::DictValue& expect) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  MojoDuplicateBufferHandleOptions opts = {
+      .struct_size = sizeof(opts), .flags = MOJO_DUPLICATE_BUFFER_HANDLE_FLAG_NONE};
+  if (args.contains("read_only") && args.FindBool("read_only").value_or(false)) {
+    opts.flags |= MOJO_DUPLICATE_BUFFER_HANDLE_FLAG_READ_ONLY;
+  }
+  MojoHandle new_handle;
+  MojoResult r = MojoDuplicateBufferHandle(handle, &opts, &new_handle);
+  if (r == MOJO_RESULT_OK) {
+    const base::ListValue* produce = expect.FindList("produce");
+    std::string new_token =
+        (produce && !produce->empty()) ? (*produce)[0].GetString() : "d0";
+    h->tokens[new_token] = new_handle;
+  }
+  extra.Set("handle", *token);
+  w->Emit(op_id, "result", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpMapBuffer(Harness* h,
+                       EventWriter* w,
+                       uint64_t op_id,
+                       const base::DictValue& args,
+                       const base::DictValue& expect) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    w->Emit(op_id, "buffer", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  uint64_t offset = args.FindInt("offset").value_or(0);
+  uint64_t num_bytes = args.FindInt("num_bytes").value_or(0);
+  void* address = nullptr;
+  MojoResult r = MojoMapBuffer(handle, offset, num_bytes, nullptr, &address);
+  if (r == MOJO_RESULT_OK) {
+    const base::ListValue* produce = expect.FindList("produce");
+    std::string map_token =
+        (produce && !produce->empty()) ? (*produce)[0].GetString() : "m0";
+    h->mapped_buffers[map_token] = {reinterpret_cast<uintptr_t>(address),
+                                    static_cast<size_t>(num_bytes)};
+    if (args.contains("content_hex")) {
+      std::vector<uint8_t> content = HexDecode(*args.FindString("content_hex"));
+      if (content.size() > static_cast<size_t>(num_bytes)) {
+        fprintf(stderr, "map_buffer: content_hex overruns the mapping (case bug)\n");
+        exit(1);
+      }
+      if (!content.empty()) {
+        memcpy(address, content.data(), content.size());
+      }
+    }
+  }
+  extra.Set("handle", *token);
+  w->Emit(op_id, "buffer", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpUnmapBuffer(Harness* h,
+                         EventWriter* w,
+                         uint64_t op_id,
+                         const base::DictValue& args) {
+  const std::string* token = args.FindString("token");
+  base::DictValue extra;
+  if (!token) {
+    w->Emit(op_id, "buffer", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  auto it = h->mapped_buffers.find(*token);
+  if (it == h->mapped_buffers.end()) {
+    extra.Set("handle", *token);
+    w->Emit(op_id, "buffer", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  MojoResult r = MojoUnmapBuffer(reinterpret_cast<void*>(it->second.address));
+  if (r == MOJO_RESULT_OK) {
+    h->mapped_buffers.erase(it);
+  }
+  extra.Set("handle", *token);
+  w->Emit(op_id, "buffer", ResultName(r), extra);
+  return r;
+}
+
+MojoResult OpReadMapping(Harness* h,
+                         EventWriter* w,
+                         uint64_t op_id,
+                         const base::DictValue& args) {
+  const std::string* token = args.FindString("token");
+  base::DictValue extra;
+  if (!token) {
+    w->Emit(op_id, "buffer", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  auto it = h->mapped_buffers.find(*token);
+  if (it == h->mapped_buffers.end()) {
+    extra.Set("handle", *token);
+    w->Emit(op_id, "buffer", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  uint64_t offset = args.FindInt("offset").value_or(0);
+  uint64_t len = args.FindInt("len").value_or(0);
+  if (offset + len > it->second.num_bytes) {
+    fprintf(stderr, "read_mapping: range exceeds the mapping (case bug)\n");
+    exit(1);
+  }
+  const uint8_t* p = static_cast<const uint8_t*>(
+      reinterpret_cast<void*>(it->second.address));
+  extra.Set("handle", *token);
+  extra.Set("payload_hex", HexEncode(p + offset, static_cast<size_t>(len)));
+  w->Emit(op_id, "buffer", "MOJO_RESULT_OK", extra);
+  return MOJO_RESULT_OK;
+}
+
+MojoResult OpGetBufferInfo(Harness* h,
+                           EventWriter* w,
+                           uint64_t op_id,
+                           const base::DictValue& args) {
+  const std::string* token = args.FindString("handle");
+  base::DictValue extra;
+  MojoHandle handle;
+  if (!token || h->GetHandle(*token, &handle) != MOJO_RESULT_OK) {
+    extra.Set("handle", token ? *token : "");
+    extra.Set("size", 0);
+    w->Emit(op_id, "buffer", "MOJO_RESULT_INVALID_ARGUMENT", extra);
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  MojoSharedBufferInfo info = {.struct_size = sizeof(info)};
+  MojoResult r = MojoGetBufferInfo(handle, nullptr, &info);
+  extra.Set("handle", *token);
+  if (r == MOJO_RESULT_OK) {
+    extra.Set("size", static_cast<int>(info.size));
+  } else {
+    extra.Set("size", 0);
+  }
+  w->Emit(op_id, "buffer", ResultName(r), extra);
+  return r;
+}
+
 MojoResult OpTrapCreate(Harness* h,
                         EventWriter* w,
                         uint64_t op_id,
@@ -651,8 +1071,9 @@ MojoResult OpTrapArm(Harness* h,
     w->Emit(op_id, "result", "MOJO_RESULT_INVALID_ARGUMENT", extra);
     return MOJO_RESULT_INVALID_ARGUMENT;
   }
-  uint32_t num_events = 0;
-  MojoTrapEvent events[4];
+  uint32_t num_events = 4;
+  MojoTrapEvent events[4] = {};
+  events[0].struct_size = sizeof(MojoTrapEvent);
   MojoResult r = MojoArmTrap(tit->second, nullptr, &num_events, events);
   if (r == MOJO_RESULT_FAILED_PRECONDITION) {
     // Immediate events were written into `events`; emit them, then drain any
@@ -1143,6 +1564,32 @@ int main(int argc, char** argv) {
       OpPlatformHandleWrap(&harness, &writer, op_id, *args, *expect);
     } else if (*op_name == "platform_handle_unwrap") {
       OpPlatformHandleUnwrap(&harness, &writer, op_id, *args);
+    } else if (*op_name == "data_pipe_create") {
+      OpDataPipeCreate(&harness, &writer, op_id, *args, *expect);
+    } else if (*op_name == "write_data") {
+      OpWriteData(&harness, &writer, op_id, *args);
+    } else if (*op_name == "begin_write_data") {
+      OpBeginWriteData(&harness, &writer, op_id, *args);
+    } else if (*op_name == "end_write_data") {
+      OpEndWriteData(&harness, &writer, op_id, *args);
+    } else if (*op_name == "read_data") {
+      OpReadData(&harness, &writer, op_id, *args);
+    } else if (*op_name == "begin_read_data") {
+      OpBeginReadData(&harness, &writer, op_id, *args);
+    } else if (*op_name == "end_read_data") {
+      OpEndReadData(&harness, &writer, op_id, *args);
+    } else if (*op_name == "shared_buffer_create") {
+      OpSharedBufferCreate(&harness, &writer, op_id, *args, *expect);
+    } else if (*op_name == "duplicate_buffer_handle") {
+      OpDuplicateBufferHandle(&harness, &writer, op_id, *args, *expect);
+    } else if (*op_name == "map_buffer") {
+      OpMapBuffer(&harness, &writer, op_id, *args, *expect);
+    } else if (*op_name == "unmap_buffer") {
+      OpUnmapBuffer(&harness, &writer, op_id, *args);
+    } else if (*op_name == "read_mapping") {
+      OpReadMapping(&harness, &writer, op_id, *args);
+    } else if (*op_name == "get_buffer_info") {
+      OpGetBufferInfo(&harness, &writer, op_id, *args);
     } else if (*op_name == "trap_create") {
       OpTrapCreate(&harness, &writer, op_id, *args, *expect);
     } else if (*op_name == "trap_add_trigger") {

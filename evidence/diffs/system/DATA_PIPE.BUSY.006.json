@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.BUSY.006",
+  "status": "pass",
+  "oracle_events": 15,
+  "candidate_events": 15,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "7f438bb710860c655900f8ae9cd2856ff5a9b7c17d69035a6aa7eb0e477fced1",
+    "candidate_events_sha256": "7f438bb710860c655900f8ae9cd2856ff5a9b7c17d69035a6aa7eb0e477fced1"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.TWO_PHASE.005",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "begin_write_data", "args": {"handle": "p", "content_hex": "0102030405"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "end_write_data", "args": {"handle": "p", "num_bytes_produced": 5}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "begin_read_data", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "end_read_data", "args": {"handle": "c", "num_bytes_consumed": 5}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "begin_write_data", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "end_write_data", "args": {"handle": "p", "num_bytes_produced": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "begin_read_data", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_SHOULD_WAIT"}},
+    {"id": 9, "op": "end_write_data", "args": {"handle": "p", "num_bytes_produced": 1}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 10, "op": "end_read_data", "args": {"handle": "c", "num_bytes_consumed": 1}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 11, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 12, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "two-phase begin exposes the full available-capacity span; zero-commit ends the two-phase with no data; end without begin is FAILED_PRECONDITION"
+  },
+  "normalizers": []
+}

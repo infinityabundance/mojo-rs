@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.MODE_STATE.005",
+  "status": "pass",
+  "oracle_events": 18,
+  "candidate_events": 18,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "ee84b770c0c7e5a6d0bdf719be4b5f1231f2568326de078ded47d08648c1356e",
+    "candidate_events_sha256": "ee84b770c0c7e5a6d0bdf719be4b5f1231f2568326de078ded47d08648c1356e"
+  }
+}

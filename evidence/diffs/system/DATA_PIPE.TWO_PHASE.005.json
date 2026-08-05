@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.TWO_PHASE.005",
+  "status": "pass",
+  "oracle_events": 14,
+  "candidate_events": 14,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "2c81d87f4399509f4411c24c49ec798cbef535bc2504f580ff689dca54759b44",
+    "candidate_events_sha256": "2c81d87f4399509f4411c24c49ec798cbef535bc2504f580ff689dca54759b44"
+  }
+}

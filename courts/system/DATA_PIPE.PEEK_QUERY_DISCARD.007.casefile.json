@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.PEEK_QUERY_DISCARD.007",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "write_data", "args": {"handle": "p", "elements_hex": "0102030405060708", "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "read_data", "args": {"handle": "c", "num_bytes": 0, "flags": ["QUERY"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": ["PEEK"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "read_data", "args": {"handle": "c", "num_bytes": 0, "flags": ["QUERY"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "read_data", "args": {"handle": "c", "num_bytes": 3, "flags": ["DISCARD"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "read_data", "args": {"handle": "c", "num_bytes": 0, "flags": ["QUERY"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "read_data", "args": {"handle": "c", "num_bytes": 5, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": ["PEEK", "DISCARD"]}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 10, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": ["QUERY", "PEEK"]}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 11, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 12, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "QUERY reports available bytes without consuming; PEEK copies without consuming; DISCARD removes without copying; peek+discard and query+peek combinations are INVALID_ARGUMENT"
+  },
+  "normalizers": []
+}

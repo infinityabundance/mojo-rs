@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.WRITE_READ.002",
+  "status": "pass",
+  "oracle_events": 15,
+  "candidate_events": 15,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "8b1033443848846a8fd7ff1366f30751993f22f67e116ac3a278e266eefcd2ab",
+    "candidate_events_sha256": "8b1033443848846a8fd7ff1366f30751993f22f67e116ac3a278e266eefcd2ab"
+  }
+}

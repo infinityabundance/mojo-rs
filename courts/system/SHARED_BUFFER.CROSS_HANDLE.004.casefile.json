@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.CROSS_HANDLE.004",
+  "court": "shared-buffer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["shared_buffer"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "shared_buffer_create", "args": {"num_bytes": 64}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b0"]}},
+    {"id": 2, "op": "map_buffer", "args": {"handle": "b0", "offset": 0, "num_bytes": 16, "content_hex": "01020304"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m0"]}},
+    {"id": 3, "op": "duplicate_buffer_handle", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["d0"]}},
+    {"id": 4, "op": "map_buffer", "args": {"handle": "d0", "offset": 0, "num_bytes": 16, "content_hex": "aabbccdd"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m1"]}},
+    {"id": 5, "op": "read_mapping", "args": {"token": "m0", "offset": 0, "len": 4}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "read_mapping", "args": {"token": "m1", "offset": 4, "len": 4}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "unmap_buffer", "args": {"token": "m0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "unmap_buffer", "args": {"token": "m1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "close", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "close", "args": {"handle": "d0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "both handles map the same pages: a write through one mapping is visible through the other; untouched bytes stay zeroed"
+  },
+  "normalizers": []
+}

@@ -235,6 +235,8 @@ impl Acceptor {
             process: None,
             pid: None,
             fd: None,
+            num_bytes: None,
+            size: None,
             note: None,
         });
     }
@@ -814,6 +816,8 @@ impl Acceptor {
             process: None,
             pid: None,
             fd: None,
+            num_bytes: None,
+            size: None,
             note: Some(format!("fd_hex:{}", hex::encode(fd_content))),
         });
     }

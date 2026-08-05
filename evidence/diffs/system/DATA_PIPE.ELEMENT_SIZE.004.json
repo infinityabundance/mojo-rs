@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.ELEMENT_SIZE.004",
+  "status": "pass",
+  "oracle_events": 10,
+  "candidate_events": 10,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "7bbd458eefe9f4593463977fd142644f9b86a4966f66093f5f3b12dfc6a27fa3",
+    "candidate_events_sha256": "7bbd458eefe9f4593463977fd142644f9b86a4966f66093f5f3b12dfc6a27fa3"
+  }
+}

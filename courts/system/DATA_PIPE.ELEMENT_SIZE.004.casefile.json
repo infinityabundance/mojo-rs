@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.ELEMENT_SIZE.004",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {"element_num_bytes": 4, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "write_data", "args": {"handle": "p", "elements_hex": "010203", "flags": []}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 3, "op": "write_data", "args": {"handle": "p", "elements_hex": "01020304", "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "read_data", "args": {"handle": "c", "num_bytes": 2, "flags": []}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 5, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "write_data", "args": {"handle": "p", "elements_hex": "0102030405", "flags": []}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 7, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "element-size alignment: misaligned write INVALID_ARGUMENT; misaligned read INVALID_ARGUMENT (the peer update is still flushed first, so the data is available to the next aligned read)"
+  },
+  "normalizers": []
+}

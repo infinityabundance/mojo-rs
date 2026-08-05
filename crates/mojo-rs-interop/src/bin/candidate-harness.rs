@@ -13,12 +13,14 @@ use std::sync::Arc;
 
 use mojo_rs_casefile::casefile::Casefile;
 use mojo_rs_casefile::events::{Event, EventKind, SignalState};
-use mojo_rs_core::dispatcher::Dispatcher;
+use mojo_rs_core::data_pipe::{DataPipe, DataPipeEnd, ReadFlags};
+use mojo_rs_core::dispatcher::{Dispatcher, DispatcherType};
 use mojo_rs_core::error::CoreError;
 use mojo_rs_core::handle::{Handle, HandleTable};
 use mojo_rs_core::message::Message;
 use mojo_rs_core::pipe::{End, MessagePipe};
 use mojo_rs_core::platform_handle::PlatformHandleDispatcher;
+use mojo_rs_core::shared_buffer::{MappingTable, SharedBuffer};
 use mojo_rs_core::signal::{Signals, SignalsState};
 use mojo_rs_core::trap::{Trap, TrapCallback, TrapEvent};
 use mojo_rs_core::wait::Waiter;
@@ -68,6 +70,10 @@ struct Harness {
     trap_sinks: HashMap<String, Arc<EventSink>>,
     /// Write ends of pipes created as platform handles (kept open).
     pipe_writers: Vec<OwnedFd>,
+    /// Shared-buffer mappings: token -> mapped address (owned by `map_table`).
+    mappings: HashMap<String, usize>,
+    /// The process-wide mapping table (address -> owning mapping).
+    map_table: Arc<MappingTable>,
     events: Vec<Event>,
     seq: u64,
 }
@@ -80,6 +86,8 @@ impl Harness {
             traps: HashMap::new(),
             trap_sinks: HashMap::new(),
             pipe_writers: Vec::new(),
+            mappings: HashMap::new(),
+            map_table: Arc::new(MappingTable::new()),
             events: Vec::new(),
             seq: 0,
         }
@@ -105,6 +113,8 @@ impl Harness {
             process: None,
             pid: None,
             fd: None,
+            num_bytes: None,
+            size: None,
             note: None,
         });
         (self.seq - 1) as usize
@@ -157,6 +167,60 @@ impl Harness {
             satisfied: signal_names(e.signals_state.satisfied),
             satisfiable: signal_names(e.signals_state.satisfiable),
         });
+    }
+
+    /// Emit a data-pipe event: `{"event":"data","handle":<token>,
+    /// "num_bytes":N,"payload_hex":...}` (post-call `num_bytes`, which the
+    /// official modifies only on success paths). `num_bytes`/`payload` are
+    /// `None` for ops that do not produce them (the `end_*` ops).
+    fn emit_data(
+        &mut self,
+        op_id: u64,
+        result: &str,
+        handle: &str,
+        num_bytes: Option<u32>,
+        payload: Option<&[u8]>,
+    ) {
+        let idx = self.emit(op_id, EventKind::Data, result, Some(handle));
+        let ev = &mut self.events[idx];
+        ev.num_bytes = num_bytes;
+        ev.payload_hex = payload.map(hex::encode);
+    }
+
+    /// Emit a shared-buffer event: `{"event":"buffer","handle":<token>,
+    /// "result":...}` optionally carrying a reported `size` or `payload_hex`.
+    fn emit_buffer(
+        &mut self,
+        op_id: u64,
+        result: &str,
+        token: Option<&str>,
+        size: Option<u64>,
+        payload: Option<&[u8]>,
+    ) {
+        let idx = self.emit(op_id, EventKind::Buffer, result, token);
+        let ev = &mut self.events[idx];
+        ev.size = size;
+        ev.payload_hex = payload.map(hex::encode);
+    }
+
+    /// Parse data-pipe flag names from the casefile (write/read).
+    fn parse_data_flags(args: &serde_json::Value, read: bool) -> (bool, bool, bool, bool) {
+        let mut all_or_none = false;
+        let mut query = false;
+        let mut discard = false;
+        let mut peek = false;
+        if let Some(fl) = args["flags"].as_array() {
+            for f in fl {
+                match f.as_str().unwrap_or("") {
+                    "ALL_OR_NONE" => all_or_none = true,
+                    "QUERY" if read => query = true,
+                    "DISCARD" if read => discard = true,
+                    "PEEK" if read => peek = true,
+                    _ => {}
+                }
+            }
+        }
+        (all_or_none, query, discard, peek)
     }
 
     /// Resolve a handle token, tolerating a missing token when the casefile
@@ -295,9 +359,27 @@ impl Harness {
                     return Ok(());
                 };
                 let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
-                let state = dispatcher.query_signals();
-                let idx = self.emit(id, EventKind::Signals, "MOJO_RESULT_OK", Some(token));
-                self.events[idx].signals = Some(signal_state_of(state));
+                // The official MojoQueryHandleSignalsStateIpcz rejects any
+                // boxed driver object that is not a data pipe (shared buffers,
+                // traps, platform handles, invitations) with
+                // MOJO_RESULT_INVALID_ARGUMENT.
+                match dispatcher.dispatcher_type() {
+                    DispatcherType::MessagePipe
+                    | DispatcherType::DataPipeProducer
+                    | DispatcherType::DataPipeConsumer => {
+                        let state = dispatcher.query_signals();
+                        let idx = self.emit(id, EventKind::Signals, "MOJO_RESULT_OK", Some(token));
+                        self.events[idx].signals = Some(signal_state_of(state));
+                    }
+                    _ => {
+                        self.emit(
+                            id,
+                            EventKind::Signals,
+                            "MOJO_RESULT_INVALID_ARGUMENT",
+                            Some(token),
+                        );
+                    }
+                }
             }
             "close" => {
                 let token = args["handle"].as_str().ok_or("close: handle")?;
@@ -518,6 +600,486 @@ impl Harness {
                     self.emit_trap_payload(id, e);
                 }
                 self.emit(id, EventKind::Result, "MOJO_RESULT_OK", None);
+            }
+            "data_pipe_create" => {
+                let element = args["element_num_bytes"].as_u64().unwrap_or(1) as u32;
+                let capacity = args["capacity_num_bytes"].as_u64().unwrap_or(0) as u32;
+                // The official C entry defaults capacity to 64 KiB when the
+                // option is absent or zero.
+                let capacity = if capacity == 0 { 64 * 1024 } else { capacity };
+                let result = DataPipe::create_pair(element, capacity);
+                match result {
+                    Ok((producer, consumer)) => {
+                        let hp = self.table.add(producer).map_err(|e| e.to_string())?;
+                        let hc = self.table.add(consumer).map_err(|e| e.to_string())?;
+                        let produce: Vec<String> =
+                            expect.map(|e| e.produce.clone()).unwrap_or_default();
+                        if produce.len() == 2 {
+                            self.tokens.insert(produce[0].clone(), hp);
+                            self.tokens.insert(produce[1].clone(), hc);
+                        }
+                        self.emit(id, EventKind::Result, "MOJO_RESULT_OK", None);
+                    }
+                    Err(e) => {
+                        self.emit(id, EventKind::Result, e.name(), None);
+                    }
+                }
+            }
+            "write_data" => {
+                let token = args["handle"].as_str().ok_or("write_data: handle")?;
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(0),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                let elements = hex::decode(args["elements_hex"].as_str().unwrap_or(""))
+                    .map_err(|e| format!("elements hex: {e}"))?;
+                let num_bytes = elements.len() as u32;
+                let (all_or_none, _, _, _) = Self::parse_data_flags(args, false);
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(pipe) = dispatcher.as_any().downcast_ref::<DataPipe>() else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(num_bytes),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                if pipe.end() != DataPipeEnd::Producer {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(num_bytes),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                }
+                match pipe.write(&elements, num_bytes, all_or_none) {
+                    Ok(written) => {
+                        self.emit_data(
+                            id,
+                            "MOJO_RESULT_OK",
+                            token,
+                            Some(written),
+                            Some(&elements[..written as usize]),
+                        );
+                    }
+                    Err(e) => {
+                        self.emit_data(id, e.name(), token, Some(num_bytes), Some(&[]));
+                    }
+                }
+            }
+            "begin_write_data" => {
+                let token = args["handle"].as_str().ok_or("begin_write_data: handle")?;
+                let hint = args["hint"].as_u64().unwrap_or(0) as u32;
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(hint),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(pipe) = dispatcher.as_any().downcast_ref::<DataPipe>() else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(hint),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                if pipe.end() != DataPipeEnd::Producer {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(hint),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                }
+                match pipe.begin_write() {
+                    Ok(span) => {
+                        let content = hex::decode(args["content_hex"].as_str().unwrap_or(""))
+                            .map_err(|e| format!("content hex: {e}"))?;
+                        let n = std::cmp::min(content.len(), span.len());
+                        let mut s = span;
+                        // SAFETY: the span is the pipe's captured
+                        // available-capacity view, live for the two-phase
+                        // window; this is the only access to those bytes.
+                        let w = unsafe { s.as_mut_slice() };
+                        w[..n].copy_from_slice(&content[..n]);
+                        self.emit_data(
+                            id,
+                            "MOJO_RESULT_OK",
+                            token,
+                            Some(span.len() as u32),
+                            Some(&content[..n]),
+                        );
+                    }
+                    Err(e) => {
+                        self.emit_data(id, e.name(), token, Some(hint), Some(&[]));
+                    }
+                }
+            }
+            "end_write_data" => {
+                let token = args["handle"].as_str().ok_or("end_write_data: handle")?;
+                let produced = args["num_bytes_produced"].as_u64().unwrap_or(0) as u32;
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_data(id, "MOJO_RESULT_INVALID_ARGUMENT", token, None, None);
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(pipe) = dispatcher.as_any().downcast_ref::<DataPipe>() else {
+                    self.emit_data(id, "MOJO_RESULT_INVALID_ARGUMENT", token, None, None);
+                    return Ok(());
+                };
+                if pipe.end() != DataPipeEnd::Producer {
+                    self.emit_data(id, "MOJO_RESULT_INVALID_ARGUMENT", token, None, None);
+                    return Ok(());
+                }
+                let result = pipe.end_write(produced);
+                self.emit_data(
+                    id,
+                    result
+                        .map(|_| "MOJO_RESULT_OK")
+                        .unwrap_or_else(|e| e.name()),
+                    token,
+                    None,
+                    None,
+                );
+            }
+            "read_data" => {
+                let token = args["handle"].as_str().ok_or("read_data: handle")?;
+                let num_bytes = args["num_bytes"].as_u64().unwrap_or(0) as u32;
+                let (all_or_none, query, discard, peek) = Self::parse_data_flags(args, true);
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(num_bytes),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(pipe) = dispatcher.as_any().downcast_ref::<DataPipe>() else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(num_bytes),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                if pipe.end() != DataPipeEnd::Consumer {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(num_bytes),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                }
+                let flags = ReadFlags {
+                    all_or_none,
+                    query,
+                    discard,
+                    peek,
+                };
+                let mut buf = vec![0u8; num_bytes as usize];
+                let elements = if query || discard {
+                    None
+                } else {
+                    Some(buf.as_mut_slice())
+                };
+                match pipe.read(elements, num_bytes, flags) {
+                    Ok(outcome) => {
+                        self.emit_data(
+                            id,
+                            "MOJO_RESULT_OK",
+                            token,
+                            Some(outcome.num_bytes),
+                            Some(&outcome.data),
+                        );
+                    }
+                    Err(e) => {
+                        self.emit_data(id, e.name(), token, Some(num_bytes), Some(&[]));
+                    }
+                }
+            }
+            "begin_read_data" => {
+                let token = args["handle"].as_str().ok_or("begin_read_data: handle")?;
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(0),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(pipe) = dispatcher.as_any().downcast_ref::<DataPipe>() else {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(0),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                };
+                if pipe.end() != DataPipeEnd::Consumer {
+                    self.emit_data(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        token,
+                        Some(0),
+                        Some(&[]),
+                    );
+                    return Ok(());
+                }
+                match pipe.begin_read() {
+                    Ok(span) => {
+                        let payload = span.as_slice().to_vec();
+                        self.emit_data(
+                            id,
+                            "MOJO_RESULT_OK",
+                            token,
+                            Some(span.len() as u32),
+                            Some(&payload),
+                        );
+                    }
+                    Err(e) => {
+                        self.emit_data(id, e.name(), token, Some(0), Some(&[]));
+                    }
+                }
+            }
+            "end_read_data" => {
+                let token = args["handle"].as_str().ok_or("end_read_data: handle")?;
+                let consumed = args["num_bytes_consumed"].as_u64().unwrap_or(0) as u32;
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_data(id, "MOJO_RESULT_INVALID_ARGUMENT", token, None, None);
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(pipe) = dispatcher.as_any().downcast_ref::<DataPipe>() else {
+                    self.emit_data(id, "MOJO_RESULT_INVALID_ARGUMENT", token, None, None);
+                    return Ok(());
+                };
+                if pipe.end() != DataPipeEnd::Consumer {
+                    self.emit_data(id, "MOJO_RESULT_INVALID_ARGUMENT", token, None, None);
+                    return Ok(());
+                }
+                let result = pipe.end_read(consumed);
+                self.emit_data(
+                    id,
+                    result
+                        .map(|_| "MOJO_RESULT_OK")
+                        .unwrap_or_else(|e| e.name()),
+                    token,
+                    None,
+                    None,
+                );
+            }
+            "shared_buffer_create" => {
+                let num_bytes = args["num_bytes"].as_u64().unwrap_or(0);
+                match SharedBuffer::create(num_bytes) {
+                    Ok(buffer) => {
+                        let h = self.table.add(buffer).map_err(|e| e.to_string())?;
+                        let produce: Vec<String> =
+                            expect.map(|e| e.produce.clone()).unwrap_or_default();
+                        if let Some(t) = produce.first() {
+                            self.tokens.insert(t.clone(), h);
+                        }
+                        self.emit(id, EventKind::Result, "MOJO_RESULT_OK", None);
+                    }
+                    Err(e) => {
+                        self.emit(id, EventKind::Result, e.name(), None);
+                    }
+                }
+            }
+            "duplicate_buffer_handle" => {
+                let token = args["handle"]
+                    .as_str()
+                    .ok_or("duplicate_buffer_handle: handle")?;
+                let read_only = args["read_only"].as_bool().unwrap_or(false);
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit(
+                        id,
+                        EventKind::Result,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        Some(token),
+                    );
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(buffer) = dispatcher.as_any().downcast_ref::<SharedBuffer>() else {
+                    self.emit(
+                        id,
+                        EventKind::Result,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        Some(token),
+                    );
+                    return Ok(());
+                };
+                match buffer.duplicate(read_only) {
+                    Ok(new_buffer) => {
+                        let nh = self.table.add(new_buffer).map_err(|e| e.to_string())?;
+                        let produce: Vec<String> =
+                            expect.map(|e| e.produce.clone()).unwrap_or_default();
+                        if let Some(t) = produce.first() {
+                            self.tokens.insert(t.clone(), nh);
+                        }
+                        self.emit(id, EventKind::Result, "MOJO_RESULT_OK", Some(token));
+                    }
+                    Err(e) => {
+                        self.emit(id, EventKind::Result, e.name(), Some(token));
+                    }
+                }
+            }
+            "map_buffer" => {
+                let token = args["handle"].as_str().ok_or("map_buffer: handle")?;
+                let offset = args["offset"].as_u64().unwrap_or(0);
+                let num_bytes = args["num_bytes"].as_u64().unwrap_or(0);
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_buffer(id, "MOJO_RESULT_INVALID_ARGUMENT", Some(token), None, None);
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(buffer) = dispatcher.as_any().downcast_ref::<SharedBuffer>() else {
+                    self.emit_buffer(id, "MOJO_RESULT_INVALID_ARGUMENT", Some(token), None, None);
+                    return Ok(());
+                };
+                match buffer.map(offset, num_bytes) {
+                    Ok(mapping) => {
+                        let produce: Vec<String> =
+                            expect.map(|e| e.produce.clone()).unwrap_or_default();
+                        let map_token =
+                            produce.first().cloned().unwrap_or_else(|| "m0".to_string());
+                        let mut mapping = Arc::new(mapping);
+                        // Write content BEFORE publishing the mapping to the
+                        // table (Arc::get_mut needs sole ownership).
+                        if let Some(content_hex) = args["content_hex"].as_str() {
+                            let content = hex::decode(content_hex)
+                                .map_err(|e| format!("content hex: {e}"))?;
+                            if content.len() > mapping.len() {
+                                return Err("map_buffer: content overruns mapping".to_string());
+                            }
+                            let m =
+                                Arc::get_mut(&mut mapping).ok_or("map_buffer: mapping aliased")?;
+                            // SAFETY: the mapping is exclusively owned here
+                            // (sole Arc); `write_at` returns false for
+                            // read-only mappings and out-of-range writes.
+                            if !content.is_empty() && !unsafe { m.write_at(0, &content) } {
+                                return Err("map_buffer: write failed".to_string());
+                            }
+                        }
+                        let addr = self.map_table.add(Arc::clone(&mapping));
+                        self.mappings.insert(map_token.clone(), addr);
+                        self.emit_buffer(id, "MOJO_RESULT_OK", Some(token), None, None);
+                    }
+                    Err(e) => {
+                        self.emit_buffer(id, e.name(), Some(token), None, None);
+                    }
+                }
+            }
+            "unmap_buffer" => {
+                let token = args["token"].as_str().ok_or("unmap_buffer: token")?;
+                match self.mappings.remove(token) {
+                    Some(addr) => {
+                        let result = self.map_table.remove(addr);
+                        self.emit_buffer(
+                            id,
+                            result
+                                .map(|_| "MOJO_RESULT_OK")
+                                .unwrap_or_else(|e| e.name()),
+                            Some(token),
+                            None,
+                            None,
+                        );
+                    }
+                    None => {
+                        self.emit_buffer(
+                            id,
+                            "MOJO_RESULT_INVALID_ARGUMENT",
+                            Some(token),
+                            None,
+                            None,
+                        );
+                    }
+                }
+            }
+            "read_mapping" => {
+                let token = args["token"].as_str().ok_or("read_mapping: token")?;
+                let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+                let len = args["len"].as_u64().unwrap_or(0) as usize;
+                let Some(&addr) = self.mappings.get(token) else {
+                    self.emit_buffer(id, "MOJO_RESULT_INVALID_ARGUMENT", Some(token), None, None);
+                    return Ok(());
+                };
+                let Some(mapping) = self.map_table.get(addr) else {
+                    self.emit_buffer(id, "MOJO_RESULT_INVALID_ARGUMENT", Some(token), None, None);
+                    return Ok(());
+                };
+                match mapping.read_at(offset, len) {
+                    Some(data) => {
+                        self.emit_buffer(id, "MOJO_RESULT_OK", Some(token), None, Some(&data));
+                    }
+                    None => {
+                        self.emit_buffer(
+                            id,
+                            "MOJO_RESULT_INVALID_ARGUMENT",
+                            Some(token),
+                            None,
+                            None,
+                        );
+                    }
+                }
+            }
+            "get_buffer_info" => {
+                let token = args["handle"].as_str().ok_or("get_buffer_info: handle")?;
+                let Some(h) = self.handle_opt(token, expect)? else {
+                    self.emit_buffer(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        Some(token),
+                        Some(0),
+                        None,
+                    );
+                    return Ok(());
+                };
+                let dispatcher = self.table.get(h.value()).map_err(|e| e.to_string())?;
+                let Some(buffer) = dispatcher.as_any().downcast_ref::<SharedBuffer>() else {
+                    self.emit_buffer(
+                        id,
+                        "MOJO_RESULT_INVALID_ARGUMENT",
+                        Some(token),
+                        Some(0),
+                        None,
+                    );
+                    return Ok(());
+                };
+                let size = buffer.size();
+                self.emit_buffer(id, "MOJO_RESULT_OK", Some(token), Some(size), None);
             }
             other => {
                 return Err(format!(

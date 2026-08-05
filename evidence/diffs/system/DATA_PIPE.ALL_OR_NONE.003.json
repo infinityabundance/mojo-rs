@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.ALL_OR_NONE.003",
+  "status": "pass",
+  "oracle_events": 12,
+  "candidate_events": 12,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "79f3121d99c296f155714b340a346143560e780f62a3853dde7ad37b936ffaa9",
+    "candidate_events_sha256": "79f3121d99c296f155714b340a346143560e780f62a3853dde7ad37b936ffaa9"
+  }
+}

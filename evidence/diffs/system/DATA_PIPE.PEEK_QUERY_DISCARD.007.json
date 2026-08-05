@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.PEEK_QUERY_DISCARD.007",
+  "status": "pass",
+  "oracle_events": 14,
+  "candidate_events": 14,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "3eed7aceb4441e14b0d32c8adb99af64f0adb24874244fa6748c59f509521aaa",
+    "candidate_events_sha256": "3eed7aceb4441e14b0d32c8adb99af64f0adb24874244fa6748c59f509521aaa"
+  }
+}

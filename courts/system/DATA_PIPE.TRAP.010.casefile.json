@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.TRAP.010",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe", "traps", "signals"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p1", "c1"]}},
+    {"id": 2, "op": "trap_create", "args": {}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["t0"]}},
+    {"id": 3, "op": "trap_add_trigger", "args": {"trap": "t0", "handle": "c1", "signals": ["READABLE"], "context": 1}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "trap_arm", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "write_data", "args": {"handle": "p1", "elements_hex": "0102", "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "drain_trap_events", "args": {"trap": "t0", "count": 1, "timeout_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "read_data", "args": {"handle": "c1", "num_bytes": 2, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "trap_arm", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "close", "args": {"handle": "p1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "drain_trap_events", "args": {"trap": "t0", "count": 1, "timeout_ms": 5000}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 11, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p2", "c2"]}},
+    {"id": 12, "op": "trap_add_trigger", "args": {"trap": "t0", "handle": "p2", "signals": ["WRITABLE"], "context": 2}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 13, "op": "trap_arm", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 14, "op": "trap_add_trigger", "args": {"trap": "t0", "handle": "c2", "signals": [], "context": 3}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 15, "op": "trap_arm", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 16, "op": "trap_remove_trigger", "args": {"trap": "t0", "context": 1}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 17, "op": "trap_remove_trigger", "args": {"trap": "t0", "context": 2}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 18, "op": "trap_remove_trigger", "args": {"trap": "t0", "context": 3}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 19, "op": "trap_close", "args": {"trap": "t0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 20, "op": "close", "args": {"handle": "c1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 21, "op": "close", "args": {"handle": "p2"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 22, "op": "close", "args": {"handle": "c2"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "trap on consumer READABLE fires OK on arrival; fires FAILED_PRECONDITION when the producer closes with no data; an immediately-satisfied WRITABLE trigger fails the arm with a blocking event; a zero-signal trigger can never be armed"
+  },
+  "normalizers": []
+}

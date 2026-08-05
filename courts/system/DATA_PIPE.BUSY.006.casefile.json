@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.BUSY.006",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "begin_write_data", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "write_data", "args": {"handle": "p", "elements_hex": "01", "flags": []}, "expect": {"result": "MOJO_RESULT_BUSY"}},
+    {"id": 4, "op": "begin_write_data", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_BUSY"}},
+    {"id": 5, "op": "end_write_data", "args": {"handle": "p", "num_bytes_produced": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "write_data", "args": {"handle": "p", "elements_hex": "01020304", "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "begin_write_data", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "begin_read_data", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "begin_read_data", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_BUSY"}},
+    {"id": 10, "op": "end_read_data", "args": {"handle": "c", "num_bytes_consumed": 0}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 11, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 12, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 13, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "active two-phase write blocks write_data and begin_write_data with BUSY; active two-phase read blocks begin_read_data with BUSY; zero-commit/consume ends the two-phase"
+  },
+  "normalizers": []
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.PEER_CLOSE.009",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe", "signals"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "write_data", "args": {"handle": "p", "elements_hex": "0a0b", "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "query_signals_state", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "read_data", "args": {"handle": "c", "num_bytes": 2, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "query_signals_state", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": []}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 8, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p2", "c2"]}},
+    {"id": 9, "op": "close", "args": {"handle": "c2"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "query_signals_state", "args": {"handle": "p2"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 11, "op": "write_data", "args": {"handle": "p2", "elements_hex": "01", "flags": []}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 12, "op": "begin_write_data", "args": {"handle": "p2"}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION"}},
+    {"id": 13, "op": "close", "args": {"handle": "p2"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 14, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "peer close: buffered data stays readable (READABLE + PEER_CLOSED), then reads FAILED_PRECONDITION; writes to a closed consumer FAILED_PRECONDITION; begin_write FAILED_PRECONDITION"
+  },
+  "normalizers": []
+}

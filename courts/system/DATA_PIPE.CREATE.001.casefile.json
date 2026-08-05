@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.CREATE.001",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe", "signals"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "query_signals_state", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "query_signals_state", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "data_pipe_create", "args": {"element_num_bytes": 0, "capacity_num_bytes": 16}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT", "produce": ["p2", "c2"]}},
+    {"id": 5, "op": "data_pipe_create", "args": {"element_num_bytes": 8, "capacity_num_bytes": 4}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT", "produce": ["p3", "c3"]}},
+    {"id": 6, "op": "data_pipe_create", "args": {"element_num_bytes": 0, "capacity_num_bytes": 0}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT", "produce": ["p4", "c4"]}},
+    {"id": 7, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "fresh producer: WRITABLE satisfied; fresh consumer: READABLE/NEW_DATA_READABLE satisfiable only; element 0 or capacity < element -> INVALID_ARGUMENT"
+  },
+  "normalizers": []
+}

@@ -27,9 +27,27 @@ pub enum Access {
 }
 
 /// A mapped region of shared memory.
+///
+/// The platform `mmap` granularity is one page; the official Mojo `MapAt`
+/// aligns the requested offset down to the page boundary and adjusts the
+/// returned pointer (base/memory/platform_shared_memory_region.cc). `Mapping`
+/// therefore records the aligned base and total mapped length for `munmap`
+/// while exposing the exact requested `[ptr, ptr + len)` range.
+///
+/// `Mapping` is `Send + Sync`: it owns a live `mmap` region whose memory is
+/// stable until `Drop` (by the sole owner); shared reads through `&Mapping`
+/// are safe concurrently, and mutation requires `&mut Mapping` (the safe
+/// API), which owning structures (e.g. a `RingBuffer` behind a `Mutex`)
+/// serialize.
 pub struct Mapping {
+    /// The exact requested start of the mapping.
     ptr: *mut u8,
+    /// The exact requested length.
     len: usize,
+    /// The page-aligned base passed to `mmap` (may be `< ptr`).
+    map_base: *mut u8,
+    /// The total length passed to `mmap` (`len` plus the alignment adjustment).
+    map_len: usize,
     access: Access,
 }
 
@@ -93,13 +111,20 @@ impl SharedMemory {
         self.size
     }
 
-    /// Map the memory with the given access. Returns `Err(InvalidArgument)`
-    /// (via `io::ErrorKind`) for invalid ranges.
+    /// Map `len` bytes at byte offset `offset` with the given access.
+    ///
+    /// The official `MojoMapBuffer` allows arbitrary (page-unaligned) offsets:
+    /// `base::subtle::PlatformSharedMemoryRegion::MapAt` aligns down to the
+    /// system page and adjusts the returned pointer. Returns
+    /// `Err(InvalidInput)` for invalid ranges (mirrors the base `MapAt`
+    /// rejection, which the C API surface reports as
+    /// `MOJO_RESULT_RESOURCE_EXHAUSTED`).
     pub fn map(&self, offset: usize, len: usize, access: Access) -> io::Result<Mapping> {
-        if offset % 4096 != 0 {
+        const PAGE: usize = 4096;
+        if len == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "offset not page-aligned",
+                "zero-length mapping",
             ));
         }
         let end = offset
@@ -111,29 +136,49 @@ impl SharedMemory {
                 "range beyond object size",
             ));
         }
+        let aligned = offset & !(PAGE - 1);
+        let adjustment = offset - aligned;
+        let map_len = len + adjustment;
         let prot = match access {
             Access::ReadOnly => libc::PROT_READ,
             Access::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
         };
-        // SAFETY: standard mmap arguments; len > 0 guaranteed by the range
-        // checks above.
-        let ptr = unsafe {
+        // SAFETY: standard mmap arguments; map_len > 0 guaranteed by len > 0;
+        // the mapped range [aligned, aligned + map_len) is within the object
+        // (aligned + map_len == offset + len <= size).
+        let base = unsafe {
             sys::mmap(
                 std::ptr::null_mut(),
-                len,
+                map_len,
                 prot,
                 libc::MAP_SHARED,
                 self.fd.as_raw_fd(),
-                offset as libc::off_t,
+                aligned as libc::off_t,
             )
         };
-        if ptr == libc::MAP_FAILED {
+        if base == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: base is a live mapping of map_len bytes; the requested range
+        // is within it by construction.
+        let ptr = unsafe { base.add(adjustment) };
         Ok(Mapping {
             ptr: ptr as *mut u8,
             len,
+            map_base: base as *mut u8,
+            map_len,
             access,
+        })
+    }
+
+    /// Duplicate this shared-memory object: a new descriptor referencing the
+    /// same underlying region with the same size. Mirrors
+    /// `PlatformSharedMemoryRegion::Duplicate` (dup(2) of the descriptor).
+    pub fn duplicate(&self) -> io::Result<SharedMemory> {
+        let new_fd = self.fd.try_dup()?;
+        Ok(SharedMemory {
+            fd: new_fd,
+            size: self.size,
         })
     }
 
@@ -166,6 +211,11 @@ impl Mapping {
     pub unsafe fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr
     }
+
+    /// The exact requested start address of the mapping.
+    pub fn address(&self) -> usize {
+        self.ptr as usize
+    }
 }
 
 impl Deref for Mapping {
@@ -186,12 +236,24 @@ impl std::ops::DerefMut for Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: ptr/len describe a live mapping owned by this object.
+        // SAFETY: map_base/map_len describe the live mmap region owned by this
+        // object (the aligned base and total length passed to mmap).
         unsafe {
-            sys::munmap(self.ptr as *mut libc::c_void, self.len);
+            sys::munmap(self.map_base as *mut libc::c_void, self.map_len);
         }
     }
 }
+
+// SAFETY: `Mapping` owns a live mmap region and never aliases it through
+// shared references. Mutation requires `&mut Mapping` (the safe API), which
+// the owning structures (e.g. `RingBuffer` behind a `Mutex`) serialize;
+// shared reads via `&Mapping` are safe concurrently. The region is unmapped
+// exactly once, in `Drop`, by the sole owner.
+unsafe impl Send for Mapping {}
+// SAFETY: shared reads through `&Mapping` never mutate the region; every
+// mutation path requires `&mut Mapping` (the safe API), so `&Mapping` can be
+// shared across threads without data races.
+unsafe impl Sync for Mapping {}
 
 /// Create a shared memory object (test/diagnostic helper).
 pub fn create_memfd(name: &str, size: usize) -> io::Result<SharedMemory> {
@@ -228,9 +290,46 @@ mod tests {
     #[test]
     fn invalid_ranges_rejected() {
         let mem = SharedMemory::create("mojo-test-ranges", 4096).unwrap();
-        assert!(mem.map(1, 4096, Access::ReadWrite).is_err()); // unaligned
+        assert!(mem.map(0, 0, Access::ReadWrite).is_err()); // zero length
         assert!(mem.map(0, 8192, Access::ReadWrite).is_err()); // beyond size
+        assert!(mem.map(1, 4096, Access::ReadWrite).is_err()); // end beyond size
         assert!(mem.map(0, usize::MAX, Access::ReadWrite).is_err()); // overflow
+        assert!(mem.map(4096, 1, Access::ReadWrite).is_err()); // start == size
+    }
+
+    #[test]
+    fn unaligned_offsets_supported() {
+        // The official MapAt aligns down to the page and adjusts the pointer.
+        let mem = SharedMemory::create("mojo-test-unaligned", 4096).unwrap();
+        let m = mem.map(3, 10, Access::ReadWrite).unwrap();
+        assert_eq!(m.len(), 10);
+        // SAFETY: the mapping is read-write and owned; no aliasing refs exist.
+        unsafe {
+            let ptr = m.as_mut_ptr();
+            *ptr = 0xab;
+            *ptr.add(9) = 0xcd;
+            assert_eq!(*ptr, 0xab);
+            assert_eq!(*ptr.add(9), 0xcd);
+        }
+        // The mapping is inside the requested range, not page-aligned.
+        assert_eq!(m.address() % 4096, 3);
+    }
+
+    #[test]
+    fn duplicate_shares_pages() {
+        let mem = SharedMemory::create("mojo-test-dup", 4096).unwrap();
+        let dup = mem.duplicate().unwrap();
+        assert_eq!(dup.size(), 4096);
+        assert_ne!(dup.as_raw_fd(), mem.as_raw_fd());
+        let a = mem.map(0, 128, Access::ReadWrite).unwrap();
+        let b = dup.map(0, 128, Access::ReadWrite).unwrap();
+        // SAFETY: both mappings are read-write and owned; no aliasing refs.
+        unsafe {
+            *a.as_mut_ptr() = 0x5a;
+            assert_eq!(*b.as_mut_ptr(), 0x5a);
+            *b.as_mut_ptr() = 0x7c;
+            assert_eq!(*a.as_mut_ptr(), 0x7c);
+        }
     }
 
     #[test]

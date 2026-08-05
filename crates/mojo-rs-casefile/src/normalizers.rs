@@ -121,6 +121,8 @@ mod tests {
             process: None,
             pid: Some(42),
             fd: Some(7),
+            num_bytes: None,
+            size: None,
             note: None,
         }
     }

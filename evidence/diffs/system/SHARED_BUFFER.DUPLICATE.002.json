@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.DUPLICATE.002",
+  "status": "pass",
+  "oracle_events": 12,
+  "candidate_events": 12,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "0750bb4ffd889db6bccde558c59786b6cc1a8ff24f6d7f8bb48de85f57419f78",
+    "candidate_events_sha256": "0750bb4ffd889db6bccde558c59786b6cc1a8ff24f6d7f8bb48de85f57419f78"
+  }
+}

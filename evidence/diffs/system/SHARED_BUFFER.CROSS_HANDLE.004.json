@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.CROSS_HANDLE.004",
+  "status": "pass",
+  "oracle_events": 12,
+  "candidate_events": 12,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "c6f3fd119c41ca0dd49747bb0ba39ae8ad77080714f59349b0eec50c2e14348b",
+    "candidate_events_sha256": "c6f3fd119c41ca0dd49747bb0ba39ae8ad77080714f59349b0eec50c2e14348b"
+  }
+}

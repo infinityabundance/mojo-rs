@@ -1,0 +1,14 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"data","handle":"p","num_bytes":16,"op_id":2,"payload_hex":"0102030405","result":"MOJO_RESULT_OK","seq":3}
+{"event":"data","handle":"p","op_id":3,"result":"MOJO_RESULT_OK","seq":4}
+{"event":"data","handle":"c","num_bytes":5,"op_id":4,"payload_hex":"0102030405","result":"MOJO_RESULT_OK","seq":5}
+{"event":"data","handle":"c","op_id":5,"result":"MOJO_RESULT_OK","seq":6}
+{"event":"data","handle":"p","num_bytes":11,"op_id":6,"payload_hex":"","result":"MOJO_RESULT_OK","seq":7}
+{"event":"data","handle":"p","op_id":7,"result":"MOJO_RESULT_OK","seq":8}
+{"event":"data","handle":"c","num_bytes":0,"op_id":8,"payload_hex":"","result":"MOJO_RESULT_SHOULD_WAIT","seq":9}
+{"event":"data","handle":"p","op_id":9,"result":"MOJO_RESULT_FAILED_PRECONDITION","seq":10}
+{"event":"data","handle":"c","op_id":10,"result":"MOJO_RESULT_FAILED_PRECONDITION","seq":11}
+{"event":"result","handle":"p","op_id":11,"result":"MOJO_RESULT_OK","seq":12}
+{"event":"result","handle":"c","op_id":12,"result":"MOJO_RESULT_OK","seq":13}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":14}

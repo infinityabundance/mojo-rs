@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.DUPLICATE.002",
+  "court": "shared-buffer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["shared_buffer"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "shared_buffer_create", "args": {"num_bytes": 64}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b0"]}},
+    {"id": 2, "op": "duplicate_buffer_handle", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["d0"]}},
+    {"id": 3, "op": "get_buffer_info", "args": {"handle": "d0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "map_buffer", "args": {"handle": "b0", "offset": 0, "num_bytes": 16, "content_hex": "0102030405060708090a0b0c0d0e0f10"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m0"]}},
+    {"id": 5, "op": "map_buffer", "args": {"handle": "d0", "offset": 0, "num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m1"]}},
+    {"id": 6, "op": "read_mapping", "args": {"token": "m1", "offset": 0, "len": 4}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "unmap_buffer", "args": {"token": "m0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "unmap_buffer", "args": {"token": "m1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 9, "op": "close", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "close", "args": {"handle": "d0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "a duplicated handle references the same underlying region: content written through the original's mapping is visible through the duplicate's mapping"
+  },
+  "normalizers": []
+}

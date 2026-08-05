@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.MAP_UNMAP.003",
+  "court": "shared-buffer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["shared_buffer"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "shared_buffer_create", "args": {"num_bytes": 4096}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b0"]}},
+    {"id": 2, "op": "map_buffer", "args": {"handle": "b0", "offset": 0, "num_bytes": 128}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m0"]}},
+    {"id": 3, "op": "read_mapping", "args": {"token": "m0", "offset": 0, "len": 4}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 4, "op": "unmap_buffer", "args": {"token": "m0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "unmap_buffer", "args": {"token": "m0"}, "expect": {"result": "MOJO_RESULT_INVALID_ARGUMENT"}},
+    {"id": 6, "op": "map_buffer", "args": {"handle": "b0", "offset": 4095, "num_bytes": 2}, "expect": {"result": "MOJO_RESULT_RESOURCE_EXHAUSTED", "produce": ["m1"]}},
+    {"id": 7, "op": "map_buffer", "args": {"handle": "b0", "offset": 0, "num_bytes": 0}, "expect": {"result": "MOJO_RESULT_RESOURCE_EXHAUSTED", "produce": ["m2"]}},
+    {"id": 8, "op": "map_buffer", "args": {"handle": "b0", "offset": 4096, "num_bytes": 1}, "expect": {"result": "MOJO_RESULT_RESOURCE_EXHAUSTED", "produce": ["m3"]}},
+    {"id": 9, "op": "map_buffer", "args": {"handle": "b0", "offset": 3, "num_bytes": 10}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m4"]}},
+    {"id": 10, "op": "read_mapping", "args": {"token": "m4", "offset": 0, "len": 10}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 11, "op": "unmap_buffer", "args": {"token": "m4"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 12, "op": "close", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "new regions are zero-filled; unmap by token removes the mapping (second unmap INVALID_ARGUMENT); out-of-range, zero-length and end-at-size mappings are RESOURCE_EXHAUSTED (official MapAt failure -> RESOURCE_EXHAUSTED); unaligned offsets are supported"
+  },
+  "normalizers": []
+}

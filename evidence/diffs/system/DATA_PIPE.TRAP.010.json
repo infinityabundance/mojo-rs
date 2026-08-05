@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.TRAP.010",
+  "status": "pass",
+  "oracle_events": 31,
+  "candidate_events": 31,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "794c32e3a3017326607d3d62f9dd06da75078f6acb8f41317f7387c30b7c15f1",
+    "candidate_events_sha256": "794c32e3a3017326607d3d62f9dd06da75078f6acb8f41317f7387c30b7c15f1"
+  }
+}

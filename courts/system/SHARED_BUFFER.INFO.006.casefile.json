@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.INFO.006",
+  "court": "shared-buffer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["shared_buffer"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "shared_buffer_create", "args": {"num_bytes": 4096}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b0"]}},
+    {"id": 2, "op": "get_buffer_info", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "duplicate_buffer_handle", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["d0"]}},
+    {"id": 4, "op": "get_buffer_info", "args": {"handle": "d0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 5, "op": "shared_buffer_create", "args": {"num_bytes": 2147483648}, "expect": {"result": "MOJO_RESULT_RESOURCE_EXHAUSTED", "produce": ["b1"]}},
+    {"id": 6, "op": "close", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "close", "args": {"handle": "d0"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "get_buffer_info reports the creation size on the original and duplicates; sizes above i32::MAX are RESOURCE_EXHAUSTED (official PlatformSharedMemoryRegion::Create)"
+  },
+  "normalizers": []
+}

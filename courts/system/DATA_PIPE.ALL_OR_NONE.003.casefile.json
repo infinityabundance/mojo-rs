@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.ALL_OR_NONE.003",
+  "court": "data-pipe",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["data_pipe"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "data_pipe_create", "args": {"element_num_bytes": 1, "capacity_num_bytes": 8}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["p", "c"]}},
+    {"id": 2, "op": "write_data", "args": {"handle": "p", "elements_hex": "0102030405060708", "flags": ["ALL_OR_NONE"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 3, "op": "write_data", "args": {"handle": "p", "elements_hex": "090a0b0c", "flags": ["ALL_OR_NONE"]}, "expect": {"result": "MOJO_RESULT_OUT_OF_RANGE"}},
+    {"id": 4, "op": "write_data", "args": {"handle": "p", "elements_hex": "090a0b0c", "flags": []}, "expect": {"result": "MOJO_RESULT_SHOULD_WAIT"}},
+    {"id": 5, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "write_data", "args": {"handle": "p", "elements_hex": "090a0b0c", "flags": ["ALL_OR_NONE"]}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 7, "op": "read_data", "args": {"handle": "c", "num_bytes": 8, "flags": []}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "read_data", "args": {"handle": "c", "num_bytes": 4, "flags": []}, "expect": {"result": "MOJO_RESULT_SHOULD_WAIT"}},
+    {"id": 9, "op": "close", "args": {"handle": "p"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 10, "op": "close", "args": {"handle": "c"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "ALL_OR_NONE write fails OUT_OF_RANGE when the pipe cannot fit all bytes (num_bytes unmodified); partial write on a full pipe SHOULD_WAIT; AON succeeds after space frees"
+  },
+  "normalizers": []
+}

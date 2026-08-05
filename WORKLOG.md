@@ -257,3 +257,121 @@ Phase 5 routing: portal transfer via `RouterDescriptor` parcels and the
 remaining NodeLink message types (BypassPeer/AcceptBypassLink proxy bypass,
 RequestMemory/ProvideMemory), building the full router state machine against
 the pinned sources and the captured wire.
+
+---
+
+## Cycle 2026-08-05 — Phase 4 differential parity seal: data pipes and shared buffers
+
+### 1. What was actually implemented
+
+* `mojo-rs-platform::shm`: `SharedMemory::duplicate()` and page-unaligned
+  `map()` (align-down + pointer adjustment, mirroring base `MapAt`); `Mapping`
+  now records the aligned base/total length for `munmap` and is `Send + Sync`
+  under the documented external-synchronization invariant.
+* `mojo-rs-core::ring_buffer`: `RingBuffer` mirroring the official
+  `ipcz_driver/ring_buffer.{h,cc}` — circular `Range`, chunked `MapRange`
+  semantics, `Write/WriteAll/Read/ReadAll/Peek/PeekAll/Discard/DiscardAll/
+  ExtendDataRange`, `DirectWriter`/`DirectReader`, `SerializedState`.
+* `mojo-rs-core::data_pipe`: the producer/consumer pair over a shared region
+  with two per-endpoint ring views (the official model), per-direction
+  control-message queues (parcel presence is the signal), `has_new_data`
+  latch, exact error-code/ordering per the pinned `data_pipe.cc`, and
+  watch/trap integration (fires on parcel arrival and peer close; CANCELLED on
+  local close).
+* `mojo-rs-core::shared_buffer`: region-mode state machine (Writable →
+  Unsafe/ReadOnly on first duplicate, then immutable), `map` with `MapAt`
+  failure semantics (RESOURCE_EXHAUSTED), the address-keyed `MappingTable`.
+* Oracle driver: 15 new ops (`data_pipe_create`, `write_data`, `read_data`,
+  `begin_write_data`, `end_write_data`, `begin_read_data`, `end_read_data`,
+  `shared_buffer_create`, `duplicate_buffer_handle`, `map_buffer`,
+  `unmap_buffer`, `read_mapping`, `get_buffer_info`) plus the `num_bytes`/
+  `size` event fields; `MojoArmTrap` now passes blocking-event capacity.
+* Candidate harness: the matching ops, `num_bytes`/`size` event fields,
+  shared-buffer mapping tokens, and signal-query rejection for non-data-pipe
+  boxed objects.
+* `mojo-rs-system`: idiomatic safe APIs — RAII two-phase data-pipe
+  transactions (drop cancels with a zero-length commit), RAII shared-buffer
+  mappings (unmap-on-drop), `SystemError` taxonomy.
+
+### 2. Which files changed
+
+`crates/mojo-rs-platform/src/shm.rs`; `crates/mojo-rs-core/src/{ring_buffer,
+data_pipe,shared_buffer,lib,trap}.rs`; `crates/mojo-rs-system/src/{error,
+data_pipe,shared_buffer,lib}.rs`; `crates/mojo-rs-casefile/src/{events,
+normalizers}.rs`; `crates/mojo-rs-interop/src/bin/candidate-harness.rs` and
+`src/ipcz/acceptor.rs`; `oracle/driver/oracle_driver.cc`; `casefiles/schema/
+{events,casefile}.schema.json`; `courts/system/*` (16 new casefiles +
+manifest); `atlas/feature-matrix.json`; `STATUS.md`; `WORKLOG.md`.
+
+### 3. Compatibility claims now supported
+
+* `data-pipe` and `shared-buffer` capabilities upgraded from `Scaffolded` to
+  `Oracle-compared` in `atlas/feature-matrix.json`, backed by 16 new
+  byte-identical cases in the sealed 26-case system court.
+
+### 4. Which courts were run
+
+* `scripts/run_court.sh system`: 26/26 PASS, byte-identical (10 sealed
+  message-pipe/signal/trap/wait/handle cases unchanged, 16 new Phase 4 cases).
+* `scripts/run_invite_court.sh`: PASS (re-sealed with the rebuilt driver).
+* `scripts/run_interop_court.sh`: PASS (re-sealed with the rebuilt driver).
+
+### 5. Exact pass/fail counts
+
+* `cargo test --workspace`: 32 suites, 0 failures (core 49, casefile 6+,
+  system 9, platform 13, interop 34, ...).
+* `cargo clippy --workspace --all-targets`: 0 errors.
+* `cargo fmt --check`: clean.
+* System court: 26 passed, 0 failed; receipt verified.
+
+### 6. New residuals and evidence paths
+
+`evidence/oracle/system/*.events`, `evidence/candidate/system/*.events`
+(byte-identical for all 26), `evidence/diffs/system/*.json` (empty
+residuals), `evidence/manifests/system-*.json` (hashed inputs).
+
+### 7. Every observed mismatch
+
+* First run: 4 shared-buffer cases failed with a `token`/`handle` key
+  mismatch — the C++ driver emitted `"token"` which the Rust `Event` struct
+  (no such field) dropped on parse, so the comparison saw the token vanish.
+* The candidate's `Trap::arm` returned `FailedPrecondition` when re-armed
+  while armed; the official returns OK.
+* The oracle driver's `OpTrapArm` passed `num_events = 0`, so the official
+  `MojoArmTrap` never filled blocking events on a failed arm — immediate
+  events were silently lost.
+* The candidate harness's `query_signals_state` returned OK for shared-buffer
+  handles; the official rejects them with INVALID_ARGUMENT.
+* A latent single-ring design bug (producer/consumer sharing one data range)
+  double-counted flushes — caught by unit tests before the court run.
+
+### 8. Root cause of each fixed mismatch
+
+* Key naming: the event schema models `handle`, not `token` — the driver now
+  emits `handle`.
+* Re-arm semantics: official `MojoTrap::Arm` short-circuits `if (armed_)
+  return OK` — the candidate now mirrors it.
+* Blocking events: `MojoArmTrap` validates `blocking_events[0].struct_size`
+  and only fills events when `event_capacity > 0` — the driver now passes
+  capacity 4 with initialized struct_size.
+* Signal queries: `MojoQueryHandleSignalsStateIpcz` rejects boxed driver
+  objects that are not data pipes — the harness now classifies by dispatcher
+  type.
+* Ring model: the official gives each endpoint its own `RingBuffer` over its
+  own mapping of the same region; a single shared range would extend twice
+  for the same bytes. The pair now holds two ring views.
+
+### 9. Remaining unsupported behavior
+
+Phase 5 routing/port transfer (full router state machines), Phase 6 C ABI
+export, Phase 7 mojom/bindings, concurrency/stress/fuzz sealing, other
+platforms. Data pipes/shared buffers are sealed for the in-process Mojo API
+surface; cross-process data-pipe/shared-buffer transfer is part of the Phase 5
+routing work.
+
+### 10. Next highest-value parity gate
+
+Per the directive's sequence, Phase 5 routing: portal transfer via
+`RouterDescriptor` parcels, proxy bypass (`BypassPeer`/`AcceptBypassLink`),
+`RequestMemory`/`ProvideMemory`, multi-node graphs, against the pinned sources
+and the captured wire.

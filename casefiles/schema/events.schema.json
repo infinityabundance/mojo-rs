@@ -33,6 +33,8 @@
       }
     },
     "outputs": {"type": "object", "additionalProperties": true},
+    "num_bytes": {"type": "integer", "description": "post-call num_bytes output of a data-pipe operation (official modifies it only on success paths)"},
+    "size": {"type": "integer", "description": "reported shared-buffer size from get_buffer_info"},
     "process": {"type": "string", "description": "process name for multi-process cases (parent or peer name)"},
     "pid": {"type": "integer"},
     "fd": {"type": "integer"},

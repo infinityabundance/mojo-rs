@@ -1,0 +1,15 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"signals","handle":"c","op_id":2,"result":"MOJO_RESULT_OK","seq":3,"signals":{"satisfiable":["READABLE","PEER_CLOSED","NEW_DATA_READABLE","PEER_REMOTE"],"satisfied":[]}}
+{"event":"signals","handle":"p","op_id":3,"result":"MOJO_RESULT_OK","seq":4,"signals":{"satisfiable":["WRITABLE","PEER_CLOSED","PEER_REMOTE"],"satisfied":["WRITABLE"]}}
+{"event":"data","handle":"p","num_bytes":8,"op_id":4,"payload_hex":"0102030405060708","result":"MOJO_RESULT_OK","seq":5}
+{"event":"signals","handle":"c","op_id":5,"result":"MOJO_RESULT_OK","seq":6,"signals":{"satisfiable":["READABLE","PEER_CLOSED","NEW_DATA_READABLE","PEER_REMOTE"],"satisfied":["READABLE","NEW_DATA_READABLE"]}}
+{"event":"data","handle":"c","num_bytes":4,"op_id":6,"payload_hex":"01020304","result":"MOJO_RESULT_OK","seq":7}
+{"event":"signals","handle":"c","op_id":7,"result":"MOJO_RESULT_OK","seq":8,"signals":{"satisfiable":["READABLE","PEER_CLOSED","NEW_DATA_READABLE","PEER_REMOTE"],"satisfied":["READABLE"]}}
+{"event":"data","handle":"c","num_bytes":4,"op_id":8,"payload_hex":"05060708","result":"MOJO_RESULT_OK","seq":9}
+{"event":"signals","handle":"c","op_id":9,"result":"MOJO_RESULT_OK","seq":10,"signals":{"satisfiable":["READABLE","PEER_CLOSED","NEW_DATA_READABLE","PEER_REMOTE"],"satisfied":[]}}
+{"event":"signals","handle":"p","op_id":10,"result":"MOJO_RESULT_OK","seq":11,"signals":{"satisfiable":["WRITABLE","PEER_CLOSED","PEER_REMOTE"],"satisfied":["WRITABLE"]}}
+{"event":"data","handle":"c","num_bytes":4,"op_id":11,"payload_hex":"","result":"MOJO_RESULT_SHOULD_WAIT","seq":12}
+{"event":"result","handle":"p","op_id":12,"result":"MOJO_RESULT_OK","seq":13}
+{"event":"result","handle":"c","op_id":13,"result":"MOJO_RESULT_OK","seq":14}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":15}

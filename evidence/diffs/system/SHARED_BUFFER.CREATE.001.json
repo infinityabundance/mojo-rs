@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.CREATE.001",
+  "status": "pass",
+  "oracle_events": 8,
+  "candidate_events": 8,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "64c419d0372cc60a6c9e39fe678b70f31ce2ff0654c304d6072d9093f22b8621",
+    "candidate_events_sha256": "64c419d0372cc60a6c9e39fe678b70f31ce2ff0654c304d6072d9093f22b8621"
+  }
+}

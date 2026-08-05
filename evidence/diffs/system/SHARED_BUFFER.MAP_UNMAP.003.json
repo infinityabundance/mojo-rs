@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.MAP_UNMAP.003",
+  "status": "pass",
+  "oracle_events": 14,
+  "candidate_events": 14,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "a1f0c0faf5a59e58cd10501e349827f3768ba1e253a992f63dc96fceb69d5687",
+    "candidate_events_sha256": "a1f0c0faf5a59e58cd10501e349827f3768ba1e253a992f63dc96fceb69d5687"
+  }
+}

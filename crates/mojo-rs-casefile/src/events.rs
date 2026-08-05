@@ -37,6 +37,13 @@ pub struct Event {
     /// Extra outputs (produced handle tokens etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The post-call `num_bytes` output of a data-pipe operation (official
+    /// modifies it only on success paths).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_bytes: Option<u32>,
+    /// The reported size of a shared buffer (`get_buffer_info`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
     /// The process that emitted this event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
@@ -108,6 +115,8 @@ impl Event {
             process: None,
             pid: None,
             fd: None,
+            num_bytes: None,
+            size: None,
             note: None,
         }
     }

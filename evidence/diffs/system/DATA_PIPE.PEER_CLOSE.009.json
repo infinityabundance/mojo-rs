@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "DATA_PIPE.PEER_CLOSE.009",
+  "status": "pass",
+  "oracle_events": 16,
+  "candidate_events": 16,
+  "normalizers_applied": [],
+  "residuals": [],
+  "evidence": {
+    "oracle_events_sha256": "0fa458c6a305e6854a8b8ad08551bf2f1422b37b142fcab8b6e3d0baf03e1ad1",
+    "candidate_events_sha256": "0fa458c6a305e6854a8b8ad08551bf2f1422b37b142fcab8b6e3d0baf03e1ad1"
+  }
+}

@@ -76,13 +76,15 @@
       "evidence": null,
       "id": "data-pipe",
       "name": "Data pipes (one/two-phase)",
-      "status": "Scaffolded"
+      "status": "Oracle-compared",
+      "note": "Phase 4: 10 data-pipe + 6 shared-buffer cases byte-identical vs oracle (system court, 2026-08-05)"
     },
     {
       "evidence": null,
       "id": "shared-buffer",
       "name": "Shared buffers and mappings",
-      "status": "Scaffolded"
+      "status": "Oracle-compared",
+      "note": "Phase 4: 10 data-pipe + 6 shared-buffer cases byte-identical vs oracle (system court, 2026-08-05)"
     },
     {
       "evidence": "evidence/manifests/invite-*.json (official broker/acceptor bootstrap + wire capture; native acceptor NOT yet implemented)",
@@ -148,7 +150,7 @@
     }
   ],
   "epoch": 1,
-  "generated_at": "2026-08-05T02:10:00Z",
+  "generated_at": "2026-08-05T03:40:00Z",
   "ladder": [
     "Scaffolded",
     "Parsed",

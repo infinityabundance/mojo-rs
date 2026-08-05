@@ -1,0 +1,8 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"buffer","handle":"b0","op_id":2,"result":"MOJO_RESULT_OK","seq":3,"size":4096}
+{"event":"result","op_id":3,"result":"MOJO_RESULT_RESOURCE_EXHAUSTED","seq":4}
+{"event":"signals","handle":"b0","op_id":4,"result":"MOJO_RESULT_INVALID_ARGUMENT","seq":5}
+{"event":"result","handle":"b0","op_id":5,"result":"MOJO_RESULT_OK","seq":6}
+{"event":"buffer","handle":"b0","op_id":6,"result":"MOJO_RESULT_INVALID_ARGUMENT","seq":7,"size":0}
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":8}

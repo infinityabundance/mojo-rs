@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "case_id": "SHARED_BUFFER.MODE_STATE.005",
+  "court": "shared-buffer",
+  "reference_revision": "151.0.7922.105",
+  "seed": 0,
+  "preconditions": {
+    "required_capabilities": ["shared_buffer"],
+    "init": {"mode": "default"}
+  },
+  "operations": [
+    {"id": 1, "op": "shared_buffer_create", "args": {"num_bytes": 64}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b0"]}},
+    {"id": 2, "op": "duplicate_buffer_handle", "args": {"handle": "b0", "read_only": true}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["ro0"]}},
+    {"id": 3, "op": "duplicate_buffer_handle", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION", "produce": ["d0"]}},
+    {"id": 4, "op": "duplicate_buffer_handle", "args": {"handle": "ro0", "read_only": true}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["ro1"]}},
+    {"id": 5, "op": "get_buffer_info", "args": {"handle": "ro1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 6, "op": "map_buffer", "args": {"handle": "ro0", "offset": 0, "num_bytes": 16}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["m0"]}},
+    {"id": 7, "op": "unmap_buffer", "args": {"token": "m0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 8, "op": "shared_buffer_create", "args": {"num_bytes": 64}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["b1"]}},
+    {"id": 9, "op": "duplicate_buffer_handle", "args": {"handle": "b1"}, "expect": {"result": "MOJO_RESULT_OK", "produce": ["d1"]}},
+    {"id": 10, "op": "duplicate_buffer_handle", "args": {"handle": "b1", "read_only": true}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION", "produce": ["ro2"]}},
+    {"id": 11, "op": "duplicate_buffer_handle", "args": {"handle": "d1", "read_only": true}, "expect": {"result": "MOJO_RESULT_FAILED_PRECONDITION", "produce": ["ro3"]}},
+    {"id": 12, "op": "close", "args": {"handle": "b0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 13, "op": "close", "args": {"handle": "ro0"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 14, "op": "close", "args": {"handle": "ro1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 15, "op": "close", "args": {"handle": "b1"}, "expect": {"result": "MOJO_RESULT_OK"}},
+    {"id": 16, "op": "close", "args": {"handle": "d1"}, "expect": {"result": "MOJO_RESULT_OK"}}
+  ],
+  "expected_contract": {
+    "note": "region mode state machine: a Writable region converts to ReadOnly/Unsafe on first duplicate; afterwards the wrong flag is FAILED_PRECONDITION (read-only buffers cannot produce writable duplicates and vice versa)"
+  },
+  "normalizers": []
+}

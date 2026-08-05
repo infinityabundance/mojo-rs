@@ -279,12 +279,20 @@ between the runs; both acceptors deliver the complete route sequence
 (rseq 0..1485) and exit 0; the expansion occurred in both runs. The court has
 passed repeatedly (3+ consecutive runs).
 
-Documented residual (the free-timing boundary): the exhaustion point differs
-(baseline ~transfer 1330 with one `AddBlockBuffer`; interop ~transfer 750
-with two) because the native retains decayed `RouterLinkState` blocks — the
-same root cause as the routing court's fragment-offset normalization. The
-broker's event stream — the primary equivalence — is unaffected. Sealing the
-link-state free (a `RefCountedFragment` refcount model) is the next gate.
+The `RouterLinkState` refcount model (the `RefCountedFragment` lifecycle:
+allocation ref 1, link-creation ref, no-increment adoption, last-ref free;
+unmanaged fixed initial states) is now implemented and sealed by these
+courts. It removed a real corruption bug: the ref-count word aliases the
+`FragmentHeader.size` word when a freed state is reused as a parcel fragment,
+and a stale release corrupted the fragment's size (the broker read "r" for
+"r1" in the routing court).
+
+Documented residual (reduced): the shared free-list REUSE ORDER still
+differs by scheduler-dependent interleavings of the peer's IO-thread
+releases (the exhaustion point differs — baseline ~transfer 1330 with one
+`AddBlockBuffer`, interop ~transfer 750 with two — and the routing court's
+r1 reuses a different freed block). The broker's event stream — the primary
+equivalence — is unaffected; block-reuse order is internal and normalized.
 
 This court also exposed and fixed a real forensic-tooling bug: the wire
 relay and the native channel read with large fixed buffers, so a single
@@ -364,15 +372,15 @@ references to the oracle checkout. Evidence: `evidence/security/`.
   beyond the single-link case, the `RequestMemory`/`ProvideMemory` send round
   trip (implemented and unit-tested; its only reachable trigger in this epoch
   is `RouterLinkState` pool exhaustion on the ACCEPTOR side, which requires
-  the link-state free/refcount model + the proxy-bypass machinery), the
-  link-state free on decay (the free-timing residual shared by the routing
-  and exhaustion courts), multi-node graphs, and portal transfer under load.
-  The native routing acceptor currently seals the WithLocalPeer transfer, the
-  proxy serialization path, the acceptor-initiated bridge bypass (both
-  directions), `StopProxying` teardown, closure propagation over a single
-  NodeLink, the parcel-fragment allocator (memory court), and the
-  `AddBlockBuffer` receive side + cross-buffer fragment resolution (exhaustion
-  court).
+  the proxy-bypass machinery), the scheduler-dependent free-list reuse order
+  (the shared `RouterLinkState` frees now happen; only the interleaving with
+  the peer's IO-thread releases differs — normalized), multi-node graphs, and
+  portal transfer under load. The native routing acceptor currently seals the
+  WithLocalPeer transfer, the proxy serialization path, the acceptor-initiated
+  bridge bypass (both directions), `StopProxying` teardown, closure
+  propagation over a single NodeLink, the parcel-fragment allocator (memory
+  court), the `AddBlockBuffer` receive side + cross-buffer fragment resolution
+  (exhaustion court), and the `RouterLinkState` refcount lifecycle.
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 

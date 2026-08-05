@@ -1004,3 +1004,99 @@ The link-state free on decay (the `RefCountedFragment` refcount model for
 `RouterLinkState` fragments) — closing the free-timing residual shared by the
 routing and exhaustion courts — then the proxy-bypass machinery and multi-node
 graphs.
+
+## Cycle 2026-08-05 — Phase 5: RouterLinkState refcount lifecycle (link-state free on decay)
+
+### 1. What was actually implemented
+
+* **The `RefCountedFragment` refcount model** for shared `RouterLinkState`s
+  (`crates/mojo-rs-interop/src/ipcz/link_memory.rs`, `routing.rs`):
+  - `try_allocate_link_state` initializes the shared ref count (the first 4
+    bytes of the fragment) to 1;
+  - the native's own bridge bypass takes a second ref (`AddRemoteRouterLink`
+    copies the `FragmentRef`, AddRef);
+  - ADOPTION does NOT increment: `AdoptFragmentRefIfValid` takes the sender's
+    `release()`d ref — the native's earlier AddRef-on-adoption inflated the
+    counts;
+  - link releases (decay completions in `finish_decays`, `remove_router`,
+    closure) decrement via `release_link_state_ref` (acq-rel fetch-sub); the
+    LAST ref frees the block back to the shared pool;
+  - the fixed initial-portal states are unmanaged (`is_initial_link_state`:
+    never refcounted or freed), matching `GetInitialRouterLinkState`'s
+    `kUnmanagedRef`.
+* **Corruption fix**: the `RefCountedFragment` ref-count word occupies the
+  first 4 bytes of a `RouterLinkState` — the same word the
+  `FragmentHeader.size` uses when the freed block is reused as a parcel
+  fragment. The old code never released states, so the aliasing never fired;
+  the first refcount implementation released the native's own transferred
+  state (a ref it did not hold), and the broker's late release decremented
+  the reused block's fragment size (the broker read "r" for "r1"). Fixed by
+  the corrected model above.
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/{link_memory,router,routing}.rs`,
+`evidence/routing/WIRE-ANALYSIS.md`, `atlas/feature-matrix.json`,
+`STATUS.md`, this log.
+
+### 3. Compatibility claims now supported
+
+The shared `RouterLinkState` lifecycle is sealed by the routing, memory, and
+exhaustion courts (all PASS; the broker's event streams byte-identical): the
+frees now happen at the official points (decay completions, router removal,
+closure), and the block reuse is observable on the wire. The residual is
+reduced from "states never freed" to a scheduler-dependent reuse ORDER (the
+peer's IO-thread releases interleave differently — the routing court's r1
+reuses block 1152 in the baseline but 1280 in the interop; the exhaustion
+point differs and the interop can trigger a second AddBlockBuffer).
+
+### 4. Which courts were run
+
+`run_routing_court.sh` (PASS), `run_exhaust_court.sh` (PASS),
+`run_memory_court.sh` (PASS, wire-identical), `run_interop_court.sh` (PASS),
+`run_invite_court.sh` (PASS), `run_court.sh system` (26/26),
+`verify_no_oracle_dependency.sh` (PASS).
+
+### 5. Exact pass/fail counts
+
+All courts PASS. Workspace tests: 156 passed, 0 failures. Clippy: 0 errors.
+fmt: clean.
+
+### 6. New residuals and evidence paths
+
+None new (the residual is reduced; the evidence re-stamps under the same
+paths).
+
+### 7. Every observed mismatch
+
+1. The first refcount implementation corrupted the routing court: the broker
+   read the r1 fragment as "r" (size 1) — the broker's late `ReleaseRef`
+   decremented the reused block's `FragmentHeader.size` (the shared word).
+2. The native released the fixed initial-portal states (a decrement on an
+   unmanaged state).
+3. The native's adoption AddRef'd (inflating the counts to 3).
+
+### 8. Root cause of each fixed mismatch
+
+1. Adoption must NOT increment (`AdoptFragmentRefIfValid` takes the sender's
+   released ref); the native's own transferred states must not be released by
+   the native; the frees only happen at the LAST ref.
+2. The fixed initial states are unmanaged (`kUnmanagedRef`, `memory == null`
+   in `GenericFragmentRef::reset` — never decremented).
+3. See 1.
+
+### 9. Remaining unsupported behavior
+
+The scheduler-dependent free-list reuse ORDER (the peer's IO-thread releases
+interleave differently) is a documented normalization — the broker's event
+stream is unaffected. Also remaining per `STATUS.md`: `BypassPeer`/
+`AcceptBypassLink` outbound, the `RequestMemory`/`ProvideMemory` send round
+trip (acceptor-side exhaustion), multi-subparcel and split parcels, multi-node
+graphs, node loss beyond the single link; Phase 6 C ABI export, Phase 7
+mojom/bindings, concurrency/stress/fuzz sealing, other platforms.
+
+### 10. Next highest-value parity gate
+
+The proxy-bypass machinery (`BypassPeer` outbound / inbound `AcceptBypassLink`)
+and the acceptor-side `RouterLinkState` exhaustion (which triggers the
+`RequestMemory`/`ProvideMemory` send round trip) — then multi-node graphs.

@@ -383,6 +383,19 @@ impl LinkMemory {
         INITIAL_LINK_STATES_OFFSET + i * ROUTER_LINK_STATE_SIZE
     }
 
+    /// Whether a descriptor references one of the fixed initial-portal
+    /// `RouterLinkState`s (the unmanaged `GetInitialRouterLinkState` refs,
+    /// which are never refcounted or freed).
+    pub fn is_initial_link_state(desc: FragmentDescriptor) -> bool {
+        let initial_states_end =
+            INITIAL_LINK_STATES_OFFSET + (MAX_INITIAL_PORTALS * ROUTER_LINK_STATE_SIZE);
+        if desc.buffer_id != PRIMARY_BUFFER_ID {
+            return false;
+        }
+        let off = desc.offset as usize;
+        off >= INITIAL_LINK_STATES_OFFSET && off < initial_states_end
+    }
+
     /// The offset of the `status` word within a `RouterLinkState` (after the
     /// `RefCountedFragment` ref_count).
     pub const LINK_STATUS_OFFSET: usize = 4;
@@ -424,9 +437,10 @@ impl LinkMemory {
     }
 
     /// Allocate a 64-byte block and initialize it as a fresh `RouterLinkState`
-    /// (all zeros; `RouterLinkState::Initialize`). Returns `None` when the
-    /// allocator is exhausted (`TryAllocateRouterLinkState` returns a null
-    /// fragment in that case).
+    /// (all zeros; `RouterLinkState::Initialize`, with the `RefCountedFragment`
+    /// ref count set to 1 — the allocating side's initial ref). Returns `None`
+    /// when the allocator is exhausted (`TryAllocateRouterLinkState` returns a
+    /// null fragment in that case).
     pub fn try_allocate_link_state(
         &mut self,
     ) -> Result<Option<FragmentDescriptor>, LinkMemoryError> {
@@ -434,12 +448,42 @@ impl LinkMemory {
             return Ok(None);
         };
         let view = self.fragment_mut(block)?;
-        // RouterLinkState::Initialize default-constructs the struct: status 0
-        // and zeroed reserved fields (a zeroed block is exactly that).
-        for b in view.iter_mut() {
+        // RouterLinkState::Initialize default-constructs the struct: ref count
+        // 1 (the allocator's ref), status 0, zeroed reserved fields.
+        view[0..4].copy_from_slice(&1u32.to_le_bytes());
+        for b in view[4..].iter_mut() {
             *b = 0;
         }
         Ok(Some(block))
+    }
+
+    /// Take a reference to a `RouterLinkState` fragment
+    /// (`FragmentRef::operator=` / the `AddRemoteRouterLink` copy:
+    /// `RefCountedFragment::AddRef`, relaxed fetch-add on the shared ref
+    /// count at offset 0). Note that ADOPTION (`AdoptFragmentRefIfValid`)
+    /// does NOT call this — it takes the sender's `release()`d ref.
+    pub fn add_link_state_ref(&self, desc: FragmentDescriptor) -> Result<(), LinkMemoryError> {
+        let view = self.fragment(desc)?;
+        // SAFETY: the ref count word is 8-byte aligned within the mapping and
+        // shared with the peer; all access is atomic on both sides.
+        let ref_count = unsafe { AtomicU32::from_ptr(view.as_ptr() as *mut u32) };
+        ref_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Release a reference to a `RouterLinkState` fragment
+    /// (`GenericFragmentRef::reset`: `ReleaseRef`, acq_rel fetch-sub).
+    /// Returns true when this was the LAST reference — the caller must free
+    /// the fragment back to the pool (`memory->FreeFragment`).
+    pub fn release_link_state_ref(
+        &self,
+        desc: FragmentDescriptor,
+    ) -> Result<bool, LinkMemoryError> {
+        let view = self.fragment(desc)?;
+        // SAFETY: as in `add_link_state_ref`.
+        let ref_count = unsafe { AtomicU32::from_ptr(view.as_ptr() as *mut u32) };
+        let old = ref_count.fetch_sub(1, Ordering::AcqRel);
+        Ok(old == 1)
     }
 
     /// The official `RouterLinkState::SetSideStable`: OR the side's stable bit

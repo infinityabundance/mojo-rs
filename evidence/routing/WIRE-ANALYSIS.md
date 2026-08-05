@@ -195,11 +195,30 @@ The broker's event streams are byte-identical between the baseline and the
 interop run, and both acceptors deliver the complete route sequence
 (rseq 0..1485) and exit 0.
 
-Documented residual: the exhaustion point differs (baseline ~transfer 1330
-with one `AddBlockBuffer`; interop ~transfer 750 with two) because the
-native retains decayed `RouterLinkState` blocks — the same free-timing
-boundary as the routing court's offset normalization. Sealing the link-state
-free (a `RefCountedFragment` refcount model) is the next gate.
+### The `RouterLinkState` refcount model (link-state free on decay)
+
+The native now models the `RefCountedFragment` lifecycle for shared
+`RouterLinkState`s: `try_allocate_link_state` initializes the ref count to 1;
+`AddRemoteRouterLink`-equivalent link creation takes a second ref (the
+official `FragmentRef` copy in `AddRemoteRouterLink`); adoption
+(`AdoptFragmentRefIfValid`) does NOT increment (it takes the sender's
+`release()`d ref); a link's release (`GenericFragmentRef::reset`) decrements
+and the LAST ref frees the block back to the shared pool. The fixed
+initial-portal states are unmanaged (never refcounted or freed).
+
+This removed a real corruption bug: the `RefCountedFragment` ref-count word
+occupies the first 4 bytes of a `RouterLinkState`, the same word the
+`FragmentHeader.size` uses when the block is reused as a parcel fragment — a
+stale release after the block was freed+reused silently corrupted the
+fragment's size (the broker read `"r"` for `"r1"`). The native now releases
+refs at the decay completions (`finish_decays`), router removal, and closure.
+
+Documented residual (reduced): the shared free-list REUSE ORDER still differs
+by scheduler-dependent interleavings of the peer's IO-thread releases (e.g.
+the routing court's r1 reuses block 1152 in the baseline but 1280 in the
+interop; the exhaustion point differs and the interop can trigger a second
+`AddBlockBuffer`). The broker's event stream — the primary equivalence — is
+unaffected; block-reuse order is an internal allocation order (normalized).
 
 ### Forensic fix: read-sizing the relay and the channel
 

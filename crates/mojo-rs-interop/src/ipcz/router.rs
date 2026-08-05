@@ -782,18 +782,19 @@ impl Router {
     }
 
     /// Finish the outward and inward decays if their sequence bounds are met.
-    /// Returns the released decaying links' sublinks and whether each edge's
-    /// decay finished (the official `Flush`'s `outward_link_decayed` /
+    /// Returns the released decaying links and whether each edge's decay
+    /// finished (the official `Flush`'s `outward_link_decayed` /
     /// `inward_link_decayed`). The released links are captured before
     /// `maybe_finish_decay` (which resets the decaying slot), mirroring the
     /// official `Flush`'s capture of `decaying_outward_link` before
-    /// `MaybeFinishDecay`.
-    pub fn finish_decays(&mut self) -> (Option<u64>, bool, Option<u64>, bool) {
+    /// `MaybeFinishDecay`; the caller releases any shared `RouterLinkState`
+    /// references the links hold.
+    pub fn finish_decays(&mut self) -> (Option<Link>, bool, Option<Link>, bool) {
         // Snapshot the sequence lengths first: the inward-edge borrow below
         // must not overlap reads of the router's queues.
         let outbound_len = self.outbound_length();
         let inbound_len = self.inbound_length();
-        let out_link = self.outward.decaying_link().map(|l| l.sublink);
+        let out_link = self.outward.decaying_link().cloned();
         let out = if self.outward.maybe_finish_decay(outbound_len, inbound_len) {
             (out_link, true)
         } else {
@@ -803,7 +804,7 @@ impl Router {
             .inward
             .as_ref()
             .and_then(|e| e.decaying_link())
-            .map(|l| l.sublink);
+            .cloned();
         let inc = if let Some(inward) = &mut self.inward {
             if inward.maybe_finish_decay(inbound_len, outbound_len) {
                 (in_link, true)
@@ -1032,8 +1033,8 @@ mod tests {
         router.outward.set_length_from_decaying_link(0);
         let (out_sub, out_decayed, in_sub, in_decayed) = router.finish_decays();
         assert!(out_decayed);
-        assert_eq!(out_sub, Some(1));
+        assert_eq!(out_sub.map(|l| l.sublink), Some(1));
         assert!(!in_decayed);
-        assert_eq!(in_sub, None);
+        assert_eq!(in_sub.map(|l| l.sublink), None);
     }
 }

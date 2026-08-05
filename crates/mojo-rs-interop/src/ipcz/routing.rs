@@ -1258,6 +1258,10 @@ impl RoutingAcceptor {
                 return Err(RoutingError::BadParcel("central link without link state"));
             }
             self.memory()?.fragment(d.new_link_state_fragment)?;
+            // `AdoptFragmentRefIfValid` does NOT increment: the adoption takes
+            // the sender's released reference (the sender's `FragmentRef`
+            // `release()`d it into the descriptor). The shared ref count is
+            // the sender's link ref + this side's adopted ref.
             Some(d.new_link_state_fragment)
         } else {
             if !d.new_link_state_fragment.is_null() {
@@ -1720,6 +1724,11 @@ impl RoutingAcceptor {
                 )?;
                 return Ok(());
             };
+            // The official `AddRemoteRouterLink(new_sublink, link_state, ...)`
+            // copies the `FragmentRef` (AddRef): the shared count becomes the
+            // link's ref plus the ref transferred to the remote peer in the
+            // `BypassPeerWithLink` descriptor.
+            self.memory()?.add_link_state_ref(link_state)?;
             return self.start_bridge_bypass_from_local_peer(rid, link_state);
         } else if first_local_peer.is_none() {
             let Some(link_state) = self.memory_mut()?.try_allocate_link_state()? else {
@@ -1728,6 +1737,7 @@ impl RoutingAcceptor {
                 )?;
                 return Ok(());
             };
+            self.memory()?.add_link_state_ref(link_state)?;
             return self.start_bridge_bypass_from_local_peer(second_bridge, link_state);
         }
 
@@ -2054,14 +2064,26 @@ impl RoutingAcceptor {
 
         // Finish decays (releasing the decaying links) and the bridge decay.
         let (out_decayed, in_decayed) = {
-            let router = self
-                .routers
-                .get_mut(&rid)
-                .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
-            let (_, out_decayed, _, in_decayed) = router.finish_decays();
-            // The bridge decay completion is driven by the flush; the released
-            // bridge edge's sublink ownership is swept by `remove_router`.
-            let _ = router.finish_bridge_decay();
+            let (out_link, out_decayed, in_link, in_decayed) = {
+                let router = self
+                    .routers
+                    .get_mut(&rid)
+                    .ok_or(RoutingError::BadParcel("flush for unknown router"))?;
+                // The bridge decay completion is driven by the flush; the
+                // released bridge edge's sublink ownership is swept by
+                // `remove_router`.
+                let _ = router.finish_bridge_decay();
+                router.finish_decays()
+            };
+            // Release the shared `RouterLinkState` refs of the fully decayed
+            // links (the official drops the `RemoteRouterLink`s, whose
+            // `FragmentRef`s release; the last ref frees the block).
+            if let Some(link) = out_link {
+                self.release_link_state(&link)?;
+            }
+            if let Some(link) = in_link {
+                self.release_link_state(&link)?;
+            }
             (out_decayed, in_decayed)
         };
 
@@ -2890,28 +2912,42 @@ impl RoutingAcceptor {
     /// Remove a router and all its sublinks. The owners map is swept for any
     /// entry referencing the router, so a deactivated router's sublinks behave
     /// like the official `RemoteRouterLink::Deactivate` (inbound messages on
-    /// them are dropped, not errors).
+    /// them are dropped, not errors). The router's shared `RouterLinkState`
+    /// references are released (the last ref frees the block).
     fn remove_router(&mut self, rid: u64) {
-        let sublinks: Vec<u64> = {
+        let (sublinks, state_links): (Vec<u64>, Vec<Link>) = {
             let Some(router) = self.routers.get(&rid) else {
                 return;
             };
             let mut out = Vec::new();
+            let mut states = Vec::new();
             if let Some(l) = &router.outward.primary {
                 out.push(l.sublink);
+                if l.link_state.is_some() {
+                    states.push(l.clone());
+                }
             }
             if let Some(l) = router.outward.decaying_link() {
                 out.push(l.sublink);
+                if l.link_state.is_some() {
+                    states.push(l.clone());
+                }
             }
             if let Some(inward) = &router.inward {
                 if let Some(l) = &inward.primary {
                     out.push(l.sublink);
+                    if l.link_state.is_some() {
+                        states.push(l.clone());
+                    }
                 }
                 if let Some(l) = inward.decaying_link() {
                     out.push(l.sublink);
+                    if l.link_state.is_some() {
+                        states.push(l.clone());
+                    }
                 }
             }
-            out
+            (out, states)
         };
         for s in sublinks {
             self.owners.remove(&s);
@@ -2927,7 +2963,35 @@ impl RoutingAcceptor {
         for s in stale {
             self.owners.remove(&s);
         }
+        for link in state_links {
+            let _ = self.release_link_state(&link);
+        }
         self.routers.remove(&rid);
+    }
+
+    /// Release a shared `RouterLinkState` reference held by a link; the last
+    /// reference frees the block back to the shared pool
+    /// (`GenericFragmentRef::reset` -> `NodeLinkMemory::FreeFragment`). Local
+    /// links carry in-process state and hold no shared reference; the fixed
+    /// initial-portal states are unmanaged (never refcounted or freed).
+    fn release_link_state(&mut self, link: &Link) -> Result<(), RoutingError> {
+        let Some(state) = link.link_state else {
+            return Ok(());
+        };
+        // The initial portals' fixed `RouterLinkState`s (the unmanaged
+        // `GetInitialRouterLinkState` refs) are never released.
+        if crate::ipcz::link_memory::LinkMemory::is_initial_link_state(state) {
+            return Ok(());
+        }
+        let last = self.memory()?.release_link_state_ref(state)?;
+        if last {
+            // The official `FreeFragment` asserts the fragment is addressable
+            // and within a block allocator; a failure here is a protocol error.
+            if !self.memory()?.free_block(state)? {
+                return Err(RoutingError::BadParcel("failed to free link state block"));
+            }
+        }
+        Ok(())
     }
 
     /// Drain all currently available messages (used before sending, so

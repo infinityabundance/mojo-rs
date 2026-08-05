@@ -82,12 +82,26 @@ impl Forwarder {
         // One write per message; the descriptors attach to its first byte.
         let mut sent = 0usize;
         while sent < data.len() {
-            let n = if sent == 0 && !raw.is_empty() {
-                socket::send_with_fds(&self.to, data, &raw)?
+            let r = if sent == 0 && !raw.is_empty() {
+                socket::send_with_fds(&self.to, data, &raw)
             } else {
-                socket::send(&self.to, &data[sent..])?
+                socket::send(&self.to, &data[sent..])
             };
-            sent += n;
+            match r {
+                Ok(n) => sent += n,
+                // The downstream peer is gone (normal teardown: a node exits
+                // right after its final messages). The capture of this
+                // direction already includes this message (written above), so
+                // stopping here loses nothing and keeps the relay's exit
+                // status clean.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::BrokenPipe
+                        || e.kind() == std::io::ErrorKind::ConnectionReset =>
+                {
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }

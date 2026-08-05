@@ -1,0 +1,67 @@
+{
+  "a_events_identical": true,
+  "artifacts": {
+    "baseline/a.events": {
+      "bytes": 872,
+      "sha256": "181606424c8e22f86667a1e23bbe34cdecccd037e0ceef3dcd0a39a92f75da31"
+    },
+    "baseline/b.events": {
+      "bytes": 700,
+      "sha256": "e965f70f6678309ef3922880d1c2dabc25e2239a8098d160cb875f07bf1e9c79"
+    },
+    "baseline/broker.events": {
+      "bytes": 756,
+      "sha256": "19f4c9940655b1fbfe8263ef815a630709fd5dbdaa8c4165ead006a2b7cb0c97"
+    },
+    "interop/a.events": {
+      "bytes": 872,
+      "sha256": "181606424c8e22f86667a1e23bbe34cdecccd037e0ceef3dcd0a39a92f75da31"
+    },
+    "interop/b.events": {
+      "bytes": 691,
+      "sha256": "c8ab7d4ea8936c84a1c09d916211a1cb8a81aed3d88e84b5090551801c6a9db9"
+    },
+    "interop/broker.events": {
+      "bytes": 756,
+      "sha256": "19f4c9940655b1fbfe8263ef815a630709fd5dbdaa8c4165ead006a2b7cb0c97"
+    }
+  },
+  "baseline": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0
+  },
+  "broker_events_identical": true,
+  "court": "3node",
+  "generated_at_utc": "20260805T211815Z",
+  "inputs": {
+    "native_3node_acceptor_binary": "8a854c639b99211d0b1071057a8f18237237465765fc9e09aaff8ee413c12056",
+    "oracle_driver_binary": "bbae6e63b1521f387c740c119a011206d682fdbe7a77002de8d66bc8b8710f11",
+    "wire_dump_binary": "e5328c3b9d83f178b7e9aa6758b331d35b5983fdd444ec4a2d174a55bba5ea5c",
+    "wire_relay_binary": "6e81d21be6f3eedef29ab9b75e5dc1353ec39e1b22a733679f742c2d9470bd00"
+  },
+  "interop": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0
+  },
+  "referral_wire_identical": true,
+  "schema_version": 1,
+  "status": "pass",
+  "wire_comparison": {
+    "b-to-broker": {
+      "baseline_decoded": "[0] seq=0 id=3 (ConnectToReferredBroker) handles=0 protocol=0 num_initial_portals=8\n[1] seq=0 id=31 (AcceptBypassLink) handles=0 current_peer_node=<name> current_peer_sublink=12 inbound_len=0 new_sublink=12 frag=FragmentDescriptor { buffer_id: 0, offset: 1088, size: 64 }\n[2] seq=1 id=20 (AcceptParcel) handles=0 sub=12 rseq=0 subparcel=0/1 frag=FragmentDescriptor { buffer_id: 0, offset: 1152, size: 64 } data=\"\" handle_types=[] new_routers=[none] driver_objects=[]\n",
+      "identical": true,
+      "interop_decoded": "[0] seq=0 id=3 (ConnectToReferredBroker) handles=0 protocol=0 num_initial_portals=8\n[1] seq=0 id=31 (AcceptBypassLink) handles=0 current_peer_node=<name> current_peer_sublink=12 inbound_len=0 new_sublink=12 frag=FragmentDescriptor { buffer_id: 0, offset: 1088, size: 64 }\n[2] seq=1 id=20 (AcceptParcel) handles=0 sub=12 rseq=0 subparcel=0/1 frag=FragmentDescriptor { buffer_id: 0, offset: 1152, size: 64 } data=\"\" handle_types=[] new_routers=[none] driver_objects=[]\n"
+    },
+    "broker-to-b": {
+      "baseline_decoded": "[0] seq=0 id=4 (ConnectToReferredNonBroker) handles=3 name=<name> broker=<name> referrer=<name> broker_ver=0 referrer_ver=0 portals=2 broker_buf=0 referrer_transport=1 referrer_buf=2 driver_objects=3\n[1] seq=1 id=33 (ProxyWillStop) handles=0 sub=12 inbound_len=1\n[2] seq=2 id=22 (RouteClosed) handles=0 sub=12 len=1\n",
+      "identical": true,
+      "interop_decoded": "[0] seq=0 id=4 (ConnectToReferredNonBroker) handles=3 name=<name> broker=<name> referrer=<name> broker_ver=0 referrer_ver=0 portals=2 broker_buf=0 referrer_transport=1 referrer_buf=2 driver_objects=3\n[1] seq=1 id=33 (ProxyWillStop) handles=0 sub=12 inbound_len=1\n[2] seq=2 id=22 (RouteClosed) handles=0 sub=12 len=1\n"
+    }
+  }
+}

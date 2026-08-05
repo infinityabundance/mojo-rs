@@ -154,6 +154,23 @@
       "status": "sealed"
     },
     {
+      "evidence": [
+        "evidence/3node/<stamp>/baseline/broker.events",
+        "evidence/3node/<stamp>/interop/broker.events",
+        "evidence/3node/<stamp>/baseline/a.events",
+        "evidence/3node/<stamp>/interop/a.events",
+        "evidence/3node/<stamp>/interop/b.events",
+        "evidence/3node/<stamp>/interop/wire/b-to-broker.bin",
+        "evidence/3node/<stamp>/interop/wire/broker-to-b.bin",
+        "evidence/manifests/3node-<stamp>.json",
+        "courts/curated/phase5-multinode-court.md"
+      ],
+      "id": "routing.multinode-referral",
+      "name": "Multi-node referral: broker + referrer A + referred B, outbound AcceptBypassLink (3-node court)",
+      "note": "Phase 5 3-node court: the native referred node B (3node-acceptor) completes the referral handshake (ConnectToReferredBroker greeting without consuming a NodeLink sequence number; ConnectToReferredNonBroker acceptance), adopts the broker link and the referrer (A<->B) link with its initial portals (EstablishWaitingRouters, shared-memory client on portal 0, bootstrap attachment bridge on portal 1, side-B stable marks), receives the re-transferred portal Y' over the b2a pipe, and triggers the OUTBOUND BypassPeer -> BypassPeerWithNewRemoteLink -> AcceptBypassLink(id 31) to the broker (bypass RouterLinkState {0,1088,64} + sublink 12 from the broker link memory; the path was unreachable in 2-node graphs, where the broker's MaybeStartSelfBypass always takes StartSelfBypassToLocalPeer). The X<->Y' round trip (hello via A's proxy over the decaying A<->B sublink; world as a fragment parcel {0,1152,64} over the new broker<->B central sublink 12), ProxyWillStop(12,1), RouteClosed peer closure, and local closes are reproduced. The broker's AND A's event streams are byte-identical to the all-official baseline; all four captured wire directions are structurally identical (modulo node-name GUIDs). Bugs sealed: the outbound bypass now registers owners[(target link, new sublink)]; parcel fragments resolve against the link they arrived on (memory_for(link_id); the deferred-fragment queue is keyed by (link, buffer)); ProxyWillStop (id 33) is implemented; the wire-relay tolerates EPIPE at teardown. Reproduce: scripts/run_3node_court.sh",
+      "status": "Oracle-compared"
+    },
+    {
       "evidence": null,
       "id": "mojom.toolchain",
       "name": "Mojom lexer/parser/codegen",

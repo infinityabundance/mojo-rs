@@ -1226,3 +1226,109 @@ Phase 7 mojom/bindings, stress/fuzz, other platforms.
 which is where the native-outbound `BypassPeer`/`AcceptBypassLink` via
 `EstablishLink` becomes reachable (the remaining Phase 5 routing work), then
 Phase 6 (C ABI export) per the directive sequence.
+
+## Cycle 2026-08-05 — Phase 5 multi-node referral court: broker + referrer A + referred B (outbound AcceptBypassLink)
+
+### 1. What was actually implemented
+
+* The multi-link NodeLink refactor of the routing core (link-scoped state):
+  `owners`/`early_parcels` keyed by `(link_id, sublink)`; `link_id` threaded
+  through `dispatch`, `recv_until_on`, `process_accept_parcel`,
+  `on_bypass_peer_with_link`, `serialize_router`,
+  `serialize_router_with_local_peer`, `begin_proxying`, and the
+  `transmit_parcel` serialization chain; `remove_router` sweeps
+  `(link_id, sublink)` pairs from the router's edges. The sealed 2-node
+  courts re-passed unchanged after the refactor.
+* The wire layer for the multi-node message ids 2–13 (`ReferNonBroker`,
+  `ConnectToReferredBroker/NonBroker`, `NonBrokerReferralAccepted/Rejected`,
+  `ConnectFromBrokerToBroker`, `RequestIntroduction`/`AcceptIntroduction`/
+  `RejectIntroduction`, `RequestIndirectIntroduction`) with exact V0 layouts,
+  the mojo `Transport` object encoding, and wire-dump describe arms.
+* The oracle driver's three 3-node modes (`invite-broker-3node`,
+  `invite-node-a-3node`, `invite-node-b-3node` with
+  `MOJO_ACCEPT_INVITATION_FLAG_INHERIT_BROKER`) and the baseline 3-node wire
+  capture.
+* `RoutingAcceptor::run_3node` + the `3node-acceptor` binary: the referred
+  node B — `ConnectToReferredBroker` greeting (raw transmit, no NodeLink
+  sequence), `ConnectToReferredNonBroker` acceptance (broker link + referrer
+  link adoption), `EstablishWaitingRouters` on the referrer link with the
+  shared-memory client and the bootstrap attachment bridge, the b2a portal
+  re-transfer, the outbound `BypassPeer` → `BypassPeerWithNewRemoteLink` →
+  `AcceptBypassLink`, the hello/world round trip, `ProxyWillStop`,
+  `RouteClosed` peer closure, and the local closes.
+* `scripts/run_3node_court.sh` — the 3-node differential court with two
+  wire relays (broker↔A and the referral transport) and structural wire
+  comparison (node-name GUIDs normalized).
+
+### 2. Which files changed
+
+`crates/mojo-rs-interop/src/ipcz/{routing,router,messages,acceptor}.rs`,
+`crates/mojo-rs-interop/src/bin/{3node-acceptor,wire-dump,wire-relay}.rs`,
+`oracle/driver/oracle_driver.cc` + `oracle/patches/mojo-rs-oracle-driver.patch`,
+`scripts/run_3node_court.sh`, `courts/curated/phase5-multinode-court.md`,
+`STATUS.md`, `atlas/feature-matrix.json`, `WORKLOG.md`.
+
+### 3. Compatibility claims now supported
+
+The native B is wire-indistinguishable from the official B on every captured
+link: the broker's AND A's event streams are byte-identical; all four wire
+directions are structurally identical (modulo node-name GUIDs); the outbound
+`AcceptBypassLink` (id 31) — previously unreachable in 2-node graphs — is
+sealed. All sealed courts continue to pass (system 26/26 byte-identical,
+routing, memory, exhaust, interop, invite, bypass).
+
+### 4. Courts run
+
+`run_court.sh system` (26/26), `run_routing_court.sh`, `run_memory_court.sh`,
+`run_exhaust_court.sh`, `run_interop_court.sh`, `run_invite_court.sh`,
+`run_bypass_court.sh`, `run_3node_court.sh` — all PASS; `cargo test
+--workspace` 161 passed / 0 failed.
+
+### 5–8. Residuals, mismatches, root causes, fixes
+
+1. **Multi-link refactor build break**: the `dispatch`/`process_accept_parcel`/
+   `begin_proxying`/serialization call sites had stale arity and the owners
+   map keying was half-migrated; fixed mechanically and re-verified.
+2. **Court harness relay topology**: the relays were initially connected to
+   the SAME sockets the processes held, so the process traffic never passed
+   through the relays (the referral transport flooded with ~24M repeated
+   `ConnectToReferredBroker` greetings and the broker↔A link broke). Fixed by
+   giving each relay two dedicated socketpairs.
+3. **Outbound bypass owners registration**: `bypass_peer_with_new_remote_link`
+   never registered `owners[(target link, new sublink)]` (the inbound
+   `BypassPeerWithLink` path did), so the broker's parcels on the new central
+   sublink would have been misclassified; fixed.
+4. **Per-link fragment resolution**: `parcel_data` and the deferred-fragment
+   queue were hard-coded to the broker link memory; each NodeLink has its own
+   primary buffer with its own buffer id 0, so referrer-link parcels must
+   resolve against the referrer memory; the queue is now keyed by
+   `(link, buffer)`.
+5. **`ProxyWillStop` (id 33)**: previously rejected as unsupported; the
+   multi-node court exercises it (the broker's response to B's
+   `AcceptBypassLink`); `router_proxy_will_stop` implemented.
+6. **Greeting sequence number**: the official connector's greeting is a raw
+   transport transmit (seq stays 0) and does not advance the NodeLink
+   counter; the native must not consume a sequence for it.
+7. **Wire-relay EPIPE**: B's teardown `RouteClosed` arrives after the broker
+   exits; the relay now tolerates EPIPE/ECONNRESET on forward (the capture is
+   already written).
+8. **wire-dump name arms**: adding the multi-node names accidentally dropped
+   the `RequestMemory`/`ProvideMemory` arms, which broke the bypass court's
+   wire detection; restored.
+
+### 9. Remaining unsupported behavior
+
+Per `STATUS.md`: `BypassPeer` outbound over a newly `EstablishLink`-ed link
+(the 3-node court seals the already-linked case), `BypassPeerWithNewLocalLink`,
+the broker/referrer-side referral roles, introductions (ids 10–13),
+broker-to-broker connect, node loss beyond a single link, multi-node graphs
+beyond one referral, split/multi-subparcel parcels; Phase 6 C ABI export,
+Phase 7 mojom/bindings, stress/fuzz, other platforms.
+
+### 10. Next highest-value parity gate
+
+Per the directive sequence, Phase 5's remaining routing work: the native
+broker/referrer roles and the introduction machinery (ids 10–13), or the
+native broker side of a referral (Rust referrer A → C++ oracle B), which
+reuses the entire wire layer. After that the directive sequence continues at
+Phase 6 (C ABI export).

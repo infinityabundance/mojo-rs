@@ -365,6 +365,69 @@ Evidence: `evidence/bypass/<stamp>/` (events, wire captures, byte-identical
 broker streams), `evidence/manifests/bypass-<stamp>.json`, and the casefile
 `courts/curated/phase5-bypass-court.md`.
 
+### Phase 5 multi-node referral court — broker + referrer A + referred B, outbound AcceptBypassLink
+
+The 3-node court (`scripts/run_3node_court.sh`) seals the multi-node referral
+machinery: broker + referrer A + referred B, with the referral transport
+captured by a second man-in-the-middle relay. The baseline runs all three nodes
+as the official implementation; the interop replaces B with the native Rust
+`3node-acceptor` (`RoutingAcceptor::run_3node`).
+
+The native B implements `NodeConnectorForReferredNonBroker` +
+`Invitation::Accept` (INHERIT_BROKER) end to end:
+
+* the `ConnectToReferredBroker` greeting (transmitted raw, without consuming a
+  NodeLink sequence number — matching the official connector, whose first
+  NodeLink message also carries seq 0);
+* `ConnectToReferredNonBroker` acceptance: adoption of the broker link (active,
+  side B) and the referrer link (inactive, then activated) from the three
+  driver objects, and `EstablishWaitingRouters` on the referrer link (initial
+  portals 0/1, the shared-memory client handshake on portal 0, the bootstrap
+  attachment bridge on portal 1, side-B stable marks);
+* the multi-node portal transfer: the re-transfer of Y' through the b2a pipe
+  (referrer sublink 1), whose descriptor carries `proxy_peer_node_name` = the
+  broker, triggering the **outbound** `BypassPeer` →
+  `BypassPeerWithNewRemoteLink` → `AcceptBypassLink` (id 31) to the broker
+  (the previously unreachable outbound path — in 2-node graphs the broker's
+  `MaybeStartSelfBypass` always takes `StartSelfBypassToLocalPeer`);
+* the X↔Y' round trip: `hello` (forwarded by A's proxy over the A↔B decaying
+  sublink) and `world` (a fragment parcel `{0,1152,64}` over the new broker↔B
+  central sublink 12), `ProxyWillStop`, `RouteClosed` peer closure, and the
+  local closes.
+
+Equivalence: the broker's AND A's event streams are BYTE-IDENTICAL between the
+baseline and the interop; all four captured wire directions (broker↔A both
+ways, broker↔B both ways via the referral transport) are structurally
+identical (decoded message sequences, ids, sequence numbers, sublinks,
+fragment descriptors) modulo the node-name GUIDs, which are normalized; all
+processes exit 0.
+
+Bugs found and fixed while sealing this court:
+
+* the court harness initially connected the relays to the SAME sockets the
+  processes held (a relay must sit between two dedicated socketpairs), which
+  flooded the referral transport with repeated greetings (~24M copies) and
+  broke the broker↔A link;
+* the outbound bypass path never registered its new sublink in `owners` (the
+  inbound `BypassPeerWithLink` path did), so the broker's parcels on the new
+  central sublink would have been classified "parcel for unbound sublink";
+* `parcel_data` and the deferred-fragment queue were hard-coded to the broker
+  link memory: each NodeLink has its own primary buffer with its own buffer id
+  0, so parcels on the referrer link must resolve fragments against the
+  referrer memory (the deferral queue is now keyed by `(link, buffer)`);
+* `ProxyWillStop` (id 33) was previously rejected as unsupported; the multi-node
+  court exercises it (the broker's response to B's `AcceptBypassLink`), so the
+  `router_proxy_will_stop` state machine was implemented;
+* the wire-relay now tolerates EPIPE on forward (a node may exit right after
+  its final messages, e.g. B's teardown `RouteClosed` after the broker exits),
+  keeping the relay's exit status clean.
+
+Evidence: `evidence/3node/<stamp>/` (six event streams, eight wire captures,
+manifest), `evidence/manifests/3node-<stamp>.json`, and the casefile
+`courts/curated/phase5-multinode-court.md`. The referral wire baseline is also
+preserved in the earlier forensic captures (`/tmp/3n-*.bin`, decoded in the
+casefile).
+
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
 streams for every case in `courts/system/`:
@@ -425,23 +488,28 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 
 ## Not yet sealed (next gates)
 
-- Routing / port transfer (Phase 5): the remaining portal state machines —
-  `BypassPeer`/`AcceptBypassLink` OUTBOUND (only reachable via a 3-node graph:
-  in a 2-node graph the broker's `MaybeStartSelfBypass` always takes
-  `StartSelfBypassToLocalPeer`, so the native's outbound `BypassPeer` (id 30)
-  and `AcceptBypassLink` (id 31) wait for the multi-node courts), node loss
-  (`RouteDisconnected`) beyond the single-link case, the scheduler-dependent
-  free-list reuse order (only the interleaving with the peer's IO-thread
-  releases differs — normalized), multi-node graphs (message ids 2–13:
-  `ReferNonBroker`, `ConnectToReferredBroker/NonBroker`, `RequestIntroduction`,
-  `AcceptIntroduction`, `EstablishLink`, ...), and portal transfer under load.
-  The native routing acceptor currently seals the WithLocalPeer transfer
-  (both directions), the proxy serialization path, the acceptor-initiated
-  bridge bypass (both directions), `StopProxying` teardown, closure
-  propagation over a single NodeLink, the parcel-fragment allocator (memory
-  court), the `AddBlockBuffer` receive side + cross-buffer fragment resolution
-  (exhaustion court), the `RequestMemory`/`ProvideMemory`/`AddBlockBuffer`
-  SEND side (bypass court), and the `RouterLinkState` refcount lifecycle.
+- Routing / port transfer (Phase 5): the remaining multi-node machinery —
+  `BypassPeer` OUTBOUND over a newly `EstablishLink`-ed link (the 3-node court
+  seals the case where the target link already exists; the
+  `EstablishLink` → `BypassPeerWithNewRemoteLink` path waits for a court that
+  forces the introduction), `BypassPeerWithNewLocalLink`, the broker-side
+  referral roles (the native as broker or referrer A: `ReferNonBroker`
+  receive, `NonBrokerReferralAccepted` send, `NodeConnectorForBrokerReferral`),
+  `RequestIntroduction`/`AcceptIntroduction`/`RejectIntroduction`,
+  `RequestIndirectIntroduction`, `ConnectFromBrokerToBroker`, node loss
+  (`RouteDisconnected`) beyond the single-link case, multi-node graphs beyond
+  the single referral (3+ non-brokers, node loss mid-referral), split/
+  multi-subparcel parcels, and the scheduler-dependent free-list reuse order
+  (only the interleaving with the peer's IO-thread releases differs —
+  normalized). The native routing acceptor currently seals the WithLocalPeer
+  transfer (both directions), the proxy serialization path, the
+  acceptor-initiated bridge bypass (both directions), `StopProxying` teardown,
+  closure propagation over a single NodeLink, the parcel-fragment allocator
+  (memory court), the `AddBlockBuffer` receive side + cross-buffer fragment
+  resolution (exhaustion court), the `RequestMemory`/`ProvideMemory`/
+  `AddBlockBuffer` SEND side (bypass court), the `RouterLinkState` refcount
+  lifecycle, and the multi-node referral (broker + referrer A + referred B)
+  with the outbound `AcceptBypassLink` (3-node court).
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 
@@ -472,6 +540,10 @@ written reason here.
   (official broker ⇄ native bypass acceptor; 1520 WithLocalPeer transfers
   exhaust the acceptor-side pool; `RequestMemory` → `ProvideMemory` →
   `AddBlockBuffer` SEND round trip sealed; byte-identical broker events).
+- `scripts/run_3node_court.sh` — Phase 5 multi-node referral court (official
+  broker + official referrer A + native referred B; referral handshake,
+  broker/referrer link adoption, outbound `AcceptBypassLink`; byte-identical
+  broker AND A event streams; four structurally identical wire directions).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

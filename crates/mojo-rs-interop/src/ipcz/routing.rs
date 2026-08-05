@@ -154,6 +154,9 @@ pub struct RoutingAcceptor {
     local_name: NodeName,
     /// The app-facing bootstrap pipe router (the invitation attachment).
     bootstrap_rid: u64,
+    /// The shared-memory-service client transport's local endpoint (held for
+    /// the process lifetime, matching the official `Broker` client).
+    shm_client_fd: Option<OwnedFd>,
     /// The next identity for local-only routers.
     next_rid: u64,
     /// In-flight `RequestMemory` requests by buffer size, FIFO per size
@@ -165,8 +168,8 @@ pub struct RoutingAcceptor {
     capacity_pending: HashSet<u32>,
     /// Parcels deferred because their data fragment references a buffer not
     /// yet received (`NodeLink::WaitForParcelFragmentToResolve`), keyed by
-    /// buffer id and completed when the `AddBlockBuffer` arrives.
-    pending_fragments: HashMap<u64, VecDeque<(AcceptParcel, Vec<OwnedFd>)>>,
+    /// (link id, buffer id) and completed when the `AddBlockBuffer` arrives.
+    pending_fragments: HashMap<(u64, u64), VecDeque<(AcceptParcel, Vec<OwnedFd>, u64)>>,
     /// Events in casefile format.
     events: Vec<Event>,
     /// Event sequence counter.
@@ -216,6 +219,7 @@ impl RoutingAcceptor {
             referrer_name: NodeName::invalid(),
             local_name: NodeName::invalid(),
             bootstrap_rid: 0,
+            shm_client_fd: None,
             next_rid: LOCAL_RID_BASE,
             pending_memory_requests: HashMap::new(),
             capacity_pending: HashSet::new(),
@@ -1039,12 +1043,17 @@ impl RoutingAcceptor {
     /// identity stays `BOOTSTRAP_SUBLINK`-derived; the primary migrates on
     /// bypass).
     fn bootstrap_sublink(&self) -> Result<u64, RoutingError> {
+        self.router_primary_sublink(self.bootstrap_rid)
+    }
+
+    /// A router's current outward primary sublink.
+    fn router_primary_sublink(&self, rid: u64) -> Result<u64, RoutingError> {
         self.routers
-            .get(&self.bootstrap_rid)
+            .get(&rid)
             .and_then(|r| r.outward.primary.as_ref())
             .map(|l| l.sublink)
             .ok_or(RoutingError::Unexpected(
-                "bootstrap router has no primary link",
+                "router has no primary outward link",
             ))
     }
 
@@ -1126,13 +1135,19 @@ impl RoutingAcceptor {
         Ok(())
     }
 
-    /// Mark this side stable on the initial portal links (the official
-    /// `SetOutwardLink`'s `MarkSideStable` for the initial routers). Timed to
-    /// match the oracle's observable ordering: after the broker has processed
-    /// the Connect reply (so its early bridge-bypass lock attempts defer), but
-    /// before the first parcel is processed (so this side's own bypass lock
-    /// attempt succeeds).
+    /// Mark this side stable on the initial portal links of the given NodeLink
+    /// (the official `SetOutwardLink`'s `MarkSideStable` for the initial
+    /// routers, side B). Timed to match the oracle's observable ordering: on
+    /// the broker link, after the broker has processed the Connect reply (so
+    /// its early bridge-bypass lock attempts defer), but before the first
+    /// parcel is processed (so this side's own bypass lock attempt succeeds).
     fn mark_initial_links_stable(&mut self) -> Result<(), RoutingError> {
+        self.mark_initial_links_stable_on(LINK_ID_BROKER)
+    }
+
+    /// `mark_initial_links_stable` for an arbitrary NodeLink (the referrer
+    /// link of the multi-node courts).
+    fn mark_initial_links_stable_on(&mut self, link_id: u64) -> Result<(), RoutingError> {
         // The initial portals 0 and 1 are the only ones the broker offered
         // (num_initial_portals = 2 in the routing court).
         for i in 0..MAX_INITIAL_PORTALS.min(2) {
@@ -1141,8 +1156,238 @@ impl RoutingAcceptor {
                 offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(i) as u32,
                 size: ROUTER_LINK_STATE_SIZE as u32,
             };
-            self.memory()?.set_side_stable(state, false)?;
+            self.memory_for(link_id)?.set_side_stable(state, false)?;
         }
+        Ok(())
+    }
+
+    /// The referral acceptance handshake (`NodeConnectorForReferredNonBroker`
+    /// + `Invitation::Accept` with `INHERIT_BROKER`): the referred node B's
+    /// greeting and acceptance.
+    ///
+    /// 1. Send `ConnectToReferredBroker` first: the broker's
+    ///    `NodeConnectorForBrokerReferral` transmits `ConnectToReferredNonBroker`
+    ///    only after receiving it.
+    /// 2. Adopt the broker link (active, side B, the referral transport) with
+    ///    the broker-link buffer driver object.
+    /// 3. Adopt the referrer (A<->B) link: the referrer transport + buffer
+    ///    driver objects (the link is created inactive, then activated).
+    /// 4. `EstablishWaitingRouters(referrer_link, num_initial_portals)`: the
+    ///    first `num_initial_portals` waiting routers get outward links on the
+    ///    referrer link (sublinks 0..); surplus routers close locally.
+    /// 5. The shared-memory client handshake on portal 0, and the bootstrap
+    ///    attachment bridge onto portal 1 (`Invitation::Accept`'s
+    ///    `MergePortals(portals[i + 1], bridge)`).
+    fn referral_accept(&mut self) -> Result<(), RoutingError> {
+        // The greeting goes out first (step 1). The connector transmits it
+        // raw (`transport_->Transmit`), so it carries no NodeLink sequence
+        // number (the header field stays 0) and does not advance the NodeLink
+        // counter: the NodeLink's first message also carries seq 0.
+        let greeting = messages::encode_connect_to_referred_broker(ACCEPTOR_INITIAL_PORTALS, 0);
+        self.channel.send(&greeting, &[])?;
+
+        let msg = self.channel.recv()?.ok_or(RoutingError::Unexpected(
+            "peer closed before the referral acceptance",
+        ))?;
+        let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
+        let DecodedMessage::ConnectToReferredNonBroker(connect) = decoded else {
+            return Err(RoutingError::Unexpected(
+                "first referral message was not ConnectToReferredNonBroker",
+            ));
+        };
+        if connect.num_initial_portals > MAX_INITIAL_PORTALS as u32 {
+            return Err(RoutingError::BadParcel("excessive initial portals"));
+        }
+        let fds = msg.fds;
+        if fds.len() < 3 {
+            return Err(RoutingError::BadParcel(
+                "referral acceptance without three driver objects",
+            ));
+        }
+        // Duplicate the driver objects by their declared indices (the originals
+        // are dropped with the message).
+        let broker_buf_fd = fds
+            .get(connect.broker_link_buffer_index as usize)
+            .ok_or(RoutingError::BadParcel("broker buffer index out of range"))?
+            .try_dup()?;
+        let referrer_transport_fd = fds
+            .get(connect.referrer_link_transport_index as usize)
+            .ok_or(RoutingError::BadParcel(
+                "referrer transport index out of range",
+            ))?
+            .try_dup()?;
+        let referrer_buf_fd = fds
+            .get(connect.referrer_link_buffer_index as usize)
+            .ok_or(RoutingError::BadParcel(
+                "referrer buffer index out of range",
+            ))?
+            .try_dup()?;
+
+        // Step 2: the broker link (active, side B). The broker protocol
+        // version is the minimum of the two sides' (both 0 in this epoch).
+        let broker_protocol_version = std::cmp::min(connect.broker_protocol_version, 0);
+        let _ = broker_protocol_version;
+        self.link_memory = Some(LinkMemory::adopt_primary(broker_buf_fd.into_raw_fd())?);
+        self.broker_name = connect.broker_name;
+        self.local_name = connect.name;
+
+        // Step 3: the referrer link (inactive until the portals are wired).
+        self.referrer_name = connect.referrer_name;
+        let direct_channel = Channel::adopt(referrer_transport_fd.into_raw_fd())?;
+        let direct_memory = LinkMemory::adopt_primary(referrer_buf_fd.into_raw_fd())?;
+        self.direct = Some(DirectLink {
+            channel: direct_channel,
+            memory: direct_memory,
+            remote_name: connect.referrer_name,
+            next_link_seq: 0,
+        });
+
+        // Step 4: the initial portals on the referrer link. `num_initial_portals`
+        // is what the referrer assumed for the A<->B link (1 attachment + the
+        // internal portal = 2 in this court).
+        let referrer_portals = connect.num_initial_portals as usize;
+        for i in 0..referrer_portals.min(MAX_INITIAL_PORTALS) {
+            let sublink = i as u64;
+            let state = FragmentDescriptor {
+                buffer_id: 0,
+                offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(i) as u32,
+                size: ROUTER_LINK_STATE_SIZE as u32,
+            };
+            let link = Link::remote(
+                LINK_ID_DIRECT,
+                sublink,
+                LinkKind::Central,
+                LinkSide::B,
+                Some(state),
+            );
+            let router = if i == 1 {
+                // The bootstrap portal (side B of the initial central link);
+                // the attachment bridge is merged onto it below.
+                Router::new_terminal(link)
+            } else {
+                let mut r = Router::bare();
+                r.outward.set_primary_link(link);
+                r
+            };
+            self.owners.insert((LINK_ID_DIRECT, sublink), sublink);
+            self.routers.insert(sublink, router);
+        }
+        // Surplus waiting routers beyond the referrer's assumed count are
+        // closed locally (`EstablishWaitingRouters`' immediate peer closure).
+        // They were never set up on the wire, so closing them is not
+        // observable; the routers are simply not created.
+
+        // Step 5: the shared-memory client on portal 0, and the bootstrap
+        // attachment bridge on portal 1.
+        self.send_shared_memory_client_on(LINK_ID_DIRECT)?;
+        self.setup_bootstrap_bridge()?;
+        // Side-B stable marks on the referrer link's initial portals
+        // (`SetOutwardLink`'s `MarkSideStable` at establishment).
+        self.mark_initial_links_stable_on(LINK_ID_DIRECT)?;
+        self.router_flush(BOOTSTRAP_SUBLINK, false)?;
+        Ok(())
+    }
+
+    /// The multi-node referral scenario (`invite-node-b-3node`, the native
+    /// `3node-acceptor`): the referred node B.
+    ///
+    /// B is spawned with the referral transport's endpoint. It greets the
+    /// broker with `ConnectToReferredBroker`, is accepted with
+    /// `ConnectToReferredNonBroker` (adopting the broker link and the referrer
+    /// link with its initial portals), receives the re-transferred portal Y'
+    /// over the b2a pipe, bypasses the A proxy with `AcceptBypassLink` to the
+    /// broker (the outbound id-31 seal), completes the X<->Y' round trip
+    /// ("hello"/"world"), and observes peer closure.
+    ///
+    /// Event ops mirror `RunThreeNodeB` (the oracle's event stream for this
+    /// node): 0 lifecycle, 1 accept result, 2 extract result, 3 transfer
+    /// message, 4 hello message, 5 world result, 6 closure message, 7 close
+    /// result, 8 lifecycle.
+    pub fn run_3node(&mut self) -> Result<(), RoutingError> {
+        self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        self.referral_accept()?;
+        self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 1: receive the re-transferred portal Y' on the b2a pipe (the
+        // referrer link's initial portal 1). A's Y' router serialized with
+        // `proxy_peer_node_name` = the broker, so the new router immediately
+        // begins the bypass (`BypassPeer` -> `BypassPeerWithNewRemoteLink` ->
+        // `AcceptBypassLink` to the broker).
+        let (transfer, transfer_fds, transfer_link) = self.recv_until_any(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.sublink == BOOTSTRAP_SUBLINK && p.handle_types.contains(&handle_type::PORTAL)
+            )
+        })?;
+        if transfer_link != LINK_ID_DIRECT {
+            return Err(RoutingError::Unexpected(
+                "transfer-y2b arrived off the referrer link",
+            ));
+        }
+        let y_prime;
+        match transfer {
+            DecodedMessage::AcceptParcel(p) => {
+                let processed = self.process_accept_parcel(p, transfer_fds, LINK_ID_DIRECT)?;
+                if processed.identities.len() != 1 {
+                    return Err(RoutingError::BadParcel(
+                        "expected exactly one transferred portal",
+                    ));
+                }
+                y_prime = processed.identities[0];
+                if processed.payload != b"transfer-y2b" {
+                    return Err(RoutingError::BadParcel("unexpected transfer payload"));
+                }
+            }
+            _ => return Err(RoutingError::Unexpected("transfer predicate misrouted")),
+        }
+        self.emit_message(3, b"transfer-y2b", 1);
+
+        // Step 2: receive "hello" on Y' (the broker wrote it on X; A's proxy
+        // forwards it over the A<->B link while the bypass settles).
+        let (hello, hello_fds, hello_link) = self.recv_until_any(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.sublink == y_prime && p.handle_types.is_empty()
+            )
+        })?;
+        let hello_payload = match hello {
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, hello_fds, hello_link)?
+                    .payload
+            }
+            _ => return Err(RoutingError::Unexpected("hello predicate misrouted")),
+        };
+        if hello_payload != b"hello" {
+            return Err(RoutingError::BadParcel("unexpected hello payload"));
+        }
+        self.emit_message(4, &hello_payload, 0);
+
+        // Step 3: reply "world" on Y' (routed back to the broker's X over the
+        // bypassed central link).
+        self.put(y_prime, b"world".to_vec(), Vec::new())?;
+        self.emit(5, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 4: the broker closed X; Y' observes peer closure
+        // (`RouteClosed` on the route's current primary sublink).
+        let y_primary = self.router_primary_sublink(y_prime)?;
+        let (rc, rc_fds, rc_link) = self.recv_until_any(
+            |d| matches!(d, DecodedMessage::RouteClosed(r) if r.sublink == y_primary),
+        )?;
+        if let DecodedMessage::RouteClosed(r) = rc {
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, rc_link)?;
+        }
+        self.emit(6, EventKind::Message, "MOJO_RESULT_FAILED_PRECONDITION");
+
+        // Step 5: close the local ends (b2a, then Y'). The peer may already be
+        // gone (the broker exits after closing X); a failed transmission on a
+        // broken transport is not an error at teardown.
+        self.close_route(self.bootstrap_rid)?;
+        self.close_route(y_prime)?;
+        self.emit(7, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(8, EventKind::Lifecycle, "MOJO_RESULT_OK");
         Ok(())
     }
 
@@ -1205,15 +1450,18 @@ impl RoutingAcceptor {
         Ok(())
     }
 
-    /// The shared-memory-service client handshake on the internal portal 0.
+    /// The shared-memory-service client handshake on the given link's internal
+    /// portal 0 (sublink 0).
     ///
     /// The official `CreateClient` boxes the remote end of a fresh
     /// `PlatformChannel` as a `Transport` (destination `kNonBroker`) and puts
     /// it on portal 0, then drops the portal, closing the route. The boxed
     /// object is `ObjectHeader{size=8, type=kTransport=0}` + `TransportHeader`
     /// `{destination_type=kNonBroker=1, is_same_remote_process=0,
-    /// is_peer_trusted=0, is_trusted_by_peer=0, reserved=0}`.
-    fn send_shared_memory_client(&mut self) -> Result<(), RoutingError> {
+    /// is_peer_trusted=0, is_trusted_by_peer=0, reserved=0}`. The local client
+    /// endpoint is held for the process lifetime (the official `Broker`
+    /// client).
+    fn send_shared_memory_client_on(&mut self, link_id: u64) -> Result<(), RoutingError> {
         let mut obj = Vec::with_capacity(16);
         obj.extend_from_slice(&8u32.to_le_bytes()); // ObjectHeader.size
         obj.extend_from_slice(&0u32.to_le_bytes()); // ObjectHeader.type = kTransport
@@ -1229,13 +1477,16 @@ impl RoutingAcceptor {
         );
         // The transport's remote endpoint travels with the parcel; the local
         // endpoint stays in this process (the oracle's `Broker` client).
-        let mut payload = payload;
-        set_message_sequence_number(&mut payload, self.next_link_seq);
-        self.next_link_seq += 1;
-        self.channel.send(&payload, &[pair.b.into_raw_fd()])?;
-        // Portal 0 is closed after the request; the broker's service portal
-        // observes `RouteClosed(0, 1)` (the request was the only parcel).
-        self.send_link_message(messages::encode_route_closed(0, 1))
+        self.send_link_message_with_fds_on(link_id, payload, &[pair.b.into_raw_fd()])?;
+        self.shm_client_fd = Some(pair.a);
+        // Portal 0 is closed after the request; the service portal observes
+        // `RouteClosed(0, 1)` (the request was the only parcel).
+        self.send_link_message_on(link_id, messages::encode_route_closed(0, 1))
+    }
+
+    /// The shared-memory-service client handshake on the broker link.
+    fn send_shared_memory_client(&mut self) -> Result<(), RoutingError> {
+        self.send_shared_memory_client_on(LINK_ID_BROKER)
     }
 
     /// Receive messages until `pred` matches; every non-matching message is
@@ -1265,6 +1516,40 @@ impl RoutingAcceptor {
                 return Ok((decoded, msg.fds));
             }
             self.dispatch(decoded, msg.fds, link_id)?;
+        }
+    }
+
+    /// Receive messages until `pred` matches on any established NodeLink
+    /// (multi-node courts: the broker link and the direct peer link); every
+    /// non-matching message is dispatched with its source link id. Returns the
+    /// matched message, its fds, and the link it arrived on.
+    fn recv_until_any(
+        &mut self,
+        pred: impl Fn(&DecodedMessage) -> bool,
+    ) -> Result<(DecodedMessage, Vec<OwnedFd>, u64), RoutingError> {
+        loop {
+            for link_id in [LINK_ID_BROKER, LINK_ID_DIRECT] {
+                if link_id == LINK_ID_DIRECT && self.direct.is_none() {
+                    continue;
+                }
+                let channel = self.channel_for(link_id)?;
+                if !channel.wait_readable(std::time::Duration::from_millis(1))? {
+                    continue;
+                }
+                match channel.recv_available()? {
+                    RecvResult::Message(msg) => {
+                        let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
+                        if pred(&decoded) {
+                            return Ok((decoded, msg.fds, link_id));
+                        }
+                        self.dispatch(decoded, msg.fds, link_id)?;
+                    }
+                    RecvResult::WouldBlock => {}
+                    RecvResult::PeerClosed => {
+                        return Err(RoutingError::Unexpected("peer closed during exchange"));
+                    }
+                }
+            }
         }
     }
 
@@ -1333,9 +1618,9 @@ impl RoutingAcceptor {
                 // Resolve any parcels deferred on this buffer
                 // (`WaitForParcelFragmentToResolve` completes when the buffer
                 // arrives).
-                if let Some(queued) = self.pending_fragments.remove(&b.buffer_id) {
-                    for (p, p_fds) in queued {
-                        self.process_accept_parcel(p, p_fds, LINK_ID_BROKER)?;
+                if let Some(queued) = self.pending_fragments.remove(&(link_id, b.buffer_id)) {
+                    for (p, p_fds, p_link) in queued {
+                        self.process_accept_parcel(p, p_fds, p_link)?;
                     }
                 }
                 Ok(())
@@ -1416,10 +1701,12 @@ impl RoutingAcceptor {
                 MSG_ID_ACCEPT_BYPASS_LINK,
                 "inbound AcceptBypassLink not exercised by the routing court",
             )),
-            DecodedMessage::ProxyWillStop(_) => Err(RoutingError::Unsupported(
-                MSG_ID_PROXY_WILL_STOP,
-                "inbound ProxyWillStop not exercised by the routing court",
-            )),
+            DecodedMessage::ProxyWillStop(w) => {
+                let Some(rid) = self.owners.get(&(link_id, w.sublink)).copied() else {
+                    return Ok(());
+                };
+                self.router_proxy_will_stop(rid, w.inbound_sequence_length)
+            }
             DecodedMessage::Unknown(id) => Err(RoutingError::Unsupported(
                 id,
                 "message type not decoded by the interop layer",
@@ -1427,12 +1714,16 @@ impl RoutingAcceptor {
         }
     }
 
-    /// The payload of an AcceptParcel (fragment or inline).
-    fn parcel_data(&self, p: &AcceptParcel) -> Result<Vec<u8>, RoutingError> {
+    /// The payload of an AcceptParcel (fragment or inline). `link_id` selects
+    /// the link memory the fragment lives in (each NodeLink has its own
+    /// primary buffer with its own buffer id 0).
+    fn parcel_data(&self, p: &AcceptParcel, link_id: u64) -> Result<Vec<u8>, RoutingError> {
         if p.parcel_fragment.is_null() {
             Ok(p.parcel_data.clone())
         } else {
-            Ok(self.memory()?.read_parcel_fragment(p.parcel_fragment)?)
+            Ok(self
+                .memory_for(link_id)?
+                .read_parcel_fragment(p.parcel_fragment)?)
         }
     }
 
@@ -1455,16 +1746,18 @@ impl RoutingAcceptor {
                 "multi-subparcel parcels not exercised by the routing court",
             ));
         }
-        let payload = match self.parcel_data(&p) {
+        let payload = match self.parcel_data(&p, link_id) {
             Ok(payload) => payload,
             Err(RoutingError::Memory(crate::ipcz::link_memory::LinkMemoryError::UnknownBuffer)) => {
                 // The parcel's data lives in a buffer we have not received yet;
                 // defer acceptance until the AddBlockBuffer arrives
-                // (`NodeLink::WaitForParcelFragmentToResolve`).
+                // (`NodeLink::WaitForParcelFragmentToResolve`). The deferral is
+                // keyed by (link, buffer): each link has its own buffer id
+                // space.
                 self.pending_fragments
-                    .entry(p.parcel_fragment.buffer_id)
+                    .entry((link_id, p.parcel_fragment.buffer_id))
                     .or_default()
-                    .push_back((p, fds));
+                    .push_back((p, fds, link_id));
                 return Ok(ProcessedParcel {
                     payload: Vec::new(),
                     identities: Vec::new(),
@@ -1861,7 +2154,9 @@ impl RoutingAcceptor {
         self.send_link_message_on(target_link_id, msg)?;
 
         // Adopt the new central link (the official `SetOutwardLink`, which
-        // marks side A stable when the edges are stable and flushes).
+        // marks side A stable when the edges are stable and flushes), and
+        // register the sublink on the target NodeLink (`AddRemoteRouterLink`
+        // records the router so inbound messages on it route here).
         let new_link = Link::remote(
             target_link_id,
             new_sublink,
@@ -1869,6 +2164,7 @@ impl RoutingAcceptor {
             LinkSide::A,
             Some(new_link_state),
         );
+        self.owners.insert((target_link_id, new_sublink), rid);
         self.set_outward_link(rid, &new_link)?;
         self.router_flush(rid, true)?;
         Ok(())
@@ -3248,6 +3544,41 @@ impl RoutingAcceptor {
                 "no local peer for StopProxyingToLocalPeer",
             ))
         }
+    }
+
+    /// `Router::NotifyProxyWillStop`: the bypassed proxy will stop forwarding
+    /// inbound parcels after `inbound_sequence_length`; the decaying outward
+    /// link's received length is set (the decay may then complete). A stable
+    /// outward edge is invalid unless the router was disconnected (the
+    /// official silently ignores the latter).
+    fn router_proxy_will_stop(
+        &mut self,
+        rid: u64,
+        inbound_sequence_length: u64,
+    ) -> Result<(), RoutingError> {
+        {
+            let router = self.routers.get_mut(&rid).ok_or(RoutingError::BadParcel(
+                "proxy-will-stop for unknown router",
+            ))?;
+            if router.outward.is_stable() {
+                return if router.disconnected {
+                    Ok(())
+                } else {
+                    Err(RoutingError::BadParcel(
+                        "proxy-will-stop at a stable outward edge",
+                    ))
+                };
+            }
+            if router.outward.length_from_decaying_link().is_some() {
+                return Err(RoutingError::BadParcel(
+                    "proxy-will-stop length already set",
+                ));
+            }
+            router
+                .outward
+                .set_length_from_decaying_link(inbound_sequence_length);
+        }
+        self.router_flush(rid, false)
     }
 
     /// `Router::AcceptBypassLink` (the receive side of `BypassPeerWithLink`):

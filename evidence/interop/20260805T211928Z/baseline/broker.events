@@ -1,0 +1,7 @@
+{"event":"lifecycle","op_id":0,"result":"MOJO_RESULT_OK","seq":1}
+{"event":"result","op_id":1,"result":"MOJO_RESULT_OK","seq":2}
+{"event":"result","op_id":2,"result":"MOJO_RESULT_OK","seq":3}
+{"event":"result","op_id":3,"result":"MOJO_RESULT_OK","seq":4}
+{"event":"result","op_id":4,"result":"MOJO_RESULT_OK","seq":5}
+{"event":"message","fd_hex":"66642d66726f6d2d6163636570746f72","op_id":5,"payload_hex":"68656c6c6f2d66726f6d2d6163636570746f72","result":"MOJO_RESULT_OK","seq":6}
+{"event":"lifecycle","op_id":6,"result":"MOJO_RESULT_OK","seq":7}

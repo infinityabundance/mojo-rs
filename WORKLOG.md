@@ -375,3 +375,59 @@ Per the directive's sequence, Phase 5 routing: portal transfer via
 `RouterDescriptor` parcels, proxy bypass (`BypassPeer`/`AcceptBypassLink`),
 `RequestMemory`/`ProvideMemory`, multi-node graphs, against the pinned sources
 and the captured wire.
+
+---
+
+## Cycle 2026-08-05 — crates.io release v0.2.0 (Phase 4 surface)
+
+### 1. What was actually implemented
+
+* Lockstep workspace version bump 0.1.0 → 0.2.0 (all 14 crates).
+* Published all 14 crates to crates.io at v0.2.0 in dependency order
+  (platform → wire → mojom → casefile → codegen → core → c-api → io →
+  bindings → system → oracle → test-support → interop → umbrella `mojo-rs`).
+* Post-publish consumer smoke test: a scratch project depending on
+  `mojo-rs = "0.2.0"` from the real registry (no path deps) built and ran,
+  exercising the Phase 4 surface through the umbrella re-exports: one-phase
+  and two-phase data pipes, shared-buffer duplicate/map/cross-handle
+  visibility, and the core region-mode state machine.
+
+### 2. Which files changed
+
+`Cargo.toml`, `Cargo.lock`, `STATUS.md`, `WORKLOG.md`.
+
+### 3. Compatibility claims now supported
+
+None new (publication does not change sealed behavior); the published
+artifacts now match the Phase 4 repository.
+
+### 4. Which courts were run
+
+Post-publish smoke build/run (pass). The sealed courts are unchanged by
+publication.
+
+### 5. Exact pass/fail counts
+
+14/14 publishes succeeded (no rate-limit pacing for version updates);
+smoke test pass; 0 failures.
+
+### 6. New residuals and evidence paths
+
+crates.io: `mojo-rs` 0.2.0 and all 13 members at 0.2.0.
+
+### 7. Every observed mismatch
+
+None.
+
+### 8. Root cause of each fixed mismatch
+
+n/a.
+
+### 9. Remaining unsupported behavior
+
+Unchanged: Phase 5 routing, Phase 6 C ABI export, Phase 7 mojom/bindings,
+concurrency/stress/fuzz, other platforms.
+
+### 10. Next highest-value parity gate
+
+Phase 5 routing (per the directive's sequence).

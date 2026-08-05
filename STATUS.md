@@ -9,9 +9,10 @@ below is a CLAIM only when the cited evidence exists and verifies.
 ## Distribution
 
 * Repository: <https://github.com/infinityabundance/mojo-rs> (public, `main`).
-* Crates.io: `mojo-rs` umbrella + 13 `mojo-rs-*` crates, all v0.1.0
-  (published 2026-08-05). The umbrella re-exports the runtime and
-  language-toolchain crates; forensic tooling is published separately.
+* Crates.io: `mojo-rs` umbrella + 13 `mojo-rs-*` crates, all v0.2.0
+  (published 2026-08-05, lockstep bump after the Phase 4 seal). The umbrella
+  re-exports the runtime and language-toolchain crates; forensic tooling is
+  published separately.
 * Publication does not change the sealed capability matrix: a claim below is
   still a claim only with its cited evidence.
 

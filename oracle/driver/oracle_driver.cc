@@ -2806,6 +2806,374 @@ int RunThreeNodeB(int socket_b_fd, const char* events_path) {
   return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5 multi-node introduction court (4 nodes: broker + A + B + C)
+// ---------------------------------------------------------------------------
+//   invite-broker-4node  <socket-a-fd> <events.jsonl>
+//   invite-node-a-4node  <socket-broker-fd> <socket-b-fd> <events.jsonl>
+//   invite-node-b-4node  <socket-broker-fd> <socket-c-fd> <events.jsonl>
+//   invite-node-c-4node  <socket-c-fd> <events.jsonl>
+//
+// Topology:
+//   1. the broker sends invitation-1 to A; A connects and receives `pipe_a`;
+//   2. A refers B (SHARE_BROKER over socket-b); B accepts (INHERIT_BROKER):
+//      the A<->B link's initial portal 1 is the a2b/b2a pipe;
+//   3. B refers C (SHARE_BROKER over socket-c); C accepts (INHERIT_BROKER):
+//      the B<->C link's initial portal 1 is the b2c/c2b pipe;
+//   4. A creates (X, Y) locally and transfers Y through the a2b pipe to B (the
+//      WithLocalPeer path: no proxy peer rolled into the descriptor);
+//   5. B re-transfers Y' through the b2c pipe to C; B's Y' outward link is the
+//      A<->B link, so the descriptor names A as `proxy_peer_node_name`;
+//   6. C's new router calls `BypassPeer(A)` and has NO link to A: it requests
+//      an introduction (`RequestIntroduction`) from the broker; the broker
+//      sends `AcceptIntroduction` to both C (side A) and A (side B), and the
+//      two connect directly; C completes `BypassPeerWithNewRemoteLink` over
+//      the new C<->A link, collapsing the proxy chain;
+//   7. A writes "hello" on X, routed to C's Y''; C replies "world"; A sends
+//      "done" over pipe_a; the broker closes pipe_a; A closes a2b and x;
+//      C observes peer closure on Y'' and c2b.
+//
+// The baseline runs all four nodes as the official implementation; the interop
+// replaces C with the native Rust `4node-acceptor`. The broker's, A's, and B's
+// event streams must be byte-identical; the introduction traffic is captured
+// by the wire relays.
+// ---------------------------------------------------------------------------
+
+int RunFourNodeBroker(int socket_a_fd, const char* events_path) {
+  mojo::core::Configuration config;
+  config.is_broker_process = true;
+  config.force_direct_shared_memory_allocation = true;
+  mojo::core::Init(config);
+
+  EventWriter writer(events_path);
+  uint64_t op = 0;
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  // Invitation 1 to A.
+  MojoHandle inv_a;
+  MojoResult r = MojoCreateInvitation(nullptr, &inv_a);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle pipe_a;
+  r = MojoAttachMessagePipeToInvitation(inv_a, "bootstrap", 9, nullptr, &pipe_a);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_a_fd);
+  r = MojoSendInvitation(inv_a, nullptr, &endpoint, nullptr, 0, nullptr);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // A's done marker over pipe_a (after the X<->C round trip completes).
+  std::string payload;
+  r = RecvPayload(pipe_a, &payload);
+  base::DictValue d_extra;
+  d_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), d_extra);
+  if (r != MOJO_RESULT_OK || payload != "done") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  MojoClose(pipe_a);
+  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return 0;
+}
+
+int RunFourNodeA(int socket_broker_fd,
+                 int socket_b_fd,
+                 const char* events_path) {
+  mojo::core::Init();
+
+  EventWriter writer(events_path);
+  uint64_t op = 0;
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  // Accept invitation 1 from the broker.
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_broker_fd);
+  MojoHandle inv_a;
+  MojoResult r = MojoAcceptInvitation(&endpoint, nullptr, &inv_a);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle pipe_a;
+  r = MojoExtractMessagePipeFromInvitation(inv_a, "bootstrap", 9, nullptr, &pipe_a);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Refer B: invitation 2 with SHARE_BROKER over socket-b.
+  MojoHandle inv_b;
+  r = MojoCreateInvitation(nullptr, &inv_b);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle a2b;
+  r = MojoAttachMessagePipeToInvitation(inv_b, "bootstrap", 9, nullptr, &a2b);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  {
+    MojoSendInvitationOptions options = {sizeof(MojoSendInvitationOptions), 0};
+    options.flags = MOJO_SEND_INVITATION_FLAG_SHARE_BROKER;
+    MojoInvitationTransportEndpoint b_endpoint = SocketEndpoint(socket_b_fd);
+    r = MojoSendInvitation(inv_b, nullptr, &b_endpoint, nullptr, 0, &options);
+  }
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Create (X, Y) locally and transfer Y through a2b to B (WithLocalPeer).
+  MojoHandle x, y;
+  r = MojoCreateMessagePipe(nullptr, &x, &y);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = SendMessageWithHandle(a2b, "transfer-y", y);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // "hello" on X routes to C's Y'' once the introduction completes.
+  r = SendPayload(x, "hello");
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // C's reply arrives back on X.
+  std::string payload;
+  r = RecvPayload(x, &payload);
+  base::DictValue w_extra;
+  w_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), w_extra);
+  if (r != MOJO_RESULT_OK || payload != "world") {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Done marker to the broker, then peer closure on pipe_a.
+  r = SendPayload(pipe_a, "done");
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = RecvPayload(pipe_a, &payload);
+  base::DictValue c_extra;
+  c_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), c_extra);
+
+  MojoClose(pipe_a);
+  MojoClose(a2b);
+  MojoClose(x);
+  MojoClose(inv_a);
+  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
+}
+
+int RunFourNodeB(int socket_broker_fd,
+                 int socket_c_fd,
+                 const char* events_path) {
+  mojo::core::Init();
+
+  EventWriter writer(events_path);
+  uint64_t op = 0;
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  // Accept invitation 2 from A (the referral).
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_broker_fd);
+  MojoHandle inv_b;
+  MojoAcceptInvitationOptions accept_options = {
+      sizeof(MojoAcceptInvitationOptions), 0};
+  accept_options.flags = MOJO_ACCEPT_INVITATION_FLAG_INHERIT_BROKER;
+  MojoResult r = MojoAcceptInvitation(&endpoint, &accept_options, &inv_b);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle b2a;
+  r = MojoExtractMessagePipeFromInvitation(inv_b, "bootstrap", 9, nullptr, &b2a);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Refer C: invitation 3 with SHARE_BROKER over socket-c.
+  MojoHandle inv_c;
+  r = MojoCreateInvitation(nullptr, &inv_c);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle b2c;
+  r = MojoAttachMessagePipeToInvitation(inv_c, "bootstrap", 9, nullptr, &b2c);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  {
+    MojoSendInvitationOptions options = {sizeof(MojoSendInvitationOptions), 0};
+    options.flags = MOJO_SEND_INVITATION_FLAG_SHARE_BROKER;
+    MojoInvitationTransportEndpoint c_endpoint = SocketEndpoint(socket_c_fd);
+    r = MojoSendInvitation(inv_c, nullptr, &c_endpoint, nullptr, 0, &options);
+  }
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Receive Y' from A over b2a, re-transfer it through b2c to C.
+  std::string payload;
+  MojoHandle y_prime;
+  r = RecvMessageWithHandle(b2a, &payload, &y_prime);
+  base::DictValue t_extra;
+  t_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  t_extra.Set("handles", static_cast<int>(y_prime != MOJO_HANDLE_INVALID ? 1 : 0));
+  writer.Emit(op++, "message", ResultName(r), t_extra);
+  if (r != MOJO_RESULT_OK || payload != "transfer-y" ||
+      y_prime == MOJO_HANDLE_INVALID) {
+    writer.WriteOut();
+    return 1;
+  }
+  r = SendMessageWithHandle(b2c, "transfer-y2", y_prime);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // A closes a2b at its end: b2a observes peer closure.
+  r = RecvPayload(b2a, &payload);
+  base::DictValue c_extra;
+  c_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), c_extra);
+
+  MojoClose(b2a);
+  MojoClose(b2c);
+  MojoClose(inv_b);
+  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
+}
+
+int RunFourNodeC(int socket_c_fd, const char* events_path) {
+  mojo::core::Init();
+
+  EventWriter writer(events_path);
+  uint64_t op = 0;
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  base::DictValue extra;
+
+  // Accept invitation 3 from B (the referral).
+  MojoInvitationTransportEndpoint endpoint = SocketEndpoint(socket_c_fd);
+  MojoHandle inv_c;
+  MojoAcceptInvitationOptions accept_options = {
+      sizeof(MojoAcceptInvitationOptions), 0};
+  accept_options.flags = MOJO_ACCEPT_INVITATION_FLAG_INHERIT_BROKER;
+  MojoResult r = MojoAcceptInvitation(&endpoint, &accept_options, &inv_c);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+  MojoHandle c2b;
+  r = MojoExtractMessagePipeFromInvitation(inv_c, "bootstrap", 9, nullptr, &c2b);
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // Receive Y'' (re-transferred by B) over c2b.
+  std::string payload;
+  MojoHandle y_prime;
+  r = RecvMessageWithHandle(c2b, &payload, &y_prime);
+  base::DictValue t_extra;
+  t_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  t_extra.Set("handles", static_cast<int>(y_prime != MOJO_HANDLE_INVALID ? 1 : 0));
+  writer.Emit(op++, "message", ResultName(r), t_extra);
+  if (r != MOJO_RESULT_OK || payload != "transfer-y2" ||
+      y_prime == MOJO_HANDLE_INVALID) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // "hello" from A's X arrives on Y''; reply "world".
+  r = RecvPayload(y_prime, &payload);
+  base::DictValue h_extra;
+  h_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), h_extra);
+  if (r != MOJO_RESULT_OK || payload != "hello") {
+    writer.WriteOut();
+    return 1;
+  }
+  r = SendPayload(y_prime, "world");
+  writer.Emit(op++, "result", ResultName(r), extra);
+  if (r != MOJO_RESULT_OK) {
+    writer.WriteOut();
+    return 1;
+  }
+
+  // A closed X: Y'' observes peer closure.
+  r = RecvPayload(y_prime, &payload);
+  base::DictValue c_extra;
+  c_extra.Set("payload_hex", HexEncode(
+      reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  writer.Emit(op++, "message", ResultName(r), c_extra);
+
+  MojoClose(c2b);
+  MojoClose(y_prime);
+  MojoClose(inv_c);
+  writer.Emit(op++, "result", ResultName(MOJO_RESULT_OK), extra);
+  writer.Emit(op++, "lifecycle", "MOJO_RESULT_OK", base::DictValue());
+  writer.WriteOut();
+  return (r == MOJO_RESULT_FAILED_PRECONDITION) ? 0 : 1;
+}
+
 }  // namespace invite
 
 }  // namespace
@@ -2855,7 +3223,9 @@ int main(int argc, char** argv) {
       command == "invite-broker-exhaust" || command == "invite-acceptor-exhaust" ||
       command == "invite-broker-bypass" || command == "invite-acceptor-bypass" ||
       command == "invite-broker-3node" || command == "invite-node-a-3node" ||
-      command == "invite-node-b-3node") {
+      command == "invite-node-b-3node" || command == "invite-broker-4node" ||
+      command == "invite-node-a-4node" || command == "invite-node-b-4node" ||
+      command == "invite-node-c-4node") {
     // The transport channel runs on a dedicated IO thread with an IO message
     // pump (the pump registers the IOWatcher the channel requires).
     base::Thread io_thread("mojo-rs-oracle-io");
@@ -2976,6 +3346,46 @@ int main(int argc, char** argv) {
       }
       int socket_b_fd = atoi(pos_argv[2]);
       return invite::RunThreeNodeB(socket_b_fd, pos_argv[3]);
+    }
+    if (command == "invite-broker-4node") {
+      if (positional != 3) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-broker-4node <socket-a-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_a_fd = atoi(pos_argv[2]);
+      return invite::RunFourNodeBroker(socket_a_fd, pos_argv[3]);
+    }
+    if (command == "invite-node-a-4node") {
+      if (positional != 4) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-node-a-4node <socket-broker-fd> "
+                "<socket-b-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_broker_fd = atoi(pos_argv[2]);
+      int socket_b_fd = atoi(pos_argv[3]);
+      return invite::RunFourNodeA(socket_broker_fd, socket_b_fd, pos_argv[4]);
+    }
+    if (command == "invite-node-b-4node") {
+      if (positional != 4) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-node-b-4node <socket-broker-fd> "
+                "<socket-c-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_broker_fd = atoi(pos_argv[2]);
+      int socket_c_fd = atoi(pos_argv[3]);
+      return invite::RunFourNodeB(socket_broker_fd, socket_c_fd, pos_argv[4]);
+    }
+    if (command == "invite-node-c-4node") {
+      if (positional != 3) {
+        fprintf(stderr,
+                "usage: mojo_rs_oracle_driver invite-node-c-4node <socket-c-fd> <events.jsonl>\n");
+        return 2;
+      }
+      int socket_c_fd = atoi(pos_argv[2]);
+      return invite::RunFourNodeC(socket_c_fd, pos_argv[3]);
     }
     if (positional != 3) {
       fprintf(stderr,

@@ -214,3 +214,148 @@ structures to the baseline.
   attachment's CURRENT primary sublink (the bootstrap bridge bypass and the
   broker's second stage migrate it), so the closure predicate is evaluated per
   message rather than captured once.
+
+---
+
+# Casefile addendum: Phase 5 introduction court — broker + referrer A + referred B + introduced C (ids 10–13)
+
+**Case id**: ROUTING.MULTI_NODE.002
+**Court**: 4node
+**Reference**: Chromium `151.0.7922.105` (`bfa3579138998e2fbb981725570fa588c5b6f8cd`)
+**Status**: sealed — the `EstablishLink` → `BypassPeerWithNewRemoteLink` path
+for `Router::BypassPeer` when the bypass target has NO direct link, in BOTH
+mixed-language pairings: (a) interop-c: official broker + official A +
+official B + native C (`4node-acceptor`); (b) interop-a: official broker +
+native A (`4node-referrer`) + official B + official C. In each pairing the
+broker's AND the counterpart nodes' event streams are byte-identical to the
+all-official baseline; the native node verifies its exchange and exits 0.
+
+## Preconditions
+
+- Topology: broker + referrer A + referred B + introduced C. A accepts
+  invitation-1 (pipe_a), refers B (SHARE_BROKER over socket-b), adopts the
+  A↔B link on `NonBrokerReferralAccepted`, creates (X, Y) locally and
+  transfers Y through the a2b pipe (the WithLocalPeer serialization over the
+  direct link — `proxy_already_bypassed`, no proxy peer rolled in). B
+  accepts invitation-2 (INHERIT_BROKER), adopts the B↔A link, refers C
+  (SHARE_BROKER over socket-c); C accepts invitation-3 (INHERIT_BROKER).
+- A's Y transfer gives B's router Y' an outward link on the A↔B link. B
+  re-transfers Y' through the b2c pipe with `proxy_peer_node_name` = A (the
+  remote of Y''s own outward link) and `proxy_peer_sublink` = its sublink.
+- C's new router Y'' calls `BypassPeer(A)` and has NO link to A: it sends
+  `RequestIntroduction` (id 10) to the broker. The broker replies
+  `AcceptIntroduction` (id 11) to both C (link_side = A) and A (link_side =
+  B), carrying a transport + memory pair. C adopts the C↔A link, completes
+  the bypass with `AcceptBypassLink` (id 31) over it
+  (`BypassPeerWithNewRemoteLink`), and the X↔Y'' "hello"/"world" round trip
+  crosses the new link.
+- Transport layout (per the court harness): broker ↔ A, broker ↔ B (the
+  referral transport), broker ↔ C (the referral transport) all relayed;
+  the A↔B and B↔C links are direct socketpairs created by the broker
+  (not relayed); the introduced C↔A link is a direct socketpair created by
+  the broker (not relayed).
+
+## Observed oracle behavior (baseline)
+
+The relayed broker-link wires (see the probe capture, `evidence/4node/probe/`):
+
+- `broker-to-a`: `Connect`, `NonBrokerReferralAccepted`, then the pipe_a
+  bridge-bypass exchange (`StopProxyingToLocalPeer(1)`,
+  `BypassPeerWithLink(12→13)`), `AcceptIntroduction(name=<C>, link_side=1,
+  remote_type=1, transport + memory)`, `RouteClosed(13, 0)`.
+- `a-to-broker`: `ConnectReply`, `ReferNonBroker`, shared-memory client,
+  `RouteClosed(0,1)`, the pipe_a bypass exchange (`BypassPeerWithLink(1→12)`,
+  `FlushRouter(12)`, `StopProxyingToLocalPeer(12,0)`), `AcceptParcel(13)`
+  (the "done" marker on the final sublink).
+- `broker-to-c`: `ConnectToReferredNonBroker(name=<C>, referrer=<B>)`,
+  `AcceptIntroduction(name=<A>, link_side=0, remote_type=1, transport +
+  memory)`.
+- `c-to-broker`: `ConnectToReferredBroker`, `RequestIntroduction(name=<A>)`.
+
+The C↔B link (direct, not relayed) carries, in order: `RouteClosed(0,0)`
+(the shared-memory service portal closure), `StopProxyingToLocalPeer(1,0)`
+(B's response to C's c2b bridge self-bypass), the re-transfer
+`AcceptParcel(sub=<route>, "transfer-y2" + PORTAL descriptor naming A)`, the
+forwarded `hello`, `BypassPeerWithLink`, and the decaying-link closure.
+
+## Candidate behavior (interop-c — native C)
+
+`RoutingAcceptor::run_4node_c` (`4node-acceptor`):
+
+- the shared `referral_accept` (INHERIT_BROKER): `ConnectToReferredBroker`
+  greeting, `ConnectToReferredNonBroker` acceptance (broker link + referrer
+  link adoption, initial portals, shared-memory client, bootstrap bridge,
+  side-B stable marks);
+- the c2b bridge self-bypass fires (the route migrates to a fresh sublink
+  before the transfer arrives), so the transfer predicate matches the
+  PORTAL handle type on ANY sublink, not a hard-coded initial sublink;
+- `process_accept_parcel` deserializes Y'' (the descriptor names A →
+  `router_bypass_peer` → no link → `establish_link` →
+  `RequestIntroduction`); `on_accept_introduction` adopts the C↔A link;
+  the bypass completes with `AcceptBypassLink` over the introduced link;
+  `hello` arrives over the decaying B↔C link, `world` is replied over the
+  new link; peer closure (`RouteClosed` on the current primary sublink) and
+  the local closes follow; teardown closes tolerate a peer that already
+  exited.
+
+## Candidate behavior (interop-a — native A)
+
+`RoutingAcceptor::run_4node_a` (`4node-referrer`):
+
+- the referrer Connect handshake (with the broker link's `remote_name`
+  recorded — the multi-link refactor regression), `ReferNonBroker` before
+  the shared-memory client handshake, the pipe_a bridge-bypass trigger
+  (waiting for the broker's side-A stable bit in the shared memory before
+  marking — the stage-1 lock race resolved deterministically in the
+  candidate's favor, exactly like the oracle acceptor), the WithLocalPeer
+  transfer of Y through the a2b pipe, the `hello` on X, the
+  `AcceptIntroduction` adoption (link 2), the `AcceptBypassLink` completion
+  on X (`StopProxying`/`ProxyWillStop`), the `world` reply accepted on
+  WHICHEVER link delivers it (through B's proxy or over the introduced
+  link), the `done` marker, the pipe_a closure, and the local closes.
+
+## Equivalence relations
+
+1. The broker's AND the counterpart nodes' event streams are byte-identical
+   between the baseline and each interop pairing.
+2. The relayed broker-link wires are structurally identical modulo node-name
+   GUIDs and the documented pipe_a bridge-bypass race (see Normalizers).
+3. The native node verifies its exchange (`transfer-y2` payload, `hello`/
+   `world`, closure) and exits 0.
+
+## Normalizers
+
+- Node-name GUIDs → `<name>`.
+- The pipe_a bridge-bypass exchange on the broker↔A directions: the
+  all-official baseline races on the initiator of each bypass stage (the
+  shared `RouterLinkState` lock CAS between the broker and A), producing
+  different message sequences with byte-identical event streams that
+  converge on the same final sublink; the wire comparison drops the exchange
+  messages (`BypassPeerWithLink`/`FlushRouter`/`StopProxyingToLocalPeer`)
+  and the ordinal/sequence prefixes on those two directions only, and still
+  compares the fixed-point `done`/closure traffic exactly. The other four
+  relayed directions compare exactly.
+- The direct (unrelayed) A↔B, B↔C, and C↔A links are sealed transitively
+  through the byte-identical event streams and the relayed directions.
+
+## Regression cases
+
+- `INTRODUCTION.WIRE.PACKED_ACCEPT`: `AcceptIntroduction` V0 packs single
+  byte `link_side`/`remote_node_type` at offset 16 (not u32s), with
+  `remote_protocol_version` at 20 and the transport/memory driver objects;
+  the V1 `remote_features` field is an OFFSET to the features array.
+- `TRANSFER.SUBLINK.DYNAMIC`: the transfer parcel's arrival sublink is the
+  route's CURRENT sublink after the bridge self-bypass — predicates match
+  the PORTAL handle type, not a fixed initial sublink.
+- `REFERRER.LINK_REMOTE_NAME`: the referrer's Connect handshake records the
+  broker link's `remote_name` in the `links` map (the re-transfer's
+  `proxy_peer_node_name` is the remote of the portal's OWN outward link).
+- `BYPPASS.LOCK_RACE.DETERMINISTIC_WIN`: the stage-1 bridge-bypass lock race
+  is decided by the shared `RouterLinkState` CAS; the candidate waits for
+  the broker's side-A stable bit to be observable before marking its own
+  side, reproducing the oracle acceptor's deterministic win.
+- `WORLD.LINK_AGNOSTIC`: the reply may arrive over the direct link through
+  the peer's proxy when the far end replies before its bypass settles; the
+  read is a Mojo read and link-agnostic.
+- `TEARDOWN.BROKEN_TRANSPORT`: closing a route whose peer already exited is
+  not an error (the official driver's `Transmit` failure is asynchronous).

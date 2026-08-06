@@ -1431,3 +1431,139 @@ The introduction machinery (ids 10–13: `RequestIntroduction`,
 the `EstablishLink` path for `BypassPeer` when the bypass target has no direct
 link — and the broker-side referral roles. After that the directive sequence
 continues at Phase 6 (C ABI export).
+## Cycle 2026-08-06 — Phase 5 introduction court: broker + referrer A + referred B + introduced C (ids 10–13), both mixed-language pairings
+
+### 1. What was actually implemented
+
+* The wire layer for the introduction machinery: `encode_accept_introduction`
+  (packed V0 with single-byte `link_side`/`remote_node_type` at offset 16,
+  `remote_protocol_version` at 20, transport + memory driver objects, and the
+  V1 `remote_features` OFFSET field — the first attempt wrote the bitfield
+  value directly, producing an unreadable capture), `encode_reject_introduction`,
+  `encode_request_indirect_introduction`, and the fixed `AcceptIntroduction`
+  decode (the old decoder read the two single-byte fields as u32s at the wrong
+  offsets — the forensic wire dump showed `link_side=257`).
+* Golden wire tests pinned to the official 4-node captures
+  (`testdata/ipcz/4node-*.bin`): accept/decode/encode and request-encode tests
+  byte-identical to the official broker's capture (16/16).
+* The core multi-link generalization of `RoutingAcceptor`: the
+  `links: HashMap<u64, NodeLinkState>` map (link 0 = broker, 1 = direct, 2 =
+  introduced), per-link memory scoping for the stable marks, closure locks,
+  bypass locks, and the memory-request machinery, and per-link sublink
+  allocation.
+* `router_bypass_peer` with the no-direct-link fallback to `establish_link`,
+  the `pending_introductions` queue, `on_accept_introduction` (transport +
+  buffer adoption, the introduced link registered with its remote name),
+  `on_accept_bypass_link` with the `CanNodeRequestBypass` check against the
+  shared `allowed_bypass_request_source`, and the closure tolerance for
+  double `RouteClosed` (the `AcceptRouteClosureFrom` behavior).
+* `RoutingAcceptor::run_4node_c` + `4node-acceptor` (native C) and
+  `RoutingAcceptor::run_4node_a` + `4node-referrer` (native A), mirroring the
+  oracle driver's `RunFourNodeC`/`RunFourNodeA` event ops.
+* The oracle driver's four 4-node modes (`invite-broker-4node`,
+  `invite-node-a-4node`, `invite-node-b-4node`, `invite-node-c-4node`) and the
+  all-official baseline capture (preserved at `evidence/4node/probe/`).
+* `scripts/run_4node_court.sh` — the 4-node differential court: baseline
+  (all official) + interop-c (native C) + interop-a (native A), all three
+  broker links relayed, byte-identical event comparisons per pairing, and
+  structural wire comparison with the documented pipe_a-bypass-race
+  normalization.
+* `NodeName` gained `Hash` (the `pending_introductions` map key).
+
+### 2. Files changed
+
+`oracle/driver/oracle_driver.cc` (+ 4-node modes, working-tree addition on top
+of the pinned oracle driver patch), `oracle/patches/mojo-rs-oracle-driver.patch`,
+`crates/mojo-rs-interop/src/ipcz/messages.rs`, `crates/mojo-rs-interop/src/ipcz/routing.rs`,
+`crates/mojo-rs-interop/src/bin/4node-acceptor.rs` (new),
+`crates/mojo-rs-interop/src/bin/4node-referrer.rs` (new),
+`crates/mojo-rs-interop/testdata/ipcz/4node-*.bin` (new fixtures),
+`scripts/run_4node_court.sh` (new), `STATUS.md`, `WORKLOG.md`,
+`atlas/feature-matrix.json`, `courts/curated/phase5-multinode-court.md`.
+
+### 3. Compatibility claims now supported
+
+* `RequestIntroduction` (id 10) send; `AcceptIntroduction` (id 11) receive +
+  transport/buffer adoption (packed V0 wire-identical to the official);
+  `AcceptBypassLink` (id 31) over an introduced link; `EstablishLink` →
+  `BypassPeerWithNewRemoteLink` when the bypass target has no direct link;
+  multi-link graphs (broker + direct + introduced links with per-link memory
+  and sublink id spaces); the WithLocalPeer transfer over a direct link with
+  the bridge self-bypass migrating the route's sublink; the introduction
+  round trip over the new link in both mixed-language pairings.
+
+### 4. Courts run
+
+`run_4node_court.sh` (10+ consecutive passes), `run_3node_court.sh` (5/5),
+`run_bypass_court.sh`, `run_exhaust_court.sh`, `run_memory_court.sh`,
+`run_routing_court.sh`, `run_interop_court.sh`, `run_invite_court.sh`,
+`run_court.sh system`, `cargo test --workspace` (164 passed / 0 failed),
+`cargo fmt --check` (pass), clippy (no new warnings).
+
+### 5. Exact pass/fail counts
+
+4-node court: pass (broker/A/B/C event streams byte-identical in both
+pairings; wire comparisons pass with the documented normalization; native
+nodes exit 0). 3-node court: pass (re-sealed after the regression fixes).
+All other sealed courts re-pass. Workspace tests: 164/164.
+
+### 6. New residuals and evidence paths
+
+`evidence/4node/<stamp>/` (twelve event streams, eighteen wire captures,
+receipt) + `evidence/manifests/4node-<stamp>.json`;
+`evidence/3node/<stamp>/` (re-seal); `crates/mojo-rs-interop/testdata/ipcz/4node-*.bin`.
+
+### 7. Every observed mismatch
+
+1. The transfer-y2 parcel arrived on sublink 12, not the hard-coded
+   BOOTSTRAP_SUBLINK (1): the c2b route's bridge self-bypass migrates the
+   route before the transfer arrives. Same for the 3-node b2a route.
+2. The 3-node interop-a regression: the referrer's proxy-peer descriptor
+   named `{0,0}` (invalid), so the referred node never bypassed and the
+   world round trip stalled.
+3. The pipe_a bridge-bypass stage-1 lock race: the all-official baseline
+   itself produces both variants (A-initiated or broker-initiated) with
+   byte-identical events.
+4. The "world" reply sometimes arrived over the a2b link through B's proxy
+   (C replied before its bypass settled); the native's step-4 predicate
+   wrongly required the introduced link.
+5. Teardown closes hit EPIPE when a peer had already exited.
+
+### 8. Root cause of each fixed mismatch
+
+1. The transfer sublink is dynamic (the bridge self-bypass allocation); the
+   predicate now matches the PORTAL handle type on any sublink.
+2. The multi-link refactor's `remote_name_for` reads `links[id].remote_name`,
+   but the referrer's `connect_handshake` never set the broker link's
+   `remote_name` (the old code returned `self.broker_name`); fixed by
+   recording `connect.broker_name` in the link state.
+3. Genuine official nondeterminism (the shared `RouterLinkState` CAS): the
+   court normalizes the exchange on the broker↔A directions (documented in
+   the runner and receipt); the fixed-point done/closure traffic is still
+   compared exactly. The candidate itself is deterministic: the stage-1 win
+   is forced by waiting for the broker's side-A stable bit to be observable
+   in the shared memory before marking (the oracle acceptor wins only
+   because its side-B stable lands after the broker's ConnectReply
+   processing).
+4. The official `RecvPayload` is a link-agnostic Mojo read; the candidate
+   now accepts the no-handle reply on whichever link delivers it.
+5. `CloseRoute` on a broken transport is not an error at teardown (the
+   official driver's `Transmit` failure is asynchronous).
+
+### 9. Remaining unsupported behavior
+
+`BypassPeerWithNewLocalLink`, the broker-side referral roles
+(`NodeConnectorForBrokerReferral`, a native broker serving referrals and
+introductions), `RejectIntroduction`/`RequestIndirectIntroduction` (ids 12–13)
+and broker-to-broker connect (id 7), node loss beyond a single link, graphs
+beyond a single referral chain, split/multi-subparcel parcels; Phase 6 C ABI
+export, Phase 7 mojom/bindings, stress/fuzz, other platforms.
+
+### 10. Next highest-value parity gate
+
+The broker-side roles (the native as broker: `ReferNonBroker` receive,
+`NonBrokerReferralAccepted` send, `HandleIntroductionRequest` /
+`IntroduceRemoteNodes`, `ConnectFromBrokerToBroker`) — the mirrored half of
+the referral/introduction state machines, sealed by a court with the native
+broker serving official nodes; after that the directive sequence continues at
+Phase 6 (C ABI export).

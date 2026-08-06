@@ -133,22 +133,19 @@ struct ProcessedParcel {
 
 /// The Phase 5 routing acceptor state machine.
 pub struct RoutingAcceptor {
-    /// The channel to the broker (NodeLink 0).
-    channel: Channel,
-    /// The adopted broker-link memory (set by the Connect handshake).
-    link_memory: Option<LinkMemory>,
-    /// The direct peer link (NodeLink 1, the multi-node courts' referrer
-    /// link), established by the referral acceptance.
-    direct: Option<DirectLink>,
-    /// Per-link outgoing message sequence number (after Connect).
-    next_link_seq: u64,
+    /// The NodeLinks keyed by link id (`Node::connections_`): link 0 is the
+    /// broker link, link 1 the direct peer link (referral), link 2 the
+    /// introduced link. Each NodeLink has its own channel, memory, remote
+    /// name, and outgoing sequence space.
+    links: HashMap<u64, NodeLinkState>,
     /// Routers by identity (their first primary sublink, or a local rid).
     routers: HashMap<u64, Router>,
     /// (NodeLink, sublink) -> owning router identity.
     owners: HashMap<(u64, u64), u64>,
     /// Parcels for sublinks whose router is not yet established.
     early_parcels: HashMap<(u64, u64), VecDeque<AcceptParcel>>,
-    /// The broker's node name (from the Connect greeting).
+    /// The broker's node name (from the Connect greeting or the referral
+    /// acceptance).
     broker_name: NodeName,
     /// The referrer's node name (multi-node courts; from the referral
     /// acceptance).
@@ -178,15 +175,22 @@ pub struct RoutingAcceptor {
     /// must remain in the inbound queue for forwarding when the router
     /// becomes a proxy).
     keep_queued_flush: bool,
+    /// Pending `EstablishLink` requests keyed by the target node name
+    /// (`Node::pending_introductions_`): each request completes when the
+    /// broker's `AcceptIntroduction` (or `RejectIntroduction`) arrives for
+    /// that name.
+    pending_introductions: HashMap<NodeName, Vec<PendingIntroRequest>>,
     /// The next identity for local-only routers.
     next_rid: u64,
-    /// In-flight `RequestMemory` requests by buffer size, FIFO per size
-    /// (`NodeLink::pending_memory_requests_`: the callbacks are keyed by the
-    /// requested size and completed in request order on `ProvideMemory`).
-    pending_memory_requests: HashMap<u32, VecDeque<PendingMemoryRequest>>,
-    /// Block sizes with an in-flight capacity request (one per block size;
-    /// mirrors `NodeLinkMemory::capacity_callbacks_`'s `need_new_request`).
-    capacity_pending: HashSet<u32>,
+    /// In-flight `RequestMemory` requests by (link, buffer size), FIFO per
+    /// (link, size) (`NodeLink::pending_memory_requests_`: the callbacks are
+    /// keyed by the requested size and completed in request order on
+    /// `ProvideMemory`).
+    pending_memory_requests: HashMap<(u64, u32), VecDeque<PendingMemoryRequest>>,
+    /// (link, block size) pairs with an in-flight capacity request (one per
+    /// (link, block size); mirrors `NodeLinkMemory::capacity_callbacks_`'s
+    /// `need_new_request`).
+    capacity_pending: HashSet<(u64, u32)>,
     /// Parcels deferred because their data fragment references a buffer not
     /// yet received (`NodeLink::WaitForParcelFragmentToResolve`), keyed by
     /// (link id, buffer id) and completed when the `AddBlockBuffer` arrives.
@@ -197,13 +201,16 @@ pub struct RoutingAcceptor {
     event_seq: u64,
 }
 
-/// The direct peer NodeLink (link id 1) in the multi-node courts.
-pub struct DirectLink {
-    /// The channel to the referrer node.
+/// The per-NodeLink state (the official `Node::connections_` entries): the
+/// channel, the adopted link memory, the remote node name, and the outgoing
+/// message sequence number.
+pub struct NodeLinkState {
+    /// The channel to the remote node.
     channel: Channel,
-    /// The adopted link memory.
-    memory: LinkMemory,
-    /// The referrer's node name.
+    /// The adopted link memory (each NodeLink has its own primary buffer with
+    /// its own buffer id space); `None` until the link's handshake adopts it.
+    memory: Option<LinkMemory>,
+    /// The remote node's name (filled in by the handshake).
     remote_name: NodeName,
     /// Outgoing message sequence number.
     next_link_seq: u64,
@@ -213,6 +220,28 @@ pub struct DirectLink {
 pub const LINK_ID_BROKER: u64 = 0;
 /// The NodeLink id of the direct peer link (multi-node courts).
 pub const LINK_ID_DIRECT: u64 = 1;
+/// The NodeLink id of the introduced link (the `AcceptIntroduction` link of
+/// the multi-node introduction court).
+pub const LINK_ID_INTRODUCED: u64 = 2;
+
+/// A pending `EstablishLink` request, waiting for the broker's introduction
+/// (`Node::PendingIntroduction` callbacks).
+#[derive(Debug, Clone, Copy)]
+enum PendingIntroRequest {
+    /// The router `rid` (whose outward peer is the requestor link) needs a
+    /// link to the target node to bypass its proxy
+    /// (`Router::BypassPeer`'s `EstablishLink` callback).
+    BypassPeer {
+        /// The router to complete the bypass on.
+        rid: u64,
+        /// The requestor (peripheral outward) link id.
+        requestor_link_id: u64,
+        /// The requestor sublink on that link.
+        requestor_sublink: u64,
+        /// The bypass target's sublink on ITS outward link.
+        bypass_target_sublink: u64,
+    },
+}
 
 /// A pending `RequestMemory` (a `ProvideMemory` reply is expected): the
 /// completion carries the requested buffer size and the block size the
@@ -228,11 +257,18 @@ impl RoutingAcceptor {
     /// Start the routing acceptor on an inherited socket descriptor.
     pub fn new(fd: std::os::unix::io::RawFd) -> Result<RoutingAcceptor, RoutingError> {
         let channel = Channel::adopt(fd)?;
+        let mut links = HashMap::new();
+        links.insert(
+            LINK_ID_BROKER,
+            NodeLinkState {
+                channel,
+                memory: None,
+                remote_name: NodeName::invalid(),
+                next_link_seq: 0,
+            },
+        );
         Ok(RoutingAcceptor {
-            channel,
-            link_memory: None,
-            direct: None,
-            next_link_seq: 0,
+            links,
             routers: HashMap::new(),
             owners: HashMap::new(),
             early_parcels: HashMap::new(),
@@ -247,6 +283,7 @@ impl RoutingAcceptor {
             a2b_rid: None,
             referral_reply_seen: false,
             keep_queued_flush: false,
+            pending_introductions: HashMap::new(),
             next_rid: LOCAL_RID_BASE,
             pending_memory_requests: HashMap::new(),
             capacity_pending: HashSet::new(),
@@ -328,63 +365,58 @@ impl RoutingAcceptor {
     }
 
     fn memory(&self) -> Result<&LinkMemory, RoutingError> {
-        self.link_memory
-            .as_ref()
-            .ok_or(RoutingError::Unexpected("link memory not established"))
+        self.memory_for(LINK_ID_BROKER)
     }
 
     fn memory_mut(&mut self) -> Result<&mut LinkMemory, RoutingError> {
-        self.link_memory
-            .as_mut()
-            .ok_or(RoutingError::Unexpected("link memory not established"))
+        self.memory_mut_for(LINK_ID_BROKER)
     }
 
-    /// The link memory of the NodeLink identified by `link_id`.
+    /// The link memory of the NodeLink identified by `link_id` (each NodeLink
+    /// has its own primary buffer with its own buffer id space).
     fn memory_for(&self, link_id: u64) -> Result<&LinkMemory, RoutingError> {
-        if link_id == LINK_ID_DIRECT {
-            return self
-                .direct
-                .as_ref()
-                .map(|d| &d.memory)
-                .ok_or(RoutingError::Unexpected("direct link not established"));
-        }
-        self.memory()
+        let known = self.links.contains_key(&link_id);
+        self.links
+            .get(&link_id)
+            .and_then(|l| l.memory.as_ref())
+            .ok_or_else(|| {
+                RoutingError::Unexpected(if known {
+                    "link memory not established"
+                } else {
+                    "unknown link id"
+                })
+            })
     }
 
     /// The link memory of the NodeLink identified by `link_id` (mutable).
     fn memory_mut_for(&mut self, link_id: u64) -> Result<&mut LinkMemory, RoutingError> {
-        if link_id == LINK_ID_DIRECT {
-            return self
-                .direct
-                .as_mut()
-                .map(|d| &mut d.memory)
-                .ok_or(RoutingError::Unexpected("direct link not established"));
-        }
-        self.memory_mut()
+        let known = self.links.contains_key(&link_id);
+        self.links
+            .get_mut(&link_id)
+            .and_then(|l| l.memory.as_mut())
+            .ok_or_else(|| {
+                RoutingError::Unexpected(if known {
+                    "link memory not established"
+                } else {
+                    "unknown link id"
+                })
+            })
     }
 
     /// The channel of the NodeLink identified by `link_id`.
     fn channel_for(&mut self, link_id: u64) -> Result<&mut Channel, RoutingError> {
-        if link_id == LINK_ID_DIRECT {
-            return self
-                .direct
-                .as_mut()
-                .map(|d| &mut d.channel)
-                .ok_or(RoutingError::Unexpected("direct link not established"));
-        }
-        Ok(&mut self.channel)
+        self.links
+            .get_mut(&link_id)
+            .map(|l| &mut l.channel)
+            .ok_or(RoutingError::Unexpected("unknown link id"))
     }
 
     /// The remote node name of the NodeLink identified by `link_id`.
     fn remote_name_for(&self, link_id: u64) -> Result<NodeName, RoutingError> {
-        if link_id == LINK_ID_DIRECT {
-            return self
-                .direct
-                .as_ref()
-                .map(|d| d.remote_name)
-                .ok_or(RoutingError::Unexpected("direct link not established"));
-        }
-        Ok(self.broker_name)
+        self.links
+            .get(&link_id)
+            .map(|l| l.remote_name)
+            .ok_or(RoutingError::Unexpected("unknown link id"))
     }
 
     /// Run the full routing scenario.
@@ -1131,7 +1163,7 @@ impl RoutingAcceptor {
     /// memory, reply, and establish the initial portals.
     fn connect_handshake(&mut self) -> Result<(), RoutingError> {
         let msg = self
-            .channel
+            .channel_for(LINK_ID_BROKER)?
             .recv()?
             .ok_or(RoutingError::Unexpected("peer closed before Connect"))?;
         let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
@@ -1148,12 +1180,17 @@ impl RoutingAcceptor {
             return Err(RoutingError::Unexpected("Connect carries no link memory"));
         }
         let mem_fd = fds.remove(0).into_raw_fd();
-        self.link_memory = Some(LinkMemory::adopt_primary(mem_fd)?);
+        let broker_link = self
+            .links
+            .get_mut(&LINK_ID_BROKER)
+            .ok_or(RoutingError::Unexpected("broker link missing"))?;
+        broker_link.memory = Some(LinkMemory::adopt_primary(mem_fd)?);
+        broker_link.remote_name = connect.broker_name;
         self.broker_name = connect.broker_name;
         self.local_name = connect.receiver_name;
 
         let reply = messages::encode_connect_from_non_broker_to_broker(ACCEPTOR_INITIAL_PORTALS, 0);
-        self.channel.send(&reply, &[])?;
+        broker_link.channel.send(&reply, &[])?;
 
         let broker_portals = connect.num_initial_portals as usize;
         for i in 0..broker_portals.min(MAX_INITIAL_PORTALS) {
@@ -1273,11 +1310,14 @@ impl RoutingAcceptor {
         // number (the header field stays 0) and does not advance the NodeLink
         // counter: the NodeLink's first message also carries seq 0.
         let greeting = messages::encode_connect_to_referred_broker(ACCEPTOR_INITIAL_PORTALS, 0);
-        self.channel.send(&greeting, &[])?;
+        self.channel_for(LINK_ID_BROKER)?.send(&greeting, &[])?;
 
-        let msg = self.channel.recv()?.ok_or(RoutingError::Unexpected(
-            "peer closed before the referral acceptance",
-        ))?;
+        let msg = self
+            .channel_for(LINK_ID_BROKER)?
+            .recv()?
+            .ok_or(RoutingError::Unexpected(
+                "peer closed before the referral acceptance",
+            ))?;
         let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
         let DecodedMessage::ConnectToReferredNonBroker(connect) = decoded else {
             return Err(RoutingError::Unexpected(
@@ -1316,7 +1356,12 @@ impl RoutingAcceptor {
         // version is the minimum of the two sides' (both 0 in this epoch).
         let broker_protocol_version = std::cmp::min(connect.broker_protocol_version, 0);
         let _ = broker_protocol_version;
-        self.link_memory = Some(LinkMemory::adopt_primary(broker_buf_fd.into_raw_fd())?);
+        let broker_link = self
+            .links
+            .get_mut(&LINK_ID_BROKER)
+            .ok_or(RoutingError::Unexpected("broker link missing"))?;
+        broker_link.memory = Some(LinkMemory::adopt_primary(broker_buf_fd.into_raw_fd())?);
+        broker_link.remote_name = connect.broker_name;
         self.broker_name = connect.broker_name;
         self.local_name = connect.name;
 
@@ -1324,12 +1369,15 @@ impl RoutingAcceptor {
         self.referrer_name = connect.referrer_name;
         let direct_channel = Channel::adopt(referrer_transport_fd.into_raw_fd())?;
         let direct_memory = LinkMemory::adopt_primary(referrer_buf_fd.into_raw_fd())?;
-        self.direct = Some(DirectLink {
-            channel: direct_channel,
-            memory: direct_memory,
-            remote_name: connect.referrer_name,
-            next_link_seq: 0,
-        });
+        self.links.insert(
+            LINK_ID_DIRECT,
+            NodeLinkState {
+                channel: direct_channel,
+                memory: Some(direct_memory),
+                remote_name: connect.referrer_name,
+                next_link_seq: 0,
+            },
+        );
 
         // Step 4: the initial portals on the referrer link. `num_initial_portals`
         // is what the referrer assumed for the A<->B link (1 attachment + the
@@ -1398,16 +1446,22 @@ impl RoutingAcceptor {
         self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
         self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
 
-        // Step 1: receive the re-transferred portal Y' on the b2a pipe (the
-        // referrer link's initial portal 1). A's Y' router serialized with
-        // `proxy_peer_node_name` = the broker, so the new router immediately
-        // begins the bypass (`BypassPeer` -> `BypassPeerWithNewRemoteLink` ->
-        // `AcceptBypassLink` to the broker).
+        // Step 1: receive the re-transferred portal Y' on the b2a pipe. The
+        // parcel rides the pipe route's CURRENT sublink: the bridge
+        // self-bypass (`maybe_start_bridge_bypass` after the initial portals
+        // stabilized) migrates the route from sublink 1 to a fresh sublink
+        // before the transfer arrives, so the sublink must not be hardcoded.
+        // A's Y' router serialized with `proxy_peer_node_name` = the broker,
+        // so the new router immediately begins the bypass (`BypassPeer` ->
+        // `BypassPeerWithNewRemoteLink` -> `AcceptBypassLink` to the broker).
+        // The only other portal-bearing parcel on this link is the
+        // shared-memory client handshake (a boxed driver object, not a
+        // portal), so matching a PORTAL handle type is unambiguous.
         let (transfer, transfer_fds, transfer_link) = self.recv_until_any(|d| {
             matches!(
                 d,
                 DecodedMessage::AcceptParcel(p)
-                    if p.sublink == BOOTSTRAP_SUBLINK && p.handle_types.contains(&handle_type::PORTAL)
+                    if p.handle_types.contains(&handle_type::PORTAL)
             )
         })?;
         if transfer_link != LINK_ID_DIRECT {
@@ -1473,8 +1527,8 @@ impl RoutingAcceptor {
         // Step 5: close the local ends (b2a, then Y'). The peer may already be
         // gone (the broker exits after closing X); a failed transmission on a
         // broken transport is not an error at teardown.
-        self.close_route(self.bootstrap_rid)?;
-        self.close_route(y_prime)?;
+        self.close_route_tolerant(self.bootstrap_rid)?;
+        self.close_route_tolerant(y_prime)?;
         self.emit(7, EventKind::Result, "MOJO_RESULT_OK");
         self.emit(8, EventKind::Lifecycle, "MOJO_RESULT_OK");
         Ok(())
@@ -1547,12 +1601,15 @@ impl RoutingAcceptor {
         self.referrer_name = a.name;
         let direct_channel = Channel::adopt(transport_fd.into_raw_fd())?;
         let direct_memory = LinkMemory::adopt_primary(buffer_fd.into_raw_fd())?;
-        self.direct = Some(DirectLink {
-            channel: direct_channel,
-            memory: direct_memory,
-            remote_name: a.name,
-            next_link_seq: 0,
-        });
+        self.links.insert(
+            LINK_ID_DIRECT,
+            NodeLinkState {
+                channel: direct_channel,
+                memory: Some(direct_memory),
+                remote_name: a.name,
+                next_link_seq: 0,
+            },
+        );
 
         // `EstablishWaitingRouters(referrer_link, min(num_remote, waiting))`:
         // the waiting routers get outward links on the A<->B link (side A,
@@ -1680,6 +1737,33 @@ impl RoutingAcceptor {
         // like the baseline; the attachment's forced flush then wakes the
         // broker's waiting bypass attempt (the bypass's own flush cannot fire
         // the waiting-bit wakeup — no decay completes in it).
+        //
+        // The stage-1 lock race is decided by the shared `RouterLinkState`
+        // CAS: the first side to lock once BOTH sides are stable wins. The
+        // oracle acceptor deterministically wins because its side-B stable
+        // mark lands after the broker's ConnectReply processing (the broker's
+        // early attempts fail on the side-B unstable bit and defer). The
+        // candidate reproduces that ordering by waiting until the broker's
+        // side-A stable bit is observable in the shared memory before marking
+        // its own side: the mark and the bypass flush then run back-to-back
+        // on this thread, so the broker's deferred retry can never slip in
+        // between. The wait is bounded (the broker always processes the
+        // ConnectReply); on expiry the mark is still attempted so the flush
+        // path is exercised exactly like the oracle's.
+        let bootstrap_state = FragmentDescriptor {
+            buffer_id: 0,
+            offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(
+                BOOTSTRAP_SUBLINK as usize,
+            ) as u32,
+            size: ROUTER_LINK_STATE_SIZE as u32,
+        };
+        for _ in 0..10_000 {
+            let status = self.memory()?.read_link_status(bootstrap_state)?;
+            if status.side_a_stable() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
         self.mark_bootstrap_link_stable()?;
         self.router_flush(BOOTSTRAP_SUBLINK, false)?;
         self.router_flush(self.bootstrap_rid, true)?;
@@ -1696,7 +1780,7 @@ impl RoutingAcceptor {
         if !self.referral_reply_seen {
             loop {
                 let msg = self
-                    .channel
+                    .channel_for(LINK_ID_BROKER)?
                     .recv()?
                     .ok_or(RoutingError::Unexpected("peer closed during exchange"))?;
                 let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
@@ -1738,7 +1822,7 @@ impl RoutingAcceptor {
         // oracle's `RecvPayload`.
         let (rc, rc_fds) = loop {
             let msg = self
-                .channel
+                .channel_for(LINK_ID_BROKER)?
                 .recv()?
                 .ok_or(RoutingError::Unexpected("peer closed during exchange"))?;
             let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
@@ -1764,6 +1848,295 @@ impl RoutingAcceptor {
         self.close_route(a2b_rid)?;
         self.emit(10, EventKind::Result, "MOJO_RESULT_OK");
         self.emit(11, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        Ok(())
+    }
+
+    /// The introduction scenario from the INTRODUCED node's side
+    /// (`invite-node-c-4node`, the native `4node-acceptor`): node C.
+    ///
+    /// C is referred by B (`INHERIT_BROKER`), receives the re-transferred
+    /// portal Y'' over the b2c pipe with `proxy_peer_node_name` = A, requests
+    /// an introduction from the broker (`RequestIntroduction`), adopts the
+    /// introduced C<->A link (`AcceptIntroduction`), completes the bypass
+    /// with `AcceptBypassLink` over the new link (the `EstablishLink` ->
+    /// `BypassPeerWithNewRemoteLink` path), completes the X<->Y'' round trip
+    /// ("hello"/"world"), and observes peer closure.
+    ///
+    /// Event ops mirror `RunFourNodeC`: 0 lifecycle, 1 accept result, 2
+    /// extract result, 3 transfer message, 4 hello message, 5 world result,
+    /// 6 closure message, 7 close result, 8 lifecycle.
+    pub fn run_4node_c(&mut self) -> Result<(), RoutingError> {
+        self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        self.referral_accept()?;
+        self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 1: receive the re-transferred portal Y'' over the c2b pipe. The
+        // parcel rides the pipe route's CURRENT sublink: the bridge self-bypass
+        // (`maybe_start_bridge_bypass` after the initial portals stabilized)
+        // migrates the route from sublink 1 to a fresh sublink (12 in this
+        // court) before the transfer arrives, so the sublink must not be
+        // hardcoded. The descriptor names A as `proxy_peer_node_name`; the new
+        // router's `BypassPeer(A)` finds no link to A and requests an
+        // introduction. The only other portal-bearing parcel on this link is
+        // the shared-memory client handshake (a boxed driver object, not a
+        // portal), so matching a PORTAL handle type is unambiguous.
+        let (transfer, transfer_fds, transfer_link) = self.recv_until_any(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.handle_types.contains(&handle_type::PORTAL)
+            )
+        })?;
+        if transfer_link != LINK_ID_DIRECT {
+            return Err(RoutingError::Unexpected(
+                "transfer-y2 arrived off the referrer link",
+            ));
+        }
+        let y_dprime;
+        match transfer {
+            DecodedMessage::AcceptParcel(p) => {
+                let processed = self.process_accept_parcel(p, transfer_fds, LINK_ID_DIRECT)?;
+                if processed.identities.len() != 1 {
+                    return Err(RoutingError::BadParcel(
+                        "expected exactly one transferred portal",
+                    ));
+                }
+                y_dprime = processed.identities[0];
+                if processed.payload != b"transfer-y2" {
+                    return Err(RoutingError::BadParcel("unexpected transfer payload"));
+                }
+            }
+            _ => return Err(RoutingError::Unexpected("transfer predicate misrouted")),
+        }
+        self.emit_message(3, b"transfer-y2", 1);
+
+        // Step 2: receive "hello" on Y''. The `AcceptIntroduction` from the
+        // broker (and any ProxyWillStop/closure traffic over the introduced
+        // link) is dispatched by the wait loop; the hello itself is forwarded
+        // by B's proxy over the decaying b2c link.
+        let (hello, hello_fds, hello_link) = self.recv_until_any(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p)
+                    if p.sublink == y_dprime && p.handle_types.is_empty()
+            )
+        })?;
+        let hello_payload = match hello {
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, hello_fds, hello_link)?
+                    .payload
+            }
+            _ => return Err(RoutingError::Unexpected("hello predicate misrouted")),
+        };
+        if hello_payload != b"hello" {
+            return Err(RoutingError::BadParcel("unexpected hello payload"));
+        }
+        self.emit_message(4, &hello_payload, 0);
+
+        // Step 3: reply "world" on Y'' (routed over the introduced C<->A
+        // central link).
+        self.put(y_dprime, b"world".to_vec(), Vec::new())?;
+        self.emit(5, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 4: A closed X; Y'' observes peer closure (`RouteClosed` on the
+        // route's current primary sublink). The decaying b2c link's closure
+        // (B's proxy stopped) is dispatched if it arrives first; the closure
+        // reports the stale payload buffer ("hello"), matching the oracle's
+        // `RecvPayload`.
+        loop {
+            let y_primary = self.router_primary_sublink(y_dprime)?;
+            let (rc, rc_fds, rc_link) = self.recv_until_any(
+                |d| matches!(d, DecodedMessage::RouteClosed(r) if r.sublink == y_primary),
+            )?;
+            if let DecodedMessage::RouteClosed(r) = rc {
+                self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, rc_link)?;
+                break;
+            }
+        }
+        self.emit_message_result(6, b"hello", 0, "MOJO_RESULT_FAILED_PRECONDITION");
+
+        // Step 5: close the local ends (c2b, then Y''). The peers may already
+        // be gone (B exits after its closure read; the official `CloseRoute`
+        // tolerates a broken transport at teardown — the driver's `Transmit`
+        // failure is not fatal), so a failed transmission on a closed channel
+        // is not an error here.
+        self.close_route_tolerant(self.bootstrap_rid)?;
+        self.close_route_tolerant(y_dprime)?;
+        self.emit(7, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(8, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        Ok(())
+    }
+
+    /// `Router::CloseRoute` at teardown, tolerating a peer that already
+    /// dropped the transport (the official driver's `Transmit` on a broken
+    /// channel reports the error asynchronously; the mojo layer does not
+    /// surface it to `MojoClose`).
+    fn close_route_tolerant(&mut self, rid: u64) -> Result<(), RoutingError> {
+        match self.close_route(rid) {
+            Ok(()) => Ok(()),
+            Err(RoutingError::Channel(ChannelError::Io(_))) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The introduction scenario from the REFERRER's side
+    /// (`invite-node-a-4node`, the native `4node-referrer`): node A.
+    ///
+    /// A accepts invitation-1, refers B, adopts the A<->B link, creates (X,
+    /// Y) locally and transfers Y through the a2b pipe (the WithLocalPeer
+    /// path over the direct link), sends "hello" on X, adopts the introduced
+    /// C<->A link (`AcceptIntroduction`), completes the proxy bypass on X
+    /// (`AcceptBypassLink` -> `StopProxying`/`ProxyWillStop`), receives
+    /// "world" over the new link, sends `done`, and observes peer closure on
+    /// pipe_a.
+    ///
+    /// Event ops mirror `RunFourNodeA`: 0 lifecycle, 1-8 results, 9 world
+    /// message, 10 done result, 11 closure message, 12 close result,
+    /// 13 lifecycle.
+    pub fn run_4node_a(&mut self) -> Result<(), RoutingError> {
+        self.emit(0, EventKind::Lifecycle, "MOJO_RESULT_OK");
+        // The Connect handshake without the shared-memory client handshake
+        // (the referral greeting precedes it), exactly like the 3-node
+        // referrer role.
+        self.connect_without_shm()?;
+        self.emit(1, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(2, EventKind::Result, "MOJO_RESULT_OK");
+
+        self.referral_send()?;
+        self.send_shared_memory_client()?;
+        // The pipe_a bridge-bypass trigger. The baseline a-to-broker wire
+        // shows A's `BypassPeerWithLink` (sub 1 -> 12) as the next message
+        // after the shared-memory client handshake and the portal-0 closure
+        // (the broker's `StopProxyingToLocalPeer` / `BypassPeerWithLink`
+        // replies precede the `AcceptIntroduction`): the bootstrap route's
+        // bridge chain collapses before the referral round trip completes.
+        //
+        // The stage-1 lock race is decided by the shared `RouterLinkState`
+        // CAS: the first side to lock once BOTH sides are stable wins. The
+        // oracle acceptor deterministically wins because its side-B stable
+        // mark lands after the broker's ConnectReply processing (the broker's
+        // early attempts fail on the side-B unstable bit and defer). The
+        // candidate reproduces that ordering by waiting until the broker's
+        // side-A stable bit is observable in the shared memory before marking
+        // its own side: the mark and the bypass flush then run back-to-back
+        // on this thread, so the broker's deferred retry can never slip in
+        // between. The wait is bounded (the broker always processes the
+        // ConnectReply); on expiry the mark is still attempted so the flush
+        // path is exercised exactly like the oracle's.
+        let bootstrap_state = FragmentDescriptor {
+            buffer_id: 0,
+            offset: crate::ipcz::link_memory::LinkMemory::initial_link_state_offset(
+                BOOTSTRAP_SUBLINK as usize,
+            ) as u32,
+            size: ROUTER_LINK_STATE_SIZE as u32,
+        };
+        for _ in 0..10_000 {
+            let status = self.memory()?.read_link_status(bootstrap_state)?;
+            if status.side_a_stable() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+        // `mark_bootstrap_link_stable` marks only portal 1 (portal 0 stays
+        // unmarked — the shared-memory client portal's closure behavior
+        // differs); the flush lets this side win the bootstrap-route
+        // bridge-bypass lock, and the attachment's forced flush wakes the
+        // broker's waiting bypass attempt, mirroring the 3-node referrer
+        // role's timing.
+        self.mark_bootstrap_link_stable()?;
+        self.router_flush(BOOTSTRAP_SUBLINK, false)?;
+        self.router_flush(self.bootstrap_rid, true)?;
+        self.emit(3, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(4, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(5, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 1: the a2b link adoption (`NonBrokerReferralAccepted`);
+        // everything else on the broker link is dispatched.
+        let (reply, reply_fds) =
+            self.recv_until(|d| matches!(d, DecodedMessage::NonBrokerReferralAccepted(_)))?;
+        if let DecodedMessage::NonBrokerReferralAccepted(a) = reply {
+            self.on_non_broker_referral_accepted(a, reply_fds)?;
+        }
+        let a2b_rid = self
+            .a2b_rid
+            .ok_or(RoutingError::Unexpected("a2b pipe not established"))?;
+
+        // Step 2: create (X, Y) locally and transfer Y through the a2b pipe
+        // to B (the WithLocalPeer serialization over the direct link).
+        let (x_rid, y_rid) = self.open_portals()?;
+        self.emit(6, EventKind::Result, "MOJO_RESULT_OK");
+        self.put(a2b_rid, b"transfer-y".to_vec(), vec![Object::Router(y_rid)])?;
+        self.emit(7, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 3: send "hello" on X.
+        self.put(x_rid, b"hello".to_vec(), Vec::new())?;
+        self.emit(8, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 4: receive "world" on X. The wait dispatches the pipe_a
+        // bridge-bypass traffic, the `AcceptIntroduction` (adopting the
+        // C<->A link), the `AcceptBypassLink` over the new link (completing
+        // the bypass on X), and the `ProxyWillStop`. The world may arrive on
+        // ANY link: when C replies before its own bypass completes, the reply
+        // travels back through B's proxy over the a2b link (sub 12); once the
+        // bypass settles, it arrives over the introduced link. The official
+        // `RecvPayload(x)` is a Mojo read and is link-agnostic — the
+        // candidate matches that by accepting the first no-handle parcel on
+        // whichever link delivers it (no other empty-handle parcel reaches X
+        // in this scenario).
+        let (world, world_fds, world_link) = self.recv_until_any(|d| {
+            matches!(
+                d,
+                DecodedMessage::AcceptParcel(p) if p.handle_types.is_empty()
+            )
+        })?;
+        let world_payload = match world {
+            DecodedMessage::AcceptParcel(p) => {
+                self.process_accept_parcel(p, world_fds, world_link)?
+                    .payload
+            }
+            _ => return Err(RoutingError::Unexpected("world predicate misrouted")),
+        };
+        if world_payload != b"world" {
+            return Err(RoutingError::BadParcel("unexpected world payload"));
+        }
+        self.emit_message(9, &world_payload, 0);
+
+        // Step 5: the done marker on pipe_a (the broker waits for it).
+        self.put(self.bootstrap_rid, b"done".to_vec(), Vec::new())?;
+        self.emit(10, EventKind::Result, "MOJO_RESULT_OK");
+
+        // Step 6: the broker closes pipe_a; observe peer closure on the
+        // attachment's CURRENT primary sublink (recomputed per message; the
+        // closure reports the stale payload buffer "world", matching the
+        // oracle's `RecvPayload`).
+        let (rc, rc_fds) = loop {
+            let msg = self
+                .channel_for(LINK_ID_BROKER)?
+                .recv()?
+                .ok_or(RoutingError::Unexpected("peer closed during exchange"))?;
+            let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
+            let now = self.bootstrap_sublink()?;
+            if let DecodedMessage::RouteClosed(r) = &decoded {
+                if r.sublink == now {
+                    break (decoded, msg.fds);
+                }
+            }
+            self.dispatch(decoded, msg.fds, LINK_ID_BROKER)?;
+        };
+        if let DecodedMessage::RouteClosed(r) = rc {
+            self.dispatch(DecodedMessage::RouteClosed(r), rc_fds, LINK_ID_BROKER)?;
+        }
+        self.emit_message_result(11, b"world", 0, "MOJO_RESULT_FAILED_PRECONDITION");
+
+        // Step 7: close the local ends (pipe_a, then a2b, then X). The peers
+        // may already be gone (B and C exit after their closure reads); the
+        // official `CloseRoute` tolerates a broken transport at teardown.
+        self.close_route_tolerant(self.bootstrap_rid)?;
+        self.close_route_tolerant(a2b_rid)?;
+        self.close_route_tolerant(x_rid)?;
+        self.emit(12, EventKind::Result, "MOJO_RESULT_OK");
+        self.emit(13, EventKind::Lifecycle, "MOJO_RESULT_OK");
         Ok(())
     }
 
@@ -1896,18 +2269,18 @@ impl RoutingAcceptor {
     }
 
     /// Receive messages until `pred` matches on any established NodeLink
-    /// (multi-node courts: the broker link and the direct peer link); every
-    /// non-matching message is dispatched with its source link id. Returns the
-    /// matched message, its fds, and the link it arrived on.
+    /// (multi-node courts: the broker link, the direct peer link, and the
+    /// introduced link); every non-matching message is dispatched with its
+    /// source link id. Returns the matched message, its fds, and the link it
+    /// arrived on.
     fn recv_until_any(
         &mut self,
         pred: impl Fn(&DecodedMessage) -> bool,
     ) -> Result<(DecodedMessage, Vec<OwnedFd>, u64), RoutingError> {
         loop {
-            for link_id in [LINK_ID_BROKER, LINK_ID_DIRECT] {
-                if link_id == LINK_ID_DIRECT && self.direct.is_none() {
-                    continue;
-                }
+            let mut link_ids: Vec<u64> = self.links.keys().copied().collect();
+            link_ids.sort_unstable();
+            for link_id in link_ids {
                 let channel = self.channel_for(link_id)?;
                 if !channel.wait_readable(std::time::Duration::from_millis(1))? {
                     continue;
@@ -1915,6 +2288,31 @@ impl RoutingAcceptor {
                 match channel.recv_available()? {
                     RecvResult::Message(msg) => {
                         let decoded = messages::decode_message(&msg.payload, msg.fds.len())?;
+                        if std::env::var_os("MOJO_RS_TRACE").is_some() {
+                            match &decoded {
+                                messages::DecodedMessage::RouteClosed(r) => eprintln!(
+                                    "[recv_until_any] link={link_id} RouteClosed sub={} len={}",
+                                    r.sublink, r.sequence_length
+                                ),
+                                messages::DecodedMessage::StopProxyingToLocalPeer(s) => eprintln!(
+                                    "[recv_until_any] link={link_id} StopProxyingToLocalPeer sub={} out_len={}",
+                                    s.sublink, s.outbound_sequence_length
+                                ),
+                                messages::DecodedMessage::AcceptParcel(p) => eprintln!(
+                                    "[recv_until_any] link={link_id} AcceptParcel sub={} seq={} htypes={:?} frag={:?} len={}",
+                                    p.sublink,
+                                    p.sequence_number,
+                                    p.handle_types,
+                                    p.parcel_fragment,
+                                    p.parcel_data.len()
+                                ),
+                                _ => eprintln!(
+                                    "[recv_until_any] link={link_id} msg={:?} fds={}",
+                                    messages::short_message_name(&decoded),
+                                    msg.fds.len()
+                                ),
+                            }
+                        }
                         if pred(&decoded) {
                             return Ok((decoded, msg.fds, link_id));
                         }
@@ -1922,6 +2320,9 @@ impl RoutingAcceptor {
                     }
                     RecvResult::WouldBlock => {}
                     RecvResult::PeerClosed => {
+                        if std::env::var_os("MOJO_RS_TRACE").is_some() {
+                            eprintln!("[recv_until_any] link={link_id} PEER_CLOSED");
+                        }
                         return Err(RoutingError::Unexpected("peer closed during exchange"));
                     }
                 }
@@ -1971,14 +2372,8 @@ impl RoutingAcceptor {
                 MSG_ID_REQUEST_INTRODUCTION,
                 "native broker role not exercised by a sealed court",
             )),
-            DecodedMessage::AcceptIntroduction(_) => Err(RoutingError::Unsupported(
-                MSG_ID_ACCEPT_INTRODUCTION,
-                "introduction not exercised by a sealed court",
-            )),
-            DecodedMessage::RejectIntroduction(_) => Err(RoutingError::Unsupported(
-                MSG_ID_REJECT_INTRODUCTION,
-                "introduction rejection not exercised by a sealed court",
-            )),
+            DecodedMessage::AcceptIntroduction(a) => self.on_accept_introduction(a, fds),
+            DecodedMessage::RejectIntroduction(r) => self.on_reject_introduction(r.name),
             DecodedMessage::RequestIndirectIntroduction(_) => Err(RoutingError::Unsupported(
                 MSG_ID_REQUEST_INDIRECT_INTRODUCTION,
                 "indirect introduction not exercised by a sealed court",
@@ -2048,7 +2443,7 @@ impl RoutingAcceptor {
                 }
                 Ok(())
             }
-            DecodedMessage::RequestMemory(r) => self.on_request_memory(r.size),
+            DecodedMessage::RequestMemory(r) => self.on_request_memory(r.size, link_id),
             DecodedMessage::ProvideMemory(r) => {
                 // `ProvideMemory` carries exactly one driver object (the
                 // buffer) at index 0; the descriptor travels with the message.
@@ -2066,16 +2461,13 @@ impl RoutingAcceptor {
                         ));
                     }
                 };
-                self.on_provide_memory(r.size, fd)
+                self.on_provide_memory(r.size, fd, link_id)
             }
             DecodedMessage::BypassPeer(_) => Err(RoutingError::Unsupported(
                 MSG_ID_BYPASS_PEER,
                 "inbound BypassPeer not exercised by the routing court",
             )),
-            DecodedMessage::AcceptBypassLink(_) => Err(RoutingError::Unsupported(
-                MSG_ID_ACCEPT_BYPASS_LINK,
-                "inbound AcceptBypassLink not exercised by the routing court",
-            )),
+            DecodedMessage::AcceptBypassLink(ab) => self.on_accept_bypass_link(ab, link_id),
             DecodedMessage::ProxyWillStop(w) => {
                 let Some(rid) = self.owners.get(&(link_id, w.sublink)).copied() else {
                     return Ok(());
@@ -2434,7 +2826,9 @@ impl RoutingAcceptor {
     /// fresh `RouterLinkState` from the target link's memory, begin decaying
     /// our outward requestor link, create a new central link to the target
     /// node, and send `AcceptBypassLink` over the target link (the outbound
-    /// id-31 path sealed by the multi-node court).
+    /// id-31 path sealed by the multi-node courts). When we have NO link to
+    /// the target, `EstablishLink` requests an introduction from the broker
+    /// and the bypass completes when the introduced link is adopted.
     fn router_bypass_peer(
         &mut self,
         rid: u64,
@@ -2465,13 +2859,27 @@ impl RoutingAcceptor {
         if bypass_target_node != self.local_name {
             // The proxy's outward peer lives on another node: we need a link
             // to it (`Node::GetLink`).
-            let target_link_id = self.link_id_for_node(bypass_target_node)?;
-            return self.bypass_peer_with_new_remote_link(
-                rid,
-                requestor_link_id,
-                requestor_sublink,
-                bypass_target_sublink,
-                target_link_id,
+            if let Some(target_link_id) = self.link_id_for_node(bypass_target_node) {
+                return self.bypass_peer_with_new_remote_link(
+                    rid,
+                    requestor_link_id,
+                    requestor_sublink,
+                    bypass_target_sublink,
+                    target_link_id,
+                );
+            }
+            // No link to the bypass target: `EstablishLink` requests an
+            // introduction from the broker; the pending request completes with
+            // `BypassPeerWithNewRemoteLink` once the introduced link is
+            // adopted (`Node::EstablishLink`'s callback).
+            return self.establish_link(
+                bypass_target_node,
+                PendingIntroRequest::BypassPeer {
+                    rid,
+                    requestor_link_id,
+                    requestor_sublink,
+                    bypass_target_sublink,
+                },
             );
         }
         Err(RoutingError::Unsupported(
@@ -2480,19 +2888,271 @@ impl RoutingAcceptor {
         ))
     }
 
-    /// The NodeLink id of the link to the given node (`Node::GetLink`). Only
-    /// the sealed courts' links exist (broker link + direct peer link).
-    fn link_id_for_node(&self, name: NodeName) -> Result<u64, RoutingError> {
+    /// The NodeLink id of the link to the given node (`Node::GetLink`): the
+    /// broker link, the direct peer link, or any introduced link.
+    fn link_id_for_node(&self, name: NodeName) -> Option<u64> {
         if name == self.broker_name {
-            return Ok(LINK_ID_BROKER);
+            return Some(LINK_ID_BROKER);
         }
         if self.referrer_name.is_valid() && name == self.referrer_name {
-            return Ok(LINK_ID_DIRECT);
+            return Some(LINK_ID_DIRECT);
         }
-        Err(RoutingError::Unsupported(
-            MSG_ID_BYPASS_PEER,
-            "EstablishLink (unknown node) not exercised by a sealed court",
-        ))
+        self.links
+            .iter()
+            .find(|(id, l)| **id != LINK_ID_BROKER && l.remote_name == name)
+            .map(|(id, _)| *id)
+    }
+
+    /// `Node::EstablishLink`: find an existing link to `name`, or request an
+    /// introduction from the broker and complete `request` when the link is
+    /// adopted (`AcceptIntroduction`) or the introduction fails
+    /// (`RejectIntroduction`). Only the first request for a name sends the
+    /// `RequestIntroduction`; later requests for the same name wait on the
+    /// same pending introduction (`Node::PendingIntroduction` callbacks).
+    fn establish_link(
+        &mut self,
+        name: NodeName,
+        request: PendingIntroRequest,
+    ) -> Result<(), RoutingError> {
+        if self.link_id_for_node(name).is_some() {
+            return self.complete_pending_intro(name, request);
+        }
+        let first = {
+            let pending = self.pending_introductions.entry(name).or_default();
+            let first = pending.is_empty();
+            pending.push(request);
+            first
+        };
+        if first {
+            self.send_link_message_on(LINK_ID_BROKER, messages::encode_request_introduction(name))?;
+        }
+        Ok(())
+    }
+
+    /// Complete one pending introduction request now that a link to `name`
+    /// exists (or never will, in which case the request fails).
+    fn complete_pending_intro(
+        &mut self,
+        name: NodeName,
+        request: PendingIntroRequest,
+    ) -> Result<(), RoutingError> {
+        match request {
+            PendingIntroRequest::BypassPeer {
+                rid,
+                requestor_link_id,
+                requestor_sublink,
+                bypass_target_sublink,
+            } => {
+                let Some(target_link_id) = self.link_id_for_node(name) else {
+                    // The introduction failed; the router's route is
+                    // disconnected (`Router::BypassPeer`'s failed-introduction
+                    // callback calls `AcceptRouteDisconnectedFrom`).
+                    return self.router_disconnected(rid);
+                };
+                self.bypass_peer_with_new_remote_link(
+                    rid,
+                    requestor_link_id,
+                    requestor_sublink,
+                    bypass_target_sublink,
+                    target_link_id,
+                )
+            }
+        }
+    }
+
+    /// `Node::AcceptIntroduction`: adopt the introduced NodeLink from the
+    /// broker's driver objects (transport + link memory), register it, and
+    /// complete any pending introduction requests for the peer's name. The
+    /// link is immediately active (the transport pair was created by the
+    /// broker; no greeting is transmitted).
+    fn on_accept_introduction(
+        &mut self,
+        a: messages::AcceptIntroduction,
+        fds: Vec<OwnedFd>,
+    ) -> Result<(), RoutingError> {
+        if self.links.contains_key(&LINK_ID_INTRODUCED) {
+            // A duplicate introduction for the same link slot: the official
+            // `NodeLink::OnAcceptIntroduction` tolerates redundant
+            // introductions by convention (the broker ensures consistent
+            // ordering). The first adoption wins.
+            return Ok(());
+        }
+        let transport_fd = fds
+            .get(a.transport_index as usize)
+            .ok_or(RoutingError::BadParcel(
+                "introduction transport index out of range",
+            ))?
+            .try_dup()?;
+        let memory_fd = fds
+            .get(a.memory_index as usize)
+            .ok_or(RoutingError::BadParcel(
+                "introduction memory index out of range",
+            ))?
+            .try_dup()?;
+
+        let channel = Channel::adopt(transport_fd.into_raw_fd())?;
+        let memory = LinkMemory::adopt_primary(memory_fd.into_raw_fd())?;
+        self.links.insert(
+            LINK_ID_INTRODUCED,
+            NodeLinkState {
+                channel,
+                memory: Some(memory),
+                remote_name: a.name,
+                next_link_seq: 0,
+            },
+        );
+
+        // Complete every pending request for this name in order
+        // (`PendingIntroduction::Finish`).
+        let pending = self
+            .pending_introductions
+            .remove(&a.name)
+            .unwrap_or_default();
+        for request in pending {
+            self.complete_pending_intro(a.name, request)?;
+        }
+        Ok(())
+    }
+
+    /// `Node::NotifyIntroductionFailed`: the broker rejected an introduction
+    /// request; every pending request for that name fails (the routers are
+    /// disconnected).
+    fn on_reject_introduction(&mut self, name: NodeName) -> Result<(), RoutingError> {
+        let pending = self.pending_introductions.remove(&name).unwrap_or_default();
+        for request in pending {
+            self.complete_pending_intro(name, request)?;
+        }
+        Ok(())
+    }
+
+    /// `NodeLink::OnAcceptBypassLink`: the bypass initiator (over `new_link_id`)
+    /// replaced the proxy chain with a direct central link; this node's router
+    /// on the OLD link (`current_peer_node`/`current_peer_sublink`) adopts the
+    /// new link (`Router::AcceptBypassLink`).
+    fn on_accept_bypass_link(
+        &mut self,
+        ab: messages::AcceptBypassLink,
+        new_link_id: u64,
+    ) -> Result<(), RoutingError> {
+        // The message names the link to the bypassed proxy's node
+        // (`node_->GetLink(current_peer_node)`); a severed link means the
+        // route is being torn down anyway — ignore.
+        let Some(old_link_id) = self.link_id_for_node(ab.current_peer_node) else {
+            return Ok(());
+        };
+        let Some(rid) = self
+            .owners
+            .get(&(old_link_id, ab.current_peer_sublink))
+            .copied()
+        else {
+            // The route has already been at least partially torn down;
+            // silently ignore (the official `GetRouter` returns null).
+            return Ok(());
+        };
+        // The new link state lives in the memory of the link the message
+        // arrived on.
+        self.memory_for(new_link_id)?
+            .fragment(ab.new_link_state_fragment)?;
+
+        // Snapshot the old (bypassed) outward link and validate the bypass
+        // source BEFORE the mutation below (`CanNodeRequestBypass`): the old
+        // link's state must have been locked for a bypass whose allowed
+        // request source is the new link's remote node. The same-node
+        // shortcut (`old_link->node_link() == &new_node_link`) skips the
+        // check, but the introduction link always differs from the bypassed
+        // link.
+        let (old_link_id_2, old_state_2) = {
+            let router = self
+                .routers
+                .get(&rid)
+                .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
+            if router.disconnected || router.outward.primary.is_none() {
+                return Ok(());
+            }
+            let old = router
+                .outward
+                .primary
+                .clone()
+                .ok_or(RoutingError::BadParcel("bypass without outward link"))?;
+            if old.is_local() {
+                return Err(RoutingError::BadParcel("unexpected bypass at a local link"));
+            }
+            (old.link_id, old.link_state)
+        };
+        if old_link_id_2 != new_link_id {
+            let state =
+                old_state_2.ok_or(RoutingError::BadParcel("bypass source link without state"))?;
+            let allowed = self
+                .memory_for(old_link_id_2)?
+                .read_allowed_bypass_source(state)?;
+            if allowed != self.remote_name_for(new_link_id)? {
+                return Err(RoutingError::BadParcel("unauthorized BypassProxy"));
+            }
+        }
+
+        let (old_sublink, length_to_proxy_from_us) = {
+            let router = self
+                .routers
+                .get_mut(&rid)
+                .ok_or(RoutingError::BadParcel("bypass for unknown router"))?;
+            if router.disconnected || router.outward.primary.is_none() {
+                return Ok(());
+            }
+            let old = router
+                .outward
+                .primary
+                .clone()
+                .ok_or(RoutingError::BadParcel("bypass without outward link"))?;
+            if old.is_local() {
+                return Err(RoutingError::BadParcel("unexpected bypass at a local link"));
+            }
+            let length_to_proxy_from_us = router.outbound.current_sequence_number();
+            if !router.outward.begin_primary_link_decay() {
+                return Err(RoutingError::BadParcel("failure to decay link"));
+            }
+            router
+                .outward
+                .set_length_to_decaying_link(length_to_proxy_from_us);
+            router
+                .outward
+                .set_length_from_decaying_link(ab.inbound_sequence_length_from_bypassed_link);
+            let old_sublink = old.sublink;
+            // Side B by convention (the initiator assumes side A).
+            router.outward.set_primary_link(Link::remote(
+                new_link_id,
+                ab.new_sublink,
+                LinkKind::Central,
+                LinkSide::B,
+                Some(ab.new_link_state_fragment),
+            ));
+            self.owners.insert((new_link_id, ab.new_sublink), rid);
+            (old_sublink, length_to_proxy_from_us)
+        };
+
+        if old_link_id != new_link_id {
+            // Tell the proxy to stop proxying and let its inward peer (our
+            // new outward peer) know that the proxy will stop.
+            self.send_link_message_on(
+                old_link_id,
+                messages::encode_stop_proxying(
+                    old_sublink,
+                    length_to_proxy_from_us,
+                    ab.inbound_sequence_length_from_bypassed_link,
+                ),
+            )?;
+            self.send_link_message_on(
+                new_link_id,
+                messages::encode_proxy_will_stop(ab.new_sublink, length_to_proxy_from_us),
+            )?;
+        } else {
+            // Same-node shortcut (not exercised by a sealed court): the proxy
+            // already conspired with its local outward peer.
+            self.send_link_message_on(
+                old_link_id,
+                messages::encode_stop_proxying_to_local_peer(old_sublink, length_to_proxy_from_us),
+            )?;
+        }
+        self.router_flush(rid, false)
     }
 
     /// `Router::BypassPeerWithNewRemoteLink`: replace our outward link to the
@@ -2648,6 +3308,15 @@ impl RoutingAcceptor {
         }
 
         let initiate_proxy_bypass = locked;
+        // The bypass target is the remote node of the portal's own outward
+        // link (`remote_link->node_link()->remote_node_name()`), not
+        // necessarily the broker (multi-node graphs: the re-transferred
+        // portal's outward link can point at any node).
+        let outward_remote = if !primary.is_local() {
+            Some(self.remote_name_for(primary.link_id)?)
+        } else {
+            None
+        };
         // The new sublink is allocated from the TARGET link's memory (each
         // NodeLink has its own sublink id space).
         let new_sublink = self.memory_mut_for(link_id)?.allocate_sublink_ids(1)?;
@@ -2684,7 +3353,8 @@ impl RoutingAcceptor {
                     .clone()
                     .ok_or(RoutingError::BadParcel("no outward primary"))?;
                 if !primary.is_local() {
-                    descriptor.proxy_peer_node_name = self.broker_name;
+                    descriptor.proxy_peer_node_name =
+                        outward_remote.ok_or(RoutingError::BadParcel("no outward remote"))?;
                     descriptor.proxy_peer_sublink = primary.sublink;
                     if let Some(inward) = router.inward.as_mut() {
                         inward.begin_primary_link_decay();
@@ -2696,6 +3366,12 @@ impl RoutingAcceptor {
         // Register the new peripheral inward link on the NodeLink; the router
         // adopts it in begin_proxying after the descriptor is transmitted.
         self.owners.insert((link_id, new_sublink), rid);
+        if std::env::var_os("MOJO_RS_TRACE").is_some() {
+            eprintln!(
+                "[serialize_router] rid={rid} target_link={link_id} new={} locked={} proxy_peer={:?} proxy_sub={}",
+                new_sublink, locked, descriptor.proxy_peer_node_name, descriptor.proxy_peer_sublink
+            );
+        }
         Ok((rid, descriptor))
     }
 
@@ -2717,15 +3393,20 @@ impl RoutingAcceptor {
     ) -> Result<Option<RouterDescriptor>, RoutingError> {
         // `TryAllocateRouterLinkState`: on failure, unconditionally lobby for
         // more capacity (the `RequestMemory`/`ProvideMemory` round trip) and
-        // fall back.
-        let Some(new_link_state) = self.memory_mut()?.try_allocate_link_state()? else {
-            self.request_block_capacity(crate::ipcz::link_memory::ROUTER_LINK_STATE_SIZE as u32)?;
+        // fall back. The fragment comes from the TARGET link's memory (each
+        // NodeLink has its own buffer id space).
+        let Some(new_link_state) = self.memory_mut_for(link_id)?.try_allocate_link_state()? else {
+            self.request_block_capacity(
+                crate::ipcz::link_memory::ROUTER_LINK_STATE_SIZE as u32,
+                link_id,
+            )?;
             return Ok(None);
         };
         // The new central link holds a copy of the FragmentRef
         // (`AddRemoteRouterLink` copies; the descriptor carries the released
         // ref, adopted by the peer without increment).
-        self.memory()?.add_link_state_ref(new_link_state)?;
+        self.memory_for(link_id)?
+            .add_link_state_ref(new_link_state)?;
         let proxy_inbound_sequence_length = self
             .routers
             .get(&local_peer)
@@ -2876,16 +3557,20 @@ impl RoutingAcceptor {
                     None,
                 ));
             }
-            if router.outward.primary.is_some() && router.outward.is_stable() && inward.is_stable()
-            {
-                router.outward.primary.as_ref().and_then(|l| l.link_state)
-            } else {
-                None
+            // The outward primary's link state lives in the memory of the
+            // link the outward edge belongs to.
+            match (
+                router.outward.primary.as_ref(),
+                router.outward.is_stable(),
+                inward.is_stable(),
+            ) {
+                (Some(l), true, true) if l.link_state.is_some() => (l.link_state, l.link_id),
+                _ => (None, link_id),
             }
         };
-        if let Some(state) = mark_stable {
+        if let (Some(state), state_link) = mark_stable {
             // Side A (this node allocates the link as side A).
-            self.memory()?.set_side_stable(state, true)?;
+            self.memory_for(state_link)?.set_side_stable(state, true)?;
         }
         if self
             .routers
@@ -2899,10 +3584,12 @@ impl RoutingAcceptor {
     }
 
     /// `RouterLink::MarkSideStable` on a link: remote links OR the stable bit
-    /// into the shared fragment; local links into the shared in-process state.
+    /// into the shared fragment (in the memory of the link the fragment lives
+    /// in); local links into the shared in-process state.
     fn mark_side_stable_on_link(&mut self, link: &Link) -> Result<(), RoutingError> {
         if let Some(desc) = link.link_state {
-            self.memory()?.set_side_stable(desc, link.side.is_a())?;
+            self.memory_for(link.link_id)?
+                .set_side_stable(desc, link.side.is_a())?;
         }
         if let Some(state) = &link.local_state {
             state.borrow_mut().set_side_stable(link.side.is_a());
@@ -2913,7 +3600,9 @@ impl RoutingAcceptor {
     /// `RouterLink::TryLockForClosure` on a link.
     fn try_lock_link_for_closure(&mut self, link: &Link) -> Result<bool, RoutingError> {
         if let Some(desc) = link.link_state {
-            return Ok(self.memory()?.try_lock_link_state(desc, link.side.is_a())?);
+            return Ok(self
+                .memory_for(link.link_id)?
+                .try_lock_link_state(desc, link.side.is_a())?);
         }
         if let Some(state) = &link.local_state {
             return Ok(state.borrow_mut().try_lock(link.side.is_a()));
@@ -2930,10 +3619,13 @@ impl RoutingAcceptor {
         source: NodeName,
     ) -> Result<bool, RoutingError> {
         if let Some(desc) = link.link_state {
-            if !self.memory()?.try_lock_link_state(desc, link.side.is_a())? {
+            if !self
+                .memory_for(link.link_id)?
+                .try_lock_link_state(desc, link.side.is_a())?
+            {
                 return Ok(false);
             }
-            self.memory_mut()?
+            self.memory_mut_for(link.link_id)?
                 .write_allowed_bypass_source(desc, source)?;
             return Ok(true);
         }
@@ -2951,7 +3643,8 @@ impl RoutingAcceptor {
     /// `RouterLink::Unlock` on a link locked for bypass.
     fn unlock_link_for_bypass(&mut self, link: &Link) -> Result<(), RoutingError> {
         if let Some(desc) = link.link_state {
-            self.memory()?.unlock_link_state(desc, link.side.is_a())?;
+            self.memory_for(link.link_id)?
+                .unlock_link_state(desc, link.side.is_a())?;
         }
         if let Some(state) = &link.local_state {
             state.borrow_mut().unlock(link.side.is_a());
@@ -2960,12 +3653,19 @@ impl RoutingAcceptor {
     }
 
     /// `RouterLink::FlushOtherSideIfWaiting` on a link: if the peer set its
-    /// waiting bit on the link state, wake it (a `FlushRouter` message, or a
-    /// forced flush of the local peer router).
+    /// waiting bit on the link state, wake it (a `FlushRouter` message over
+    /// the link the state lives in, or a forced flush of the local peer
+    /// router).
     fn flush_other_side_if_waiting(&mut self, link: &Link) -> Result<(), RoutingError> {
         if let Some(desc) = link.link_state {
-            if self.memory()?.reset_waiting_bit(desc, !link.side.is_a())? {
-                self.send_link_message(messages::encode_flush_router(link.sublink))?;
+            if self
+                .memory_for(link.link_id)?
+                .reset_waiting_bit(desc, !link.side.is_a())?
+            {
+                self.send_link_message_on(
+                    link.link_id,
+                    messages::encode_flush_router(link.sublink),
+                )?;
             }
             return Ok(());
         }
@@ -2982,12 +3682,15 @@ impl RoutingAcceptor {
 
     /// Deliver route closure over a released link: locally to the peer router
     /// (`AcceptRouteClosureFrom` with the link's type), or over the wire as
-    /// `RouteClosed`.
+    /// `RouteClosed` on the link's own NodeLink.
     fn deliver_route_closed(&mut self, link: &Link, len: u64) -> Result<(), RoutingError> {
         if let Some(peer) = link.local_peer {
             self.router_route_closed_local(peer, link.kind, len)
         } else {
-            self.send_link_message(messages::encode_route_closed(link.sublink, len))
+            self.send_link_message_on(
+                link.link_id,
+                messages::encode_route_closed(link.sublink, len),
+            )
         }
     }
 
@@ -3105,14 +3808,22 @@ impl RoutingAcceptor {
         }
 
         // Case 2: only one bridge router has a local outward peer. The bridge
-        // router whose outward peer is local initiates the bypass.
+        // router whose outward peer is local initiates the bypass. The new
+        // `RouterLinkState` is allocated from the memory of the link the
+        // `BypassPeerWithLink` message travels over (the other bridge router's
+        // remote outward link).
         if second_local_peer.is_none() {
-            let Some(link_state) = self.memory_mut()?.try_allocate_link_state()? else {
+            let remote_link_id = second_link.link_id;
+            let Some(link_state) = self
+                .memory_mut_for(remote_link_id)?
+                .try_allocate_link_state()?
+            else {
                 // The 64-byte pool is exhausted: lobby for more capacity and
                 // defer the bypass (the official retries asynchronously; no
                 // sealed court exhausts this pool — documented boundary).
                 self.request_block_capacity(
                     crate::ipcz::link_memory::ROUTER_LINK_STATE_SIZE as u32,
+                    remote_link_id,
                 )?;
                 return Ok(());
             };
@@ -3120,16 +3831,23 @@ impl RoutingAcceptor {
             // copies the `FragmentRef` (AddRef): the shared count becomes the
             // link's ref plus the ref transferred to the remote peer in the
             // `BypassPeerWithLink` descriptor.
-            self.memory()?.add_link_state_ref(link_state)?;
+            self.memory_for(remote_link_id)?
+                .add_link_state_ref(link_state)?;
             return self.start_bridge_bypass_from_local_peer(rid, link_state);
         } else if first_local_peer.is_none() {
-            let Some(link_state) = self.memory_mut()?.try_allocate_link_state()? else {
+            let remote_link_id = first_link.link_id;
+            let Some(link_state) = self
+                .memory_mut_for(remote_link_id)?
+                .try_allocate_link_state()?
+            else {
                 self.request_block_capacity(
                     crate::ipcz::link_memory::ROUTER_LINK_STATE_SIZE as u32,
+                    remote_link_id,
                 )?;
                 return Ok(());
             };
-            self.memory()?.add_link_state_ref(link_state)?;
+            self.memory_for(remote_link_id)?
+                .add_link_state_ref(link_state)?;
             return self.start_bridge_bypass_from_local_peer(second_bridge, link_state);
         }
 
@@ -3688,7 +4406,20 @@ impl RoutingAcceptor {
                     .is_some_and(|l| l.sublink == sublink);
             if on_outward {
                 if !router.inbound.set_final_sequence_length(sequence_length) {
-                    return Err(RoutingError::BadParcel("closure sequence regression"));
+                    // The official `AcceptRouteClosureFrom` ignores a second
+                    // closure whose length is at least the recorded final
+                    // length (a later-declared longer tail over another
+                    // sublink of the same route, e.g. the decaying link and
+                    // the bypass link closing in sequence); only a shorter
+                    // re-declaration is a protocol error.
+                    let ok = router
+                        .inbound
+                        .final_sequence_length()
+                        .is_some_and(|f| f <= sequence_length);
+                    if !ok {
+                        return Err(RoutingError::BadParcel("closure sequence regression"));
+                    }
+                    return Ok(());
                 }
                 router.peer_closed = true;
             } else if !router.outbound.set_final_sequence_length(sequence_length) {
@@ -4014,7 +4745,9 @@ impl RoutingAcceptor {
         if b.new_link_state_fragment.is_null() {
             return Err(RoutingError::BadParcel("bypass with null link state"));
         }
-        self.memory()?.fragment(b.new_link_state_fragment)?;
+        // The fragment lives in the memory of the link the message arrived on.
+        self.memory_for(link_id)?
+            .fragment(b.new_link_state_fragment)?;
 
         // The message targets the router owning the old sublink; a deactivated
         // sublink is silently ignored (the official `GetRouter` returns null).
@@ -4067,11 +4800,12 @@ impl RoutingAcceptor {
         }
 
         // The new link goes to the same node as the old one: tell the peer to
-        // stop proxying on the old sublink.
-        self.send_link_message(messages::encode_stop_proxying_to_local_peer(
-            old_sublink,
-            length_to_proxy_from_us,
-        ))?;
+        // stop proxying on the old sublink (over the link the message arrived
+        // on).
+        self.send_link_message_on(
+            link_id,
+            messages::encode_stop_proxying_to_local_peer(old_sublink, length_to_proxy_from_us),
+        )?;
 
         // Drain early parcels for the new sublink.
         if let Some(queued) = self.early_parcels.remove(&(link_id, b.new_sublink)) {
@@ -4262,19 +4996,22 @@ impl RoutingAcceptor {
         link_id: u64,
         mut payload: Vec<u8>,
     ) -> Result<(), RoutingError> {
-        if link_id == LINK_ID_DIRECT {
-            let direct = self
-                .direct
-                .as_mut()
-                .ok_or(RoutingError::Unexpected("direct link not established"))?;
-            set_message_sequence_number(&mut payload, direct.next_link_seq);
-            direct.next_link_seq += 1;
-            direct.channel.send(&payload, &[])?;
-            return Ok(());
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(RoutingError::Unexpected("unknown link id"))?;
+        set_message_sequence_number(&mut payload, link.next_link_seq);
+        link.next_link_seq += 1;
+        if std::env::var_os("MOJO_RS_TRACE").is_some() {
+            let decoded = messages::decode_message(&payload, 0);
+            eprintln!(
+                "[send_link_message_on] link={link_id} msg={:?}",
+                messages::short_message_name(
+                    &decoded.unwrap_or(messages::DecodedMessage::Unknown(255))
+                )
+            );
         }
-        set_message_sequence_number(&mut payload, self.next_link_seq);
-        self.next_link_seq += 1;
-        self.channel.send(&payload, &[])?;
+        link.channel.send(&payload, &[])?;
         Ok(())
     }
 
@@ -4286,56 +5023,74 @@ impl RoutingAcceptor {
         mut payload: Vec<u8>,
         fds: &[RawFd],
     ) -> Result<(), RoutingError> {
-        if link_id == LINK_ID_DIRECT {
-            let direct = self
-                .direct
-                .as_mut()
-                .ok_or(RoutingError::Unexpected("direct link not established"))?;
-            set_message_sequence_number(&mut payload, direct.next_link_seq);
-            direct.next_link_seq += 1;
-            direct.channel.send(&payload, fds)?;
-            return Ok(());
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(RoutingError::Unexpected("unknown link id"))?;
+        set_message_sequence_number(&mut payload, link.next_link_seq);
+        link.next_link_seq += 1;
+        if std::env::var_os("MOJO_RS_TRACE").is_some() {
+            let decoded = messages::decode_message(&payload, fds.len());
+            eprintln!(
+                "[send_link_message_with_fds_on] link={link_id} msg={:?} fds={}",
+                messages::short_message_name(
+                    &decoded.unwrap_or(messages::DecodedMessage::Unknown(255))
+                ),
+                fds.len()
+            );
         }
-        set_message_sequence_number(&mut payload, self.next_link_seq);
-        self.next_link_seq += 1;
-        self.channel.send(&payload, fds)?;
+        link.channel.send(&payload, fds)?;
         Ok(())
     }
 
-    /// Send a NodeLink message, assigning the per-link sequence number.
+    /// Send a NodeLink message on the broker link, assigning the per-link
+    /// sequence number.
     fn send_link_message(&mut self, mut payload: Vec<u8>) -> Result<(), RoutingError> {
-        set_message_sequence_number(&mut payload, self.next_link_seq);
-        self.next_link_seq += 1;
-        self.channel.send(&payload, &[])?;
+        let link = self
+            .links
+            .get_mut(&LINK_ID_BROKER)
+            .ok_or(RoutingError::Unexpected("broker link missing"))?;
+        set_message_sequence_number(&mut payload, link.next_link_seq);
+        link.next_link_seq += 1;
+        link.channel.send(&payload, &[])?;
         Ok(())
     }
 
-    /// Send a NodeLink message with attached descriptors (e.g. an
-    /// `AddBlockBuffer` carrying the shared buffer).
+    /// Send a NodeLink message with attached descriptors on the broker link
+    /// (e.g. an `AddBlockBuffer` carrying the shared buffer).
     fn send_link_message_with_fds(
         &mut self,
         mut payload: Vec<u8>,
         fds: &[RawFd],
     ) -> Result<(), RoutingError> {
-        set_message_sequence_number(&mut payload, self.next_link_seq);
-        self.next_link_seq += 1;
-        self.channel.send(&payload, fds)?;
+        let link = self
+            .links
+            .get_mut(&LINK_ID_BROKER)
+            .ok_or(RoutingError::Unexpected("broker link missing"))?;
+        set_message_sequence_number(&mut payload, link.next_link_seq);
+        link.next_link_seq += 1;
+        link.channel.send(&payload, fds)?;
         Ok(())
     }
 
     /// `NodeLinkMemory::RequestBlockCapacity`: lobby for a new block buffer of
-    /// `block_size`-byte blocks. Exactly one in-flight request per block size
-    /// (further requests while one is pending are folded into it, matching
-    /// `capacity_callbacks_`'s `need_new_request`); the request is routed
-    /// through `Node::AllocateSharedMemory`, which — because this node
-    /// connected as the allocation delegate (`IPCZ_CONNECT_NODE_TO_ALLOCATION_DELEGATE`
-    /// set by `Invitation::Accept` when local allocation is disabled) — sends
+    /// `block_size`-byte blocks. Exactly one in-flight request per (link,
+    /// block size) (further requests while one is pending are folded into it,
+    /// matching `capacity_callbacks_`'s `need_new_request`); the request is
+    /// routed through `Node::AllocateSharedMemory` on the NodeLink's own
+    /// channel — which, because this node connected as the allocation
+    /// delegate (`IPCZ_CONNECT_NODE_TO_ALLOCATION_DELEGATE` set by
+    /// `Invitation::Accept` when local allocation is disabled), sends
     /// `RequestMemory` to the broker.
-    fn request_block_capacity(&mut self, block_size: u32) -> Result<(), RoutingError> {
-        if self.capacity_pending.contains(&block_size) {
+    fn request_block_capacity(
+        &mut self,
+        block_size: u32,
+        link_id: u64,
+    ) -> Result<(), RoutingError> {
+        if self.capacity_pending.contains(&(link_id, block_size)) {
             return Ok(());
         }
-        self.capacity_pending.insert(block_size);
+        self.capacity_pending.insert((link_id, block_size));
         // `kMinBlockAllocatorCapacity` blocks per page, rounded up to whole
         // pages (`RequestBlockCapacity`'s `num_pages` computation).
         let min_buffer_size = (block_size as usize)
@@ -4347,46 +5102,53 @@ impl RoutingAcceptor {
         let buffer_size32 = u32::try_from(buffer_size)
             .map_err(|_| RoutingError::BadParcel("block buffer request exceeds u32 size"))?;
         self.pending_memory_requests
-            .entry(buffer_size32)
+            .entry((link_id, buffer_size32))
             .or_default()
             .push_back(PendingMemoryRequest {
                 buffer_size: buffer_size32,
                 block_size,
             });
-        self.send_link_message(messages::encode_request_memory(buffer_size32))
+        self.send_link_message_on(link_id, messages::encode_request_memory(buffer_size32))
     }
 
     /// `NodeLink::OnProvideMemory`: adopt the provided buffer, initialize its
     /// block allocator region, share it with the peer via `AddBlockBuffer`
     /// (transmitted BEFORE the local registration, matching the official
     /// share-then-register order), and complete the pending capacity request.
-    fn on_provide_memory(&mut self, size: u32, fd: OwnedFd) -> Result<(), RoutingError> {
+    /// `link_id` is the NodeLink the request was made on (the buffer id comes
+    /// from that link's own primary header).
+    fn on_provide_memory(
+        &mut self,
+        size: u32,
+        fd: OwnedFd,
+        link_id: u64,
+    ) -> Result<(), RoutingError> {
         let pending = self
             .pending_memory_requests
-            .get_mut(&size)
+            .get_mut(&(link_id, size))
             .and_then(VecDeque::pop_front)
             .ok_or(RoutingError::BadParcel(
                 "ProvideMemory without a pending request",
             ))?;
         if self
             .pending_memory_requests
-            .get(&size)
+            .get(&(link_id, size))
             .is_some_and(VecDeque::is_empty)
         {
-            self.pending_memory_requests.remove(&size);
+            self.pending_memory_requests.remove(&(link_id, size));
         }
         let block_size = pending.block_size;
         // Allocate the buffer id from the shared primary header, then share the
         // buffer with the peer before registering it locally.
-        let id = self.memory()?.allocate_new_buffer_id()?;
+        let id = self.memory_for(link_id)?.allocate_new_buffer_id()?;
         let dup = fd.try_dup()?;
         let payload = messages::encode_add_block_buffer(id, block_size, 0, size);
-        self.send_link_message_with_fds(payload, &[dup.as_raw_fd()])?;
-        self.memory_mut()?
+        self.send_link_message_with_fds_on(link_id, payload, &[dup.as_raw_fd()])?;
+        self.memory_mut_for(link_id)?
             .register_block_buffer(id, fd.into_raw_fd(), block_size)?;
         // The capacity request for this block size has completed; any further
         // requests may now start a fresh round trip.
-        self.capacity_pending.remove(&block_size);
+        self.capacity_pending.remove(&(link_id, block_size));
         Ok(())
     }
 
@@ -4395,7 +5157,7 @@ impl RoutingAcceptor {
     /// allocation *delegate* (not the provider), so the official broker never
     /// sends it `RequestMemory`; multi-node courts with a native broker will
     /// exercise this path.
-    fn on_request_memory(&mut self, size: u32) -> Result<(), RoutingError> {
+    fn on_request_memory(&mut self, size: u32, _link_id: u64) -> Result<(), RoutingError> {
         let _ = size;
         Err(RoutingError::Unsupported(
             MSG_ID_REQUEST_MEMORY,
@@ -4494,7 +5256,7 @@ impl RoutingAcceptor {
     /// sending, so in-flight routing messages are processed first).
     fn drain_available(&mut self) -> Result<(), RoutingError> {
         loop {
-            match self.channel.recv_available()? {
+            match self.channel_for(LINK_ID_BROKER)?.recv_available()? {
                 RecvResult::Message(m) => {
                     let decoded = messages::decode_message(&m.payload, m.fds.len())?;
                     self.dispatch(decoded, m.fds, LINK_ID_BROKER)?;
@@ -4551,7 +5313,8 @@ mod tests {
         let (_keep, fd) = fresh_buffer();
         let pair = socketpair().unwrap();
         let mut a = RoutingAcceptor::new(pair.a.as_raw_fd()).unwrap();
-        a.link_memory = Some(LinkMemory::adopt_primary(fd).unwrap());
+        a.links.get_mut(&LINK_ID_BROKER).unwrap().memory =
+            Some(LinkMemory::adopt_primary(fd).unwrap());
         a.broker_name = NodeName {
             high: 0x1111,
             low: 0x2222,

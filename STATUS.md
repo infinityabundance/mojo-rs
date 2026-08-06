@@ -463,6 +463,87 @@ manifest), `evidence/manifests/3node-<stamp>.json`, and the casefile
 preserved in the earlier forensic captures (`/tmp/3n-*.bin`, decoded in the
 casefile).
 
+### Phase 5 introduction court — broker + referrer A + referred B + introduced C, both mixed-language pairings
+
+The 4-node court (`scripts/run_4node_court.sh`) seals the introduction
+machinery (message ids 10–13) — the `EstablishLink` →
+`BypassPeerWithNewRemoteLink` path for `Router::BypassPeer` when the bypass
+target has NO direct link, which was the next-highest-value parity gate. The
+topology: broker + referrer A + referred B + introduced C, with all three
+broker links captured by man-in-the-middle relays. A creates (X, Y) locally
+and transfers Y through the a2b pipe (the WithLocalPeer path over the direct
+link); B re-transfers Y' through the b2c pipe with `proxy_peer_node_name` = A;
+C's new router calls `BypassPeer(A)`, finds no link, and sends
+`RequestIntroduction` to the broker; the broker sends `AcceptIntroduction` to
+both C (side A) and A (side B) with a transport + buffer pair; C adopts the
+new C↔A link and completes the bypass with `AcceptBypassLink` over it; the
+X↔Y'' "hello"/"world" round trip then crosses the new link. Both mixed
+pairings run: interop-c (native Rust C = `4node-acceptor`) and interop-a
+(native Rust A = `4node-referrer`). In each pairing the broker's AND the
+counterpart nodes' event streams are byte-identical to the all-official
+baseline, the native node verifies its exchange and exits 0, and the relayed
+broker-link wires are structurally identical (see the normalization note
+below).
+
+The native side implements, against the pinned ipcz sources: the wire layer
+for `RequestIntroduction`/`AcceptIntroduction`/`RejectIntroduction`/`BypassPeer`
+(with the packed `AcceptIntroduction` V0 layout — single-byte `link_side` /
+`remote_node_type` at offset 16, `remote_protocol_version` at 20, transport
+and memory driver objects — and the V1 `remote_features` OFFSET field, not
+the bitfield value), `router_bypass_peer` with the no-link fallback to
+`establish_link`, the `pending_introductions` queue, `on_accept_introduction`
+(transport + buffer adoption), `on_accept_bypass_link` with the
+`CanNodeRequestBypass` check, and the per-link memory/sub-link generalizations
+the multi-link graph requires (the bridge self-bypass on the c2b route
+migrates the transfer's arrival sublink; the introduced link carries
+`AcceptBypassLink`, `StopProxying`/`ProxyWillStop`, and the round trip). The
+16/16 golden wire tests pin the packed message encodings byte-identical to
+the official captures (`crates/mojo-rs-interop/testdata/ipcz/4node-*.bin`).
+
+Bugs found and fixed while sealing this court:
+
+* the transfer parcel's arrival sublink is NOT hard-codable: the c2b route's
+  bridge self-bypass (`maybe_start_bridge_bypass` after the initial portals
+  stabilize) migrates the route from sublink 1 to a fresh sublink before the
+  transfer arrives, so the transfer predicate matches the PORTAL handle type
+  on any sublink (the same fix re-sealed the 3-node native B);
+* the referrer's `connect_handshake` never set the broker link's
+  `remote_name` in the multi-link refactor's `links` map (the old
+  `remote_name_for` returned `self.broker_name`), so the referrer's
+  re-transfer descriptor carried `proxy_peer_node_name = {0,0}` and the
+  referred node never bypassed — the world round trip then stalled (this
+  regressed the sealed 3-node interop-a pairing and is fixed in
+  `connect_handshake`);
+* the pipe_a bridge-bypass stage-1 lock race is decided by the shared
+  `RouterLinkState` CAS, and the oracle acceptor deterministically wins only
+  because its side-B stable mark lands after the broker's ConnectReply
+  processing; the candidate reproduces that ordering by waiting until the
+  broker's side-A stable bit is observable in the shared memory before
+  marking (bounded; the broker always processes the ConnectReply);
+* the "world" reply may arrive over the a2b link through B's proxy when C
+  replies before its own bypass settles — the official `RecvPayload` is a
+  Mojo read and link-agnostic, so the candidate accepts the reply on
+  whichever link delivers it;
+* teardown closes tolerate a peer that already dropped the transport
+  (`CloseRoute` on a broken channel is not an error — the official driver's
+  `Transmit` failure is asynchronous).
+
+Documented nondeterminism (normalized, not hidden): the all-official baseline
+itself races on the pipe_a bridge-bypass exchange — the shared-state lock CAS
+between the broker and A decides the initiator of each stage, producing
+different message sequences with byte-identical event streams that converge
+on the same final sublink. The 4-node court's wire comparison therefore drops
+the exchange messages (`BypassPeerWithLink`/`FlushRouter`/
+`StopProxyingToLocalPeer`) and the ordinal/sequence prefixes on the broker↔A
+directions only; the fixed-point traffic (the `done`/closure on the final
+sublink) is still compared exactly. The 3-node court compares only the
+broker↔B directions, which are not affected. The normalization is named and
+documented in the runner and the receipt.
+
+Evidence: `evidence/4node/<stamp>/` (twelve event streams, eighteen wire
+captures, receipt), `evidence/manifests/4node-<stamp>.json`, the golden wire
+fixtures, and the casefile `courts/curated/phase5-multinode-court.md`.
+
 ### First differential parity seal — in-process system court (10 cases)
 The native candidate and the official oracle produce BYTE-IDENTICAL event
 streams for every case in `courts/system/`:
@@ -524,28 +605,30 @@ references to the oracle checkout. Evidence: `evidence/security/`.
 ## Not yet sealed (next gates)
 
 - Routing / port transfer (Phase 5): the remaining multi-node machinery —
-  `BypassPeer` OUTBOUND over a newly `EstablishLink`-ed link (the 3-node court
-  seals the case where the target link already exists; the
-  `EstablishLink` → `BypassPeerWithNewRemoteLink` path waits for a court that
-  forces the introduction), `BypassPeerWithNewLocalLink`, the broker-side
-  referral roles (the native as broker or referrer A: `ReferNonBroker`
-  receive, `NonBrokerReferralAccepted` send, `NodeConnectorForBrokerReferral`),
-  `RequestIntroduction`/`AcceptIntroduction`/`RejectIntroduction`,
-  `RequestIndirectIntroduction`, `ConnectFromBrokerToBroker`, node loss
+  `BypassPeerWithNewLocalLink`, the broker-side referral roles (the native as
+  broker or referrer of a further node: `NodeConnectorForBrokerReferral`, the
+  broker's `HandleIntroductionRequest`/`IntroduceRemoteNodes` serving a native
+  broker), `RejectIntroduction` and `RequestIndirectIntroduction` (ids 12–13;
+  id 10 `RequestIntroduction` and id 11 `AcceptIntroduction` are sealed by the
+  4-node court), `ConnectFromBrokerToBroker` (id 7), node loss
   (`RouteDisconnected`) beyond the single-link case, multi-node graphs beyond
-  the single referral (3+ non-brokers, node loss mid-referral), split/
-  multi-subparcel parcels, and the scheduler-dependent free-list reuse order
-  (only the interleaving with the peer's IO-thread releases differs —
-  normalized). The native routing acceptor currently seals the WithLocalPeer
+  a single referral chain (4+ non-brokers, node loss mid-referral),
+  split/multi-subparcel parcels, and the scheduler-dependent free-list reuse
+  order (only the interleaving with the peer's IO-thread releases differs —
+  normalized). The native routing acceptor now seals the WithLocalPeer
   transfer (both directions), the proxy serialization path, the
   acceptor-initiated bridge bypass (both directions), `StopProxying` teardown,
   closure propagation over a single NodeLink, the parcel-fragment allocator
   (memory court), the `AddBlockBuffer` receive side + cross-buffer fragment
   resolution (exhaustion court), the `RequestMemory`/`ProvideMemory`/
   `AddBlockBuffer` SEND side (bypass court), the `RouterLinkState` refcount
-  lifecycle, and the multi-node referral in BOTH mixed-language pairings
-  (broker + referrer A + referred B; the outbound `AcceptBypassLink` and the
-  referrer-side serialization sealed by the 3-node court).
+  lifecycle, the multi-node referral in BOTH mixed-language pairings (broker +
+  referrer A + referred B; the outbound `AcceptBypassLink` and the
+  referrer-side serialization sealed by the 3-node court), and the
+  introduction machinery (ids 10–11: `RequestIntroduction` /
+  `AcceptIntroduction` and the `EstablishLink` →
+  `BypassPeerWithNewRemoteLink` path with a 3-node graph, sealed by the 4-node
+  court in BOTH mixed-language pairings).
 - C ABI export (Phase 6), mojom toolchain and bindings (Phase 7),
   concurrency/stress/fuzz sealing, other platforms.
 
@@ -580,6 +663,12 @@ written reason here.
   broker + official referrer A + native referred B; referral handshake,
   broker/referrer link adoption, outbound `AcceptBypassLink`; byte-identical
   broker AND A event streams; four structurally identical wire directions).
+- `scripts/run_4node_court.sh` — Phase 5 introduction court (official broker
+  + referrer A + referred B + introduced C in BOTH mixed-language pairings;
+  `RequestIntroduction`/`AcceptIntroduction`/`AcceptBypassLink` over the
+  introduced link; byte-identical broker/counterpart event streams; relayed
+  broker-link wires structurally identical modulo the documented pipe_a
+  bridge-bypass race).
 - `scripts/run_court.sh verify <manifest>` — receipt invalidation check.
 - One-command reproduction from clean Docker images:
   `scripts/compose_project.sh build && scripts/run_court.sh system`

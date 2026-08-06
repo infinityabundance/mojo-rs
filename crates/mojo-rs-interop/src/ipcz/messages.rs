@@ -10,7 +10,7 @@
 use crate::ipcz::wire::{MessageBuilder, MessageHeader, WireError};
 
 /// A 128-bit ipcz node name (broker-assigned, unique per node).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct NodeName {
     /// High 64 bits.
     pub high: u64,
@@ -506,6 +506,39 @@ pub struct MemoryRequest {
     pub size: u32,
 }
 
+/// A short name for a decoded message, for diagnostics.
+pub fn short_message_name(m: &DecodedMessage) -> &'static str {
+    match m {
+        DecodedMessage::ConnectFromBrokerToNonBroker(_) => "Connect",
+        DecodedMessage::ConnectFromNonBrokerToBroker(_) => "ConnectReply",
+        DecodedMessage::ReferNonBroker(_) => "ReferNonBroker",
+        DecodedMessage::ConnectToReferredBroker(_) => "ConnectToReferredBroker",
+        DecodedMessage::ConnectToReferredNonBroker(_) => "ConnectToReferredNonBroker",
+        DecodedMessage::NonBrokerReferralAccepted(_) => "NonBrokerReferralAccepted",
+        DecodedMessage::NonBrokerReferralRejected(_) => "NonBrokerReferralRejected",
+        DecodedMessage::ConnectFromBrokerToBroker(_) => "ConnectFromBrokerToBroker",
+        DecodedMessage::RequestIntroduction(_) => "RequestIntroduction",
+        DecodedMessage::AcceptIntroduction(_) => "AcceptIntroduction",
+        DecodedMessage::RejectIntroduction(_) => "RejectIntroduction",
+        DecodedMessage::RequestIndirectIntroduction(_) => "RequestIndirectIntroduction",
+        DecodedMessage::AddBlockBuffer(_) => "AddBlockBuffer",
+        DecodedMessage::AcceptParcel(_) => "AcceptParcel",
+        DecodedMessage::AcceptParcelDriverObjects(_) => "AcceptParcelDriverObjects",
+        DecodedMessage::RouteClosed(_) => "RouteClosed",
+        DecodedMessage::RouteDisconnected(_) => "RouteDisconnected",
+        DecodedMessage::BypassPeer(_) => "BypassPeer",
+        DecodedMessage::AcceptBypassLink(_) => "AcceptBypassLink",
+        DecodedMessage::StopProxying(_) => "StopProxying",
+        DecodedMessage::ProxyWillStop(_) => "ProxyWillStop",
+        DecodedMessage::BypassPeerWithLink(_) => "BypassPeerWithLink",
+        DecodedMessage::StopProxyingToLocalPeer(_) => "StopProxyingToLocalPeer",
+        DecodedMessage::FlushRouter(_) => "FlushRouter",
+        DecodedMessage::RequestMemory(_) => "RequestMemory",
+        DecodedMessage::ProvideMemory(_) => "ProvideMemory",
+        DecodedMessage::Unknown(_) => "Unknown",
+    }
+}
+
 /// A decoded node message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedMessage {
@@ -955,20 +988,26 @@ pub fn decode_message(payload: &[u8], num_fds: usize) -> Result<DecodedMessage, 
             DecodedMessage::RequestIntroduction(RequestIntroduction { name: f_node(0)? })
         }
         MSG_ID_ACCEPT_INTRODUCTION => {
-            // V0: name(16) + link_side(4) + remote_node_type(4) + padding(2)
-            // + 2 implicit + remote_protocol_version(4) + transport(4) +
-            // memory(4).
-            if fields_end < fields + 40 {
+            // V0 is packed (`#pragma pack(push, 1)` in message.h): name(16) +
+            // link_side u8 + remote_node_type u8 + padding(2) +
+            // remote_protocol_version(4) + transport(4) + memory(4) = 32
+            // bytes. The single-byte enum fields were verified against the
+            // official 4-node capture (link_side kB = 0x01, kNormal = 0x01
+            // packed into one u32).
+            if fields_end < fields + 32 {
                 return Err(WireError::ShortParams);
             }
             let driver_objects = read_driver_objects(payload, &hdr, num_fds)?;
+            let side_type = f_u32(16)?;
+            let link_side = (side_type & 0xff) as u32;
+            let remote_node_type = ((side_type >> 8) & 0xff) as u32;
             DecodedMessage::AcceptIntroduction(AcceptIntroduction {
                 name: f_node(0)?,
-                link_side: f_u32(16)?,
-                remote_node_type: f_u32(20)?,
-                remote_protocol_version: f_u32(28)?,
-                transport_index: f_u32(32)?,
-                memory_index: f_u32(36)?,
+                link_side,
+                remote_node_type,
+                remote_protocol_version: f_u32(20)?,
+                transport_index: f_u32(24)?,
+                memory_index: f_u32(28)?,
                 driver_objects,
             })
         }
@@ -1262,6 +1301,74 @@ pub fn encode_request_introduction(name: NodeName) -> Vec<u8> {
     let mut fields = Vec::with_capacity(16);
     fields.extend_from_slice(&name.high.to_le_bytes());
     fields.extend_from_slice(&name.low.to_le_bytes());
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `AcceptIntroduction` (id 11): the broker introduces one node to
+/// another. V0 (packed): `{name NodeName, link_side u8, remote_node_type u8,
+/// padding u16, remote_protocol_version u32, transport u32, memory u32}` +
+/// V1 `remote_features u32`; the features bitfield array follows the params,
+/// then the two driver objects (the transport and the link memory, in that
+/// order, indices 0 and 1). The byte layout is pinned by the golden test
+/// against the official 4-node capture.
+pub fn encode_accept_introduction(
+    name: NodeName,
+    link_side: u8,
+    remote_node_type: u8,
+    remote_protocol_version: u32,
+    transport_object: Vec<u8>,
+    memory_object: Vec<u8>,
+) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_ACCEPT_INTRODUCTION);
+    let mut fields = Vec::with_capacity(40);
+    fields.extend_from_slice(&name.high.to_le_bytes());
+    fields.extend_from_slice(&name.low.to_le_bytes());
+    fields.push(link_side);
+    fields.push(remote_node_type);
+    fields.extend_from_slice(&[0u8; 2]); // padding
+    fields.extend_from_slice(&remote_protocol_version.to_le_bytes());
+    fields.extend_from_slice(&0u32.to_le_bytes()); // transport driver object index
+    fields.extend_from_slice(&1u32.to_le_bytes()); // memory driver object index
+    // V1 remote_features: the OFFSET of the features array (which follows the
+    // params, exactly like the Connect reply's features offset). The params
+    // span StructHeader(8) + V0(32) + V1(4), padded to 48 bytes.
+    fields.extend_from_slice(&0u32.to_le_bytes()); // V1 placeholder
+    let features_off = (crate::ipcz::wire::MESSAGE_HEADER_SIZE
+        + crate::ipcz::wire::align8(8 + fields.len())) as u32;
+    let v1 = fields.len() - 4;
+    fields[v1..v1 + 4].copy_from_slice(&features_off.to_le_bytes());
+    b.append_params(&fields);
+    // The features array is always allocated (`Features::Serialize`); this
+    // epoch's single zero bitfield occupies 8 bytes.
+    b.append_array(&0u64.to_le_bytes(), 1);
+    b.append_driver_objects(&[transport_object, memory_object]);
+    b.build()
+}
+
+/// Encode `RejectIntroduction` (id 12): V0 `{name NodeName}`.
+pub fn encode_reject_introduction(name: NodeName) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_REJECT_INTRODUCTION);
+    let mut fields = Vec::with_capacity(16);
+    fields.extend_from_slice(&name.high.to_le_bytes());
+    fields.extend_from_slice(&name.low.to_le_bytes());
+    b.append_params(&fields);
+    b.build()
+}
+
+/// Encode `RequestIndirectIntroduction` (id 13): V0 `{source_node NodeName,
+/// target_node NodeName}` (a broker on side B of a broker-to-broker link
+/// asking the side-A broker to perform an introduction).
+pub fn encode_request_indirect_introduction(
+    source_node: NodeName,
+    target_node: NodeName,
+) -> Vec<u8> {
+    let mut b = MessageBuilder::new(MSG_ID_REQUEST_INDIRECT_INTRODUCTION);
+    let mut fields = Vec::with_capacity(32);
+    fields.extend_from_slice(&source_node.high.to_le_bytes());
+    fields.extend_from_slice(&source_node.low.to_le_bytes());
+    fields.extend_from_slice(&target_node.high.to_le_bytes());
+    fields.extend_from_slice(&target_node.low.to_le_bytes());
     b.append_params(&fields);
     b.build()
 }
@@ -1955,5 +2062,86 @@ mod tests {
         let low = u64::from_le_bytes(obj[24..32].try_into().unwrap());
         let high = u64::from_le_bytes(obj[32..40].try_into().unwrap());
         assert!(low != 0 && high != 0, "GUID must be non-zero");
+    }
+
+    /// Extract the `AcceptIntroduction` payload (message index `mi`) from a
+    /// 4-node capture and normalize the node-name GUID and the node sequence
+    /// number (both nondeterministic across runs).
+    fn captured_accept_introduction(
+        fixture_name: &str,
+        mi: usize,
+    ) -> (Vec<u8>, AcceptIntroduction) {
+        let data = fixture(fixture_name);
+        let msgs = parse_stream(&data).unwrap();
+        let mut payload = msgs[mi].payload.clone();
+        let decoded = match decode_message(&payload, msgs[mi].num_handles as usize) {
+            Ok(DecodedMessage::AcceptIntroduction(a)) => a,
+            other => panic!("expected AcceptIntroduction, got {other:?}"),
+        };
+        // Zero the name (payload offset 32 = header 24 + fields 8) and the
+        // sequence number (payload offset 8).
+        payload[32..48].fill(0);
+        payload[8..16].fill(0);
+        (payload, decoded)
+    }
+
+    #[test]
+    fn accept_introduction_decode_matches_official_capture() {
+        // broker->A (side B of the introduced link; C is the peer).
+        let (_payload, a) = captured_accept_introduction("4node-broker-to-a.bin", 4);
+        assert_eq!(a.link_side, 1, "side B");
+        assert_eq!(a.remote_node_type, 1, "kNormal");
+        assert_eq!(a.remote_protocol_version, 0);
+        assert_eq!(a.transport_index, 0);
+        assert_eq!(a.memory_index, 1);
+        assert_eq!(a.driver_objects.len(), 2);
+        assert_eq!(a.driver_objects[0].first_fd, 0);
+        assert_eq!(a.driver_objects[1].first_fd, 1);
+        // The transport driver object is the 16-byte Transport serialization.
+        assert_eq!(&a.driver_objects[0].data[0..4], &8u32.to_le_bytes());
+        assert_eq!(&a.driver_objects[0].data[4..8], &0u32.to_le_bytes()); // kTransport
+
+        // broker->C (side A of the introduced link; A is the peer).
+        let (_payload, c) = captured_accept_introduction("4node-broker-to-c.bin", 1);
+        assert_eq!(c.link_side, 0, "side A");
+        assert_eq!(c.remote_node_type, 1, "kNormal");
+        assert_eq!(c.remote_protocol_version, 0);
+        assert_eq!(c.transport_index, 0);
+        assert_eq!(c.memory_index, 1);
+    }
+
+    #[test]
+    fn accept_introduction_encode_matches_official_capture() {
+        // Re-encode the broker->A capture byte-identically (modulo the name
+        // GUID and the sequence number): the packed V0 layout, the V1 features
+        // array, and the two driver objects must all reproduce exactly.
+        let (captured, a) = captured_accept_introduction("4node-broker-to-a.bin", 4);
+        let mut encoded = encode_accept_introduction(
+            NodeName { high: 0, low: 0 },
+            a.link_side as u8,
+            a.remote_node_type as u8,
+            a.remote_protocol_version,
+            a.driver_objects[0].data.clone(),
+            a.driver_objects[1].data.clone(),
+        );
+        // Normalize the sequence number (the name is already zeroed).
+        encoded[8..16].fill(0);
+        assert_eq!(
+            encoded, captured,
+            "AcceptIntroduction must be byte-identical (modulo name + seq)"
+        );
+    }
+
+    #[test]
+    fn request_introduction_encode_matches_official_capture() {
+        // C's RequestIntroduction over its broker link (the only NodeLink
+        // message before the introduction completes).
+        let data = fixture("4node-c-to-broker.bin");
+        let msgs = parse_stream(&data).unwrap();
+        let mut captured = msgs[1].payload.clone();
+        let encoded = encode_request_introduction(NodeName { high: 0, low: 0 });
+        captured[8..16].fill(0); // sequence number
+        captured[32..48].fill(0); // name GUID
+        assert_eq!(encoded, captured, "RequestIntroduction layout mismatch");
     }
 }

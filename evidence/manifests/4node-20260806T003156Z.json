@@ -1,0 +1,142 @@
+{
+  "a_events_identical_interop_c": true,
+  "artifacts": {
+    "baseline/a.events": {
+      "bytes": 970,
+      "sha256": "9182d19dbafce529864bc4efeb936411a4d66f50bbd09458824c5cf22ce1b4be"
+    },
+    "baseline/b.events": {
+      "bytes": 807,
+      "sha256": "8864b77085d62e88ad6813b3e7f7e8fb18b81db73505f848998dda356db1261a"
+    },
+    "baseline/broker.events": {
+      "bytes": 473,
+      "sha256": "29f2c53616e770fa62e95610810a0a8a02a3cae2e7d56dd01b1fb2d271eff287"
+    },
+    "baseline/c.events": {
+      "bytes": 698,
+      "sha256": "49cc21f19b990d3ba0278f12bcb68a3eff34eeee8df92e2898dac5d33b19573f"
+    },
+    "interop-a/a.events": {
+      "bytes": 996,
+      "sha256": "05441ba9c3e2cfc7502749806e91ad43f659e326296304fe50277a0b24866336"
+    },
+    "interop-a/b.events": {
+      "bytes": 807,
+      "sha256": "8864b77085d62e88ad6813b3e7f7e8fb18b81db73505f848998dda356db1261a"
+    },
+    "interop-a/broker.events": {
+      "bytes": 473,
+      "sha256": "29f2c53616e770fa62e95610810a0a8a02a3cae2e7d56dd01b1fb2d271eff287"
+    },
+    "interop-a/c.events": {
+      "bytes": 698,
+      "sha256": "49cc21f19b990d3ba0278f12bcb68a3eff34eeee8df92e2898dac5d33b19573f"
+    },
+    "interop-c/a.events": {
+      "bytes": 970,
+      "sha256": "9182d19dbafce529864bc4efeb936411a4d66f50bbd09458824c5cf22ce1b4be"
+    },
+    "interop-c/b.events": {
+      "bytes": 807,
+      "sha256": "8864b77085d62e88ad6813b3e7f7e8fb18b81db73505f848998dda356db1261a"
+    },
+    "interop-c/broker.events": {
+      "bytes": 473,
+      "sha256": "29f2c53616e770fa62e95610810a0a8a02a3cae2e7d56dd01b1fb2d271eff287"
+    },
+    "interop-c/c.events": {
+      "bytes": 729,
+      "sha256": "ddb1fca7d44b6dc634080be53f5192ed218e89cc9c527623846d1a515773d18c"
+    }
+  },
+  "b_events_identical_interop_a": true,
+  "b_events_identical_interop_c": true,
+  "baseline": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "c_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0,
+    "relay3_exit": 0
+  },
+  "broker_events_identical_interop_a": true,
+  "broker_events_identical_interop_c": true,
+  "c_events_identical_interop_a": true,
+  "court": "4node",
+  "generated_at_utc": "20260806T003156Z",
+  "inputs": {
+    "native_4node_acceptor_binary": "3d728f1173746d59d2aa652e30cd081fe6f3e8fd25e98fbd1cfe3eba8b1a448c",
+    "native_4node_referrer_binary": "58358cfd547436ae683b10f0b3dd91007835ccc210cd220136d8f7dd219fb8e6",
+    "oracle_driver_binary": "9e115db26fd038f29c7ade16b9bbd212ac85573f49c8e9942eb8bf1f51873801",
+    "wire_dump_binary": "4d45119ee034d500d7d20e9c2a68e18f5a5c5f79708b92ef424b748c83feb95a",
+    "wire_relay_binary": "069e0c43a0825f17f0415094cde86ae80f97aaca826a287f0e480b97e0251caf"
+  },
+  "interop-a": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "c_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0,
+    "relay3_exit": 0
+  },
+  "interop-c": {
+    "a_exit": 0,
+    "b_exit": 0,
+    "broker_exit": 0,
+    "c_exit": 0,
+    "relay1_exit": 0,
+    "relay2_exit": 0,
+    "relay3_exit": 0
+  },
+  "schema_version": 1,
+  "status": "pass",
+  "wire_comparison_interop_a": {
+    "a-to-broker": {
+      "identical": true
+    },
+    "b-to-broker": {
+      "identical": true
+    },
+    "broker-to-a": {
+      "identical": true
+    },
+    "broker-to-b": {
+      "identical": true
+    },
+    "broker-to-c": {
+      "identical": true
+    },
+    "c-to-broker": {
+      "identical": true
+    }
+  },
+  "wire_comparison_interop_c": {
+    "a-to-broker": {
+      "identical": true
+    },
+    "b-to-broker": {
+      "identical": true
+    },
+    "broker-to-a": {
+      "identical": true
+    },
+    "broker-to-b": {
+      "identical": true
+    },
+    "broker-to-c": {
+      "identical": true
+    },
+    "c-to-broker": {
+      "identical": true
+    }
+  },
+  "wire_identical_interop_a": true,
+  "wire_identical_interop_c": true,
+  "wire_normalization": {
+    "node_name_guids": "32-hex GUIDs -> <name>",
+    "pipe_a_bridge_bypass_exchange": "dropped on broker<->A directions: the all-official baseline races on the bypass initiator (shared RouterLinkState lock CAS between broker and A); both variants produce byte-identical event streams and converge on the same final sublink (13), whose done/closure traffic is still compared"
+  }
+}
